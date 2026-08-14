@@ -149,6 +149,26 @@ curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai/actions/workflows/rele
 
 Full details, guards, and what breaks: `RELEASING.md`.
 
+## Skills
+
+### exposure-audit
+
+`.claude/skills/exposure-audit/` — audits what this machine and these repos are
+actually exposed to: live API keys in cloud-synced folders, secrets in git
+history, unauthenticated local services, abandoned deployments still holding
+environment variables.
+
+Run it **before making a repo public, before handing the project to a
+collaborator, and after shutting anything down**. It reports and never fixes:
+revoking a key is the owner's call and some of it is irreversible.
+
+It never prints a secret value — a name and a 7-character prefix is enough to
+prove a key is real. Keep that rule when acting on its output; do not paste a
+full key into chat, an issue, or a commit to "confirm" a finding.
+
+`NOT RUN` is a real verdict. A check that did not complete must be reported as
+incomplete, never rounded up to a pass.
+
 ## Architecture Notes
 - **Don't touch `freeco-cli`** — user is actively building the interactive CLI
 - `KernelHandle` trait avoids circular deps between runtime and kernel
