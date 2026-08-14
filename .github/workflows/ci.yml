@@ -68,6 +68,16 @@ jobs:
       # test broke. Step summaries are readable by anyone who can see the
       # check, so the failing test names travel with the result.
       - name: cargo test --workspace
+        env:
+          # Link fewer binaries at once.
+          #
+          # ld died with "signal 7 [Bus error], core dumped" on ubuntu while
+          # macOS and Windows passed: the workspace produces a lot of large
+          # test binaries, and linking them in parallel exhausts the runner's
+          # memory. This is a machine limit, not a code fault, so the fix is
+          # to stop asking for more memory than the runner has rather than to
+          # weaken the tests.
+          CARGO_BUILD_JOBS: 2
         run: |
           set -o pipefail
           cargo test --workspace 2>&1 | tee test-output.txt
