@@ -61,6 +61,7 @@ jobs:
       PROJECT_RELEASED_OPTION: ${{ vars.PROJECT_RELEASED_OPTION }}
       PRIVATE_DISTRIBUTION_READY: ${{ vars.PRIVATE_DISTRIBUTION_READY }}
       COUNSEL_APPROVAL_REFERENCE: ${{ vars.COUNSEL_APPROVAL_REFERENCE }}
+      COMMERCIAL_DISTRIBUTION: ${{ vars.COMMERCIAL_DISTRIBUTION }}
     steps:
       - name: Require release and private-distribution prerequisites
         run: |
@@ -72,21 +73,36 @@ jobs:
             echo "::error::RELEASE_TOKEN secret is not set. Add a PAT with contents:write + workflow scope so the pushed tag can trigger the installer build."
             exit 1
           }
-          test "$PRIVATE_DISTRIBUTION_READY" = "true" || {
-            echo "::error::Set repository variable PRIVATE_DISTRIBUTION_READY=true after verifying private repository, release, and package access."
-            exit 1
-          }
-          test -n "$COUNSEL_APPROVAL_REFERENCE" || {
-            echo "::error::Set repository variable COUNSEL_APPROVAL_REFERENCE after counsel approves the commercial distribution."
-            exit 1
-          }
+          # The checks below govern COMMERCIAL DISTRIBUTION, not building.
+          #
+          # They were written for shipping to paying members, and applied to
+          # every release they also blocked internal builds and security
+          # patches — which is how a legal review ended up standing between the
+          # team and testing their own software. They now run only when
+          # distribution is actually intended.
+          #
+          # Set repository variable COMMERCIAL_DISTRIBUTION=true before the
+          # first release to anyone outside the team. Leaving it unset builds
+          # internally and publishes nothing to members.
+          if [ "$COMMERCIAL_DISTRIBUTION" = "true" ]; then
+            test "$PRIVATE_DISTRIBUTION_READY" = "true" || {
+              echo "::error::Set repository variable PRIVATE_DISTRIBUTION_READY=true after verifying private repository, release, and package access."
+              exit 1
+            }
+            test -n "$COUNSEL_APPROVAL_REFERENCE" || {
+              echo "::error::Set repository variable COUNSEL_APPROVAL_REFERENCE after counsel approves the commercial distribution."
+              exit 1
+            }
 
-          export GH_TOKEN="$RELEASE_TOKEN"
-          repository_private="$(gh api "/repos/$REPOSITORY" --jq '.private')"
-          test "$repository_private" = "true" || {
-            echo "::error::The repository must be private before a commercial release."
-            exit 1
-          }
+            export GH_TOKEN="$RELEASE_TOKEN"
+            repository_private="$(gh api "/repos/$REPOSITORY" --jq '.private')"
+            test "$repository_private" = "true" || {
+              echo "::error::The repository must be private before a commercial release."
+              exit 1
+            }
+          else
+            echo "COMMERCIAL_DISTRIBUTION is not set - building an internal release. Distribution prerequisites are not checked."
+          fi
           # The first Docker publish creates the package. release.yml checks
           # visibility after that publish, so an initial commercial release is
           # not blocked by a package that does not exist yet.
