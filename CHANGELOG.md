@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The release build now honours the same distribution-intent flag as the
+  release preparation. v0.9.6 was tagged and then built nothing, because only
+  half the gate had been made conditional.
+
 ## [0.9.6] - 2026-08-15
 
 ### Changed
