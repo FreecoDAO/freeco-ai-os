@@ -11,14 +11,42 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Which platforms to test on, decided per event.
+  #
+  # The full matrix on every pull request exhausted the account's Actions
+  # allowance in a day: macOS bills at ten times Linux, so 100 minutes of
+  # macOS consumed half the monthly quota and every job then failed instantly
+  # with no steps, which reads exactly like a broken workflow file.
+  #
+  # Ordinary pull requests get Linux. Pushes to main and release-labelled
+  # pull requests get all three, because that is where the platform-specific
+  # failures matter - the bind-mount symlink bypass was caught only by macOS.
+  platforms:
+    name: Select platforms
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] ||              [ "${{ contains(github.event.pull_request.labels.*.name, 'release') }}" = "true" ]; then
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+            echo "full matrix"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            echo "linux only"
+          fi
+
   # ── Rust library crates (all 3 platforms) ──────────────────────────────────
   check:
     name: Check / ${{ matrix.os }}
+    needs: platforms
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -39,11 +67,12 @@ jobs:
 
   test:
     name: Test / ${{ matrix.os }}
+    needs: platforms
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(needs.platforms.outputs.os) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
