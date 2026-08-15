@@ -1,6 +1,6 @@
 # FreEco.ai Roadmap & verified status
 
-_Last verified: **2026-08-15** against this repository's `v0.9.6` tag, the
+_Last verified: **2026-08-15** against this repository's `v0.9.7` tag, the
 running daemon on this machine, and the live OpenRouter model list._
 
 Every claim below was checked against something that can disagree with it — a
@@ -81,7 +81,7 @@ recorded as such.
 - ✅ FreEco.ai sandbox and distribution naming with safe legacy configuration
   compatibility and per-workspace reusable-container isolation.
 
-## Unreleased
+## Shipped in v0.9.7
 
 - ✅ Release builds produce artifacts for internal releases. v0.9.6 was tagged
   and built nothing, because `prepare-release.yml` skipped the
@@ -94,6 +94,8 @@ recorded as such.
   in a day (macOS bills at ten times Linux), after which every job failed
   instantly with no steps — indistinguishable from a broken workflow file.
   Pushes to `main` and release-labelled pull requests still run all three.
+
+## Unreleased
 
 ## Partial — do not describe these as done
 

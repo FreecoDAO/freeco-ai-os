@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-08-15
+
 ### Fixed
 
 - The release build now honours the same distribution-intent flag as the
