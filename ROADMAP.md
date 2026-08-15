@@ -97,6 +97,12 @@ recorded as such.
 
 ## Unreleased
 
+- ✅ Desktop installers build for every platform in this repository. The
+  updater signing key is generated and held here, instead of pointing at a
+  private half that only the old repository had.
+- ✅ Release artifacts build without a commercial-distribution review, so
+  internal and security releases are not gated on counsel sign-off.
+
 ## Partial — do not describe these as done
 
 - ⚠️ **Unified inbox and contacts (CRM).** The tables exist

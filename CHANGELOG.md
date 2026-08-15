@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS desktop builds no longer fail on a missing updater key. The config
+  carried a public key whose private half lived only in the old repository,
+  so Tauri was asked to sign with a key that was not there. Both halves are
+  now generated and held here.
+- Docker image build no longer fails on a yanked `trivy-action` version.
+
 ## [0.9.7] - 2026-08-15
 
 ### Fixed
