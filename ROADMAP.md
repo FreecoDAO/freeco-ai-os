@@ -83,6 +83,18 @@ recorded as such.
 
 ## Unreleased
 
+- ✅ Release builds produce artifacts for internal releases. v0.9.6 was tagged
+  and built nothing, because `prepare-release.yml` skipped the
+  commercial-distribution checks while `release.yml` still enforced them —
+  only half the gate had been made conditional. Both halves now read
+  `COMMERCIAL_DISTRIBUTION`, so a tag without it builds and publishes
+  normally.
+- ✅ CI selects test platforms per event rather than always running three. The
+  full matrix on every pull request exhausted the account's Actions allowance
+  in a day (macOS bills at ten times Linux), after which every job failed
+  instantly with no steps — indistinguishable from a broken workflow file.
+  Pushes to `main` and release-labelled pull requests still run all three.
+
 ## Partial — do not describe these as done
 
 - ⚠️ **Unified inbox and contacts (CRM).** The tables exist
