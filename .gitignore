@@ -53,3 +53,9 @@ scripts/deploy-remote.sh
 
 # Build/packaging output
 dist/
+
+# Skills are shared, not local settings: they must travel with the repo so
+# every agent working here gets them. The rest of .claude/ stays ignored
+# because it holds per-machine state.
+!.claude/skills/
+!.claude/skills/**
