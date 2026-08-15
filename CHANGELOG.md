@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   portable launchers, WhatsApp gateway integration, and environment variables.
 
 ### Fixed
+- Release pipeline runs internally again: distribution prerequisites now apply
+  only when COMMERCIAL_DISTRIBUTION is set, so builds and security patches are
+  not blocked by a commercial-distribution review.
 - Blocked bind mounts could be bypassed with a symlink. `validate_bind_mount`
   resolved the candidate path but compared it against the unresolved blocked
   path, so on any system where a blocked directory is reached through a symlink
