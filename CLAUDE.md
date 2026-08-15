@@ -169,6 +169,17 @@ full key into chat, an issue, or a commit to "confirm" a finding.
 `NOT RUN` is a real verdict. A check that did not complete must be reported as
 incomplete, never rounded up to a pass.
 
+### karpathy-guidelines
+
+`.claude/skills/karpathy-guidelines/` — behavioural guidelines that cut the
+mistakes LLMs make when coding: overcomplication, changes wider than the task,
+assumptions left unstated, success criteria nobody can check.
+
+Apply it when writing, reviewing or refactoring here. The rules that matter
+most on this codebase, judging by what has actually gone wrong: make the
+change surgical rather than sweeping, say the assumption out loud instead of
+picking silently, and define what "working" means before claiming it.
+
 ## Architecture Notes
 - **Don't touch `freeco-cli`** — user is actively building the interactive CLI
 - `KernelHandle` trait avoids circular deps between runtime and kernel
