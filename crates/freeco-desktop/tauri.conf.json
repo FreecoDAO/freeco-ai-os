@@ -13,7 +13,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5RkVFRDQ0Q0E5RTk0OTAKUldTUWxKN0tSTzMreVFEYTEzajNpcyt2K1hkSUdvNk42MW91aVp4RU9yV0d5Z3luaWFBMm1oUHUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVCNDBCNDM4NEUzMTg4QjcKUldTM2lERk9PTFJBNis0VFBZc2NmR1NGc3ZXYStsWFRocitLamJOb2Q4OUwwNlh4VkRKS1FJZzQK",
       "endpoints": [
         "https://github.com/FreecoDAO/freeco-ai/releases/latest/download/latest.json"
       ],
