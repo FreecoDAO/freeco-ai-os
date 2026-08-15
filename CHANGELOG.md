@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-15
+
 ### Changed
 
 - Releases are prepared only when a merged PR has the `release` label; the

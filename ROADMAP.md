@@ -1,6 +1,6 @@
 # FreEco.ai Roadmap & verified status
 
-_Last verified: **2026-08-12** against this repository's `v0.9.5` tag, the
+_Last verified: **2026-08-15** against this repository's `v0.9.6` tag, the
 running daemon on this machine, and the live OpenRouter model list._
 
 Every claim below was checked against something that can disagree with it — a
@@ -73,13 +73,15 @@ recorded as such.
   settings: provider, model, output-token limit, temperature, API-key
   environment variable, and provider base URL.
 
-## Unreleased
+## Shipped in v0.9.6
 
-- 🟨 Label-driven release preparation that validates private-distribution
+- ✅ Label-driven release preparation that validates private-distribution
   prerequisites, creates release metadata, tags the commit, and triggers the
   artifact build without manual version or tag changes.
-- 🟨 FreEco.ai sandbox and distribution naming with safe legacy configuration
+- ✅ FreEco.ai sandbox and distribution naming with safe legacy configuration
   compatibility and per-workspace reusable-container isolation.
+
+## Unreleased
 
 ## Partial — do not describe these as done
 
