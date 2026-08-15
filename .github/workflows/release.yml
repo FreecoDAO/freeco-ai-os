@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   PRIVATE_DISTRIBUTION_READY: ${{ vars.PRIVATE_DISTRIBUTION_READY }}
   COUNSEL_APPROVAL_REFERENCE: ${{ vars.COUNSEL_APPROVAL_REFERENCE }}
+  COMMERCIAL_DISTRIBUTION: ${{ vars.COMMERCIAL_DISTRIBUTION }}
 
 jobs:
   verify-release:
@@ -27,19 +28,30 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$PRIVATE_DISTRIBUTION_READY" = "true" || {
-            echo "::error::PRIVATE_DISTRIBUTION_READY must be true before a release can publish."
-            exit 1
-          }
-          test -n "$COUNSEL_APPROVAL_REFERENCE" || {
-            echo "::error::COUNSEL_APPROVAL_REFERENCE must be configured before a release can publish."
-            exit 1
-          }
-          repository_private="$(gh api "/repos/$REPOSITORY" --jq '.private')"
-          test "$repository_private" = "true" || {
-            echo "::error::The repository must be private before a commercial release."
-            exit 1
-          }
+          # These govern COMMERCIAL DISTRIBUTION, not building. Applied to
+          # every tag they also blocked internal builds and security patches,
+          # which put a legal review between the team and testing their own
+          # software. prepare-release.yml gained the same condition; this is
+          # the second half of it, and without it the tag is created and then
+          # nothing is built - the exact shape of a release that looks done
+          # and produced no artifacts.
+          if [ "$COMMERCIAL_DISTRIBUTION" = "true" ]; then
+            test "$PRIVATE_DISTRIBUTION_READY" = "true" || {
+              echo "::error::PRIVATE_DISTRIBUTION_READY must be true before a release can publish."
+              exit 1
+            }
+            test -n "$COUNSEL_APPROVAL_REFERENCE" || {
+              echo "::error::COUNSEL_APPROVAL_REFERENCE must be configured before a release can publish."
+              exit 1
+            }
+            repository_private="$(gh api "/repos/$REPOSITORY" --jq '.private')"
+            test "$repository_private" = "true" || {
+              echo "::error::The repository must be private before a commercial release."
+              exit 1
+            }
+          else
+            echo "COMMERCIAL_DISTRIBUTION is not set - internal release, distribution prerequisites not checked."
+          fi
           # The first Docker publish creates this package. The Docker job
           # verifies its visibility before the release draft is published.
       - name: Verify tag, main, package version, and changelog agree
