@@ -1219,7 +1219,52 @@
                     <div class="form-group"><label>Model</label><input class="form-input" x-model="configForm.model" placeholder="e.g. llama-3.3-70b-versatile"></div>
                     <div class="form-group"><label>Max Output Tokens</label><input class="form-input" type="number" min="1" step="1" x-model.number="configForm.max_tokens"></div>
                     <div class="form-group"><label>Temperature <span class="text-dim">(0.0–2.0)</span></label><input class="form-input" type="number" min="0" max="2" step="0.1" x-model.number="configForm.temperature"></div>
-                    <div class="form-group"><label>API Key Environment Variable</label><input class="form-input" x-model="configForm.api_key_env" placeholder="e.g. GROQ_API_KEY"></div>
+                    <!-- This was a free-text box that wanted the NAME of an
+                         environment variable and never the key. People
+                         reasonably pasted the key, or `NAME=key`, and got
+                         "must be a valid environment variable name" -- an
+                         error that says what is wrong without saying what is
+                         right, about a concept they had no reason to know.
+                         The backend already knows every provider's variable,
+                         so the UI should not be asking. -->
+                    <div class="form-group">
+                      <label>Which provider's key to use</label>
+                      <select class="form-input" x-model="configForm.api_key_env" @focus="loadProviders()">
+                        <option value="">None needed (local model)</option>
+                        <template x-for="o in providerKeyOptions()" :key="o.env">
+                          <option :value="o.env" x-text="o.label"></option>
+                        </template>
+                      </select>
+                    </div>
+
+                    <!-- The key box, here rather than only under Settings.
+                         The screen that makes you need a key is this one;
+                         sending someone to another tab to finish what they
+                         started is how "it doesn't work" happens. -->
+                    <template x-if="providerForKeyEnv() && providerForKeyEnv().auth_status !== 'configured'">
+                      <div class="form-group" style="border-left:3px solid var(--accent);padding-left:10px">
+                        <label><span x-text="providerForKeyEnv().display_name"></span> key needed</label>
+                        <div class="text-xs text-dim" style="margin-bottom:6px" x-text="providerForKeyEnv().signup_hint || 'Paste the key from this provider.'"></div>
+                        <a x-show="providerForKeyEnv().signup_url" :href="providerForKeyEnv().signup_url" target="_blank" rel="noopener"
+                           class="btn btn-ghost btn-sm" style="text-decoration:none;margin-bottom:6px;display:inline-block"
+                           x-text="'Get a ' + providerForKeyEnv().display_name + ' key →'"></a>
+                        <div class="flex gap-1" style="align-items:center">
+                          <input type="password" class="form-input" style="flex:1" x-model="inlineKey"
+                                 placeholder="Paste the key itself, e.g. nvapi-..." @keydown.enter="saveInlineKey()">
+                          <button class="btn btn-primary btn-sm" @click="saveInlineKey()" :disabled="inlineKeySaving || !inlineKey">
+                            <span x-show="!inlineKeySaving">Save key</span><span x-show="inlineKeySaving">...</span>
+                          </button>
+                        </div>
+                        <div class="text-xs text-dim" style="margin-top:4px">
+                          Just the key. It is stored outside your config, never in plain text there.
+                        </div>
+                      </div>
+                    </template>
+                    <template x-if="providerForKeyEnv() && providerForKeyEnv().auth_status === 'configured'">
+                      <div class="text-xs" style="color:var(--accent);margin-bottom:10px">
+                        <span x-text="providerForKeyEnv().display_name"></span> key is set &mdash; this model can run.
+                      </div>
+                    </template>
                     <div class="form-group"><label>Provider Base URL</label><input class="form-input" type="url" x-model="configForm.base_url" placeholder="https://api.example.com/v1"></div>
                   </div>
                   <div class="form-group"><label>Emoji</label>
