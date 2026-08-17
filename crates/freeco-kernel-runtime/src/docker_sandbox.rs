@@ -14,6 +14,8 @@ pub struct SandboxContainer {
     pub container_id: String,
     pub agent_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Hosting a service, so the pool must not reap it.
+    pub is_service: bool,
 }
 
 /// Result of executing a command in the sandbox.
@@ -112,17 +114,32 @@ fn workspace_owner(workspace: &Path) -> Result<Option<String>, String> {
 
 /// Check if Docker is available on this system.
 pub async fn is_docker_available() -> bool {
-    match crate::quiet_command::quiet_async("docker")
+    // Bounded, because the Docker CLI does not always answer.
+    //
+    // While Docker Desktop is starting, or when its backend is wedged,
+    // `docker version` blocks indefinitely rather than failing. This probe had
+    // no timeout, so every call that checked for Docker inherited that hang -
+    // an agent asking to run one command would sit there forever with nothing
+    // reported. A probe that cannot fail is worse than one that returns false:
+    // false is recoverable and says so.
+    //
+    // Five seconds is far longer than a healthy daemon needs and short enough
+    // that a person notices nothing.
+    let probe = crate::quiet_command::quiet_async("docker")
         .arg("version")
         .arg("--format")
         .arg("{{.Server.Version}}")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
+        .output();
+
+    match tokio::time::timeout(Duration::from_secs(5), probe).await {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            warn!("Docker did not respond within 5s; treating it as unavailable");
+            false
+        }
     }
 }
 
@@ -207,6 +224,16 @@ pub async fn create_sandbox(
     // Network isolation
     cmd.arg("--network").arg(&config.network);
 
+    // Publish ports, and ask Docker to keep the container alive, when this
+    // sandbox is hosting a service. Without the port mapping a service starts
+    // and nothing can reach it, which is why a sandbox could not host one.
+    if config.service {
+        cmd.arg("--restart").arg(&config.restart_policy);
+    }
+    for mapping in &config.ports {
+        cmd.arg("-p").arg(mapping);
+    }
+
     // tmpfs mounts
     for tmpfs_mount in &config.tmpfs {
         cmd.arg("--tmpfs").arg(tmpfs_mount);
@@ -246,6 +273,7 @@ pub async fn create_sandbox(
         container_id,
         agent_id: agent_id.to_string(),
         created_at: chrono::Utc::now(),
+        is_service: config.service,
     })
 }
 
@@ -489,6 +517,13 @@ impl Default for ContainerPool {
 }
 
 fn pool_entry_is_expired(entry: &PoolEntry, idle_timeout_secs: u64, max_age_secs: u64) -> bool {
+    // A service is never reaped. Idle and max-age exist so a forgotten
+    // execution sandbox does not hold memory forever, but applied to a hosted
+    // service they delete a running database after thirty idle minutes -
+    // idleness is the normal state of a service that is waiting for a request.
+    if entry.container.is_service {
+        return false;
+    }
     let age_secs = chrono::Utc::now()
         .signed_duration_since(entry.container.created_at)
         .to_std()
@@ -808,6 +843,7 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert_eq!(pool.len(), 1);
@@ -828,6 +864,7 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
         };
         pool.release("agent:one".to_string(), container, 12345);
 
@@ -848,6 +885,7 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -872,6 +910,7 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -888,6 +927,7 @@ mod tests {
                 container_id: "test123".to_string(),
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now() - chrono::Duration::seconds(2),
+                is_service: false,
             },
             config_hash: 12345,
             last_used: std::time::Instant::now(),
@@ -904,6 +944,7 @@ mod tests {
                 container_id: "test123".to_string(),
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now(),
+                is_service: false,
             },
             12345,
         );

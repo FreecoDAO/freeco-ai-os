@@ -53,6 +53,21 @@ pub trait KernelHandle: Send + Sync {
     }
 
     /// Store a value in shared memory (cross-agent accessible).
+    /// The data gateway, when one is configured.
+    ///
+    /// Returned through the handle rather than constructed in the agent loop
+    /// because the gateway needs the database the kernel owns, and because a
+    /// single instance keeps one token table: a value masked in one
+    /// conversation must restore in another, or the same secret appears under
+    /// two names and the model is told they are different things.
+    ///
+    /// Defaults to None so a handle without one still compiles; a None gateway
+    /// means prompts pass through unscanned, which is the behaviour that
+    /// existed before this was wired.
+    fn data_gateway(&self) -> Option<std::sync::Arc<freeco_datagateway::DataGateway>> {
+        None
+    }
+
     fn memory_store(&self, key: &str, value: serde_json::Value) -> Result<(), String>;
 
     /// Recall a value from shared memory.

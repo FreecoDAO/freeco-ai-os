@@ -7310,6 +7310,32 @@ async fn cron_fan_out_targets(
 
 #[async_trait]
 impl KernelHandle for FreecoKernel {
+    /// Build the gateway lazily, once, over the same database as everything
+    /// else. Tokens have to outlive a restart: a mapping held only in memory
+    /// makes every conversation masked before the restart unreadable after it.
+    fn data_gateway(&self) -> Option<std::sync::Arc<freeco_datagateway::DataGateway>> {
+        static GATEWAY: std::sync::OnceLock<Option<std::sync::Arc<freeco_datagateway::DataGateway>>> =
+            std::sync::OnceLock::new();
+        GATEWAY
+            .get_or_init(|| {
+                match freeco_datagateway::DataGateway::new(
+                    self.memory.connection(),
+                    freeco_datagateway::Policy::default(),
+                ) {
+                    Ok(gw) => Some(std::sync::Arc::new(gw)),
+                    Err(e) => {
+                        // Report rather than fail the kernel: a broken gateway
+                        // must be visible, but it should not stop an agent
+                        // answering. It is announced here so "my prompts are
+                        // not being scanned" is never a silent state.
+                        tracing::error!("Data gateway unavailable, prompts will not be scanned: {e}");
+                        None
+                    }
+                }
+            })
+            .clone()
+    }
+
     async fn spawn_agent(
         &self,
         manifest_toml: &str,

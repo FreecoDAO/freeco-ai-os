@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Current schema version.
 // Must be bumped whenever a migration is added, or the new migration
 // never runs on an existing database.
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -66,6 +66,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 12 {
         migrate_v12(conn)?;
+    }
+
+    if current_version < 13 {
+        migrate_v13(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -593,6 +597,145 @@ fn migrate_v12(conn: &Connection) -> Result<(), rusqlite::Error> {
          VALUES (12, datetime('now'), 'Unified inbox and address book across all channels')",
         [],
     )?;
+    Ok(())
+}
+
+/// Calendar, documents and tasks: the three parts of the workspace that had
+/// no storage at all.
+///
+/// Mail, contacts, companies, projects and teams already existed. These three
+/// complete the set, and they are deliberately shaped to hang off the same
+/// project and team rows rather than forming a parallel world — a task that
+/// cannot say which project it belongs to, or a document nobody can attach to
+/// a company, is a silo with a nicer name.
+///
+/// Everything here uses text timestamps in RFC3339, matching every other
+/// table in this database. Storing epoch integers would be smaller and would
+/// mean two date formats in one file.
+fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- ── Calendar ────────────────────────────────────────────────────
+        --
+        -- `all_day` is stored rather than inferred from the times, because
+        -- 'all day on the 4th' and 'midnight to midnight' are different
+        -- claims: one moves with the reader's timezone and the other does
+        -- not, and only the author knows which was meant.
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            description  TEXT,
+            location     TEXT,
+            starts_at    TEXT NOT NULL,
+            ends_at      TEXT NOT NULL,
+            all_day      INTEGER NOT NULL DEFAULT 0,
+            project_id   TEXT,
+            company_id   TEXT,
+            agent_id     TEXT,
+            -- Where this came from: an agent, a channel, or a person typing.
+            source       TEXT NOT NULL DEFAULT 'manual',
+            visibility   TEXT NOT NULL DEFAULT 'team',
+            status       TEXT NOT NULL DEFAULT 'confirmed',
+            archived     INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        -- A calendar is read as a window of time, almost never any other way.
+        CREATE INDEX IF NOT EXISTS idx_cal_window  ON calendar_events(starts_at, ends_at);
+        CREATE INDEX IF NOT EXISTS idx_cal_project ON calendar_events(project_id, starts_at);
+
+        -- Who is expected to attend. Contacts are the address book, so an
+        -- attendee points at one rather than repeating a name and an email
+        -- that then drift apart.
+        CREATE TABLE IF NOT EXISTS calendar_attendees (
+            event_id   TEXT NOT NULL,
+            contact_id TEXT,
+            agent_id   TEXT,
+            response   TEXT NOT NULL DEFAULT 'needs_action',
+            PRIMARY KEY (event_id, contact_id, agent_id),
+            FOREIGN KEY (event_id) REFERENCES calendar_events(id) ON DELETE CASCADE
+        );
+
+        -- ── Documents ───────────────────────────────────────────────────
+        --
+        -- The bytes are not stored here. A database row per file would put
+        -- multi-megabyte blobs in the same file as the conversation history
+        -- and make every backup carry them; `path` points at the workspace
+        -- instead. `sha256` is what lets a later check say whether the file
+        -- on disk is still the one that was filed.
+        CREATE TABLE IF NOT EXISTS documents (
+            id           TEXT PRIMARY KEY,
+            title        TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            mime_type    TEXT,
+            size_bytes   INTEGER NOT NULL DEFAULT 0,
+            sha256       TEXT,
+            project_id   TEXT,
+            company_id   TEXT,
+            contact_id   TEXT,
+            uploaded_by  TEXT,
+            summary      TEXT,
+            visibility   TEXT NOT NULL DEFAULT 'team',
+            archived     INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_docs_project ON documents(project_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_docs_sha     ON documents(sha256);
+
+        -- ── Tasks ───────────────────────────────────────────────────────
+        --
+        -- Distinct from `task_queue`, which is the agent work queue: that one
+        -- holds a msgpack payload and a status a scheduler owns. This one is
+        -- what a person or an agent puts on a board and another one picks up.
+        --
+        -- `assignee_agent` and `assignee_contact` are separate columns
+        -- because an agent and a person are not interchangeable: one can be
+        -- delegated to automatically, the other has to be asked.
+        CREATE TABLE IF NOT EXISTS tasks (
+            id               TEXT PRIMARY KEY,
+            title            TEXT NOT NULL,
+            description      TEXT,
+            status           TEXT NOT NULL DEFAULT 'todo',
+            priority         INTEGER NOT NULL DEFAULT 2,
+            project_id       TEXT,
+            team_id          TEXT,
+            assignee_agent   TEXT,
+            assignee_contact TEXT,
+            created_by       TEXT,
+            due_at           TEXT,
+            -- Ordering within a board column, so a drag that reorders two
+            -- cards does not have to rewrite every row.
+            board_rank       REAL NOT NULL DEFAULT 0,
+            archived         INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            completed_at     TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tasks_board   ON tasks(project_id, status, board_rank);
+        CREATE INDEX IF NOT EXISTS idx_tasks_due     ON tasks(due_at);
+        CREATE INDEX IF NOT EXISTS idx_tasks_agent   ON tasks(assignee_agent, status);
+
+        -- A task blocked by another. Kept as a table rather than a column so
+        -- a task can wait on several things, which is the normal case.
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+            task_id     TEXT NOT NULL,
+            depends_on  TEXT NOT NULL,
+            PRIMARY KEY (task_id, depends_on),
+            FOREIGN KEY (task_id)    REFERENCES tasks(id) ON DELETE CASCADE,
+            FOREIGN KEY (depends_on) REFERENCES tasks(id) ON DELETE CASCADE
+        );
+        ",
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description)          VALUES (13, datetime('now'), 'Calendar, documents and tasks')",
+        [],
+    )?;
+
     Ok(())
 }
 
