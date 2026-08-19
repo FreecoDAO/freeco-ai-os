@@ -464,7 +464,11 @@ function settingsPage() {
         return;
       }
       try {
-        await FreecoAPI.post('/api/local-ai/llama/setup', { model_id: modelId });
+        // `confirm` is sent because the user was just asked by
+        // confirmWeakHardware(). The server refuses without it on hardware
+        // that cannot run a model usefully, so the question cannot be skipped
+        // by a caller that forgets to ask.
+        await FreecoAPI.post('/api/local-ai/llama/setup', { model_id: modelId, confirm: true });
         FreecoToast.success('Setting up ' + (modelId || 'local AI') + ' - this downloads a few GB and resumes if interrupted. Keep the app open.');
         this.pollLocalAi();
       } catch(e) {
