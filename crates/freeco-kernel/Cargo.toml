@@ -8,6 +8,7 @@ description = "Core kernel for the Freeco Agent OS"
 [dependencies]
 freeco-types = { path = "../freeco-types" }
 freeco-memory = { path = "../freeco-memory" }
+freeco-datagateway = { path = "../freeco-datagateway" }
 freeco-kernel-runtime = { path = "../freeco-kernel-runtime" }
 freeco-skills = { path = "../freeco-skills" }
 freeco-hands = { path = "../freeco-hands" }

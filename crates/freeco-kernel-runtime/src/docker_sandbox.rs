@@ -14,6 +14,14 @@ pub struct SandboxContainer {
     pub container_id: String,
     pub agent_id: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Hosting a service, so the pool must not reap it.
+    pub is_service: bool,
+    /// The binary that created this container.
+    ///
+    /// Carried per container rather than read from config at each call: a
+    /// container created by one runtime has to be exec'd into and removed by
+    /// the same one, and the config can change between those calls.
+    pub runtime: String,
 }
 
 /// Result of executing a command in the sandbox.
@@ -111,18 +119,33 @@ fn workspace_owner(workspace: &Path) -> Result<Option<String>, String> {
 }
 
 /// Check if Docker is available on this system.
-pub async fn is_docker_available() -> bool {
-    match crate::quiet_command::quiet_async("docker")
+pub async fn is_docker_available(runtime: &str) -> bool {
+    // Bounded, because the Docker CLI does not always answer.
+    //
+    // While Docker Desktop is starting, or when its backend is wedged,
+    // `docker version` blocks indefinitely rather than failing. This probe had
+    // no timeout, so every call that checked for Docker inherited that hang -
+    // an agent asking to run one command would sit there forever with nothing
+    // reported. A probe that cannot fail is worse than one that returns false:
+    // false is recoverable and says so.
+    //
+    // Five seconds is far longer than a healthy daemon needs and short enough
+    // that a person notices nothing.
+    let probe = crate::quiet_command::quiet_async(runtime)
         .arg("version")
         .arg("--format")
         .arg("{{.Server.Version}}")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
+        .output();
+
+    match tokio::time::timeout(Duration::from_secs(5), probe).await {
+        Ok(Ok(output)) => output.status.success(),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            warn!("Docker did not respond within 5s; treating it as unavailable");
+            false
+        }
     }
 }
 
@@ -131,8 +154,8 @@ pub async fn is_docker_available() -> bool {
 /// `docker run` silently pulls a missing image, which on a metered or slow
 /// connection means an unannounced multi-hundred-megabyte download. We check
 /// first so the user is told what it costs and decides when to pay it.
-pub async fn is_image_present(image: &str) -> bool {
-    match crate::quiet_command::quiet_async("docker")
+pub async fn is_image_present(runtime: &str, image: &str) -> bool {
+    match crate::quiet_command::quiet_async(runtime)
         .arg("image")
         .arg("inspect")
         .arg(image)
@@ -161,20 +184,20 @@ pub async fn create_sandbox(
 
     // Refuse rather than trigger a surprise download. Once the image is
     // cached this check costs milliseconds and never fires again.
-    if !is_image_present(&config.image).await {
+    if !is_image_present(&config.runtime, &config.image).await {
         return Err(format!(
             "Sandbox image '{}' is not downloaded yet, and nothing was run. \
              Fetching it needs a one-time download, so it is not started behind \
              your back. \
-             Run `docker pull {}` when you are ready, or set docker.image in \
+             Run `{} pull {}` when you are ready, or set docker.image in \
              ~/.freeco-ai/config.toml to an image you already have.",
-            config.image, config.image
+            config.image, config.runtime, config.image
         ));
     }
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
 
-    let mut cmd = crate::quiet_command::quiet_async("docker");
+    let mut cmd = crate::quiet_command::quiet_async(&config.runtime);
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
@@ -206,6 +229,16 @@ pub async fn create_sandbox(
 
     // Network isolation
     cmd.arg("--network").arg(&config.network);
+
+    // Publish ports, and ask Docker to keep the container alive, when this
+    // sandbox is hosting a service. Without the port mapping a service starts
+    // and nothing can reach it, which is why a sandbox could not host one.
+    if config.service {
+        cmd.arg("--restart").arg(&config.restart_policy);
+    }
+    for mapping in &config.ports {
+        cmd.arg("-p").arg(mapping);
+    }
 
     // tmpfs mounts
     for tmpfs_mount in &config.tmpfs {
@@ -246,6 +279,8 @@ pub async fn create_sandbox(
         container_id,
         agent_id: agent_id.to_string(),
         created_at: chrono::Utc::now(),
+        is_service: config.service,
+        runtime: config.runtime.clone(),
     })
 }
 
@@ -257,7 +292,7 @@ pub async fn exec_in_sandbox(
 ) -> Result<ExecResult, String> {
     validate_command(command)?;
 
-    let mut cmd = crate::quiet_command::quiet_async("docker");
+    let mut cmd = crate::quiet_command::quiet_async(&container.runtime);
     cmd.arg("exec")
         .arg(&container.container_id)
         .arg("sh")
@@ -304,7 +339,7 @@ pub async fn exec_in_sandbox(
 pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String> {
     debug!(container = %container.container_id, "Destroying Docker sandbox");
 
-    let output = crate::quiet_command::quiet_async("docker")
+    let output = crate::quiet_command::quiet_async(&container.runtime)
         .arg("rm")
         .arg("-f")
         .arg(&container.container_id)
@@ -489,6 +524,13 @@ impl Default for ContainerPool {
 }
 
 fn pool_entry_is_expired(entry: &PoolEntry, idle_timeout_secs: u64, max_age_secs: u64) -> bool {
+    // A service is never reaped. Idle and max-age exist so a forgotten
+    // execution sandbox does not hold memory forever, but applied to a hosted
+    // service they delete a running database after thirty idle minutes -
+    // idleness is the normal state of a service that is waiting for a request.
+    if entry.container.is_service {
+        return false;
+    }
     let age_secs = chrono::Utc::now()
         .signed_duration_since(entry.container.created_at)
         .to_std()
@@ -750,7 +792,7 @@ mod tests {
     #[tokio::test]
     async fn test_docker_available() {
         // Just verify it doesn't panic — result depends on Docker installation
-        let _ = is_docker_available().await;
+        let _ = is_docker_available("docker").await;
     }
 
     #[test]
@@ -808,6 +850,8 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
+                runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert_eq!(pool.len(), 1);
@@ -828,6 +872,8 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
+                runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
 
@@ -848,6 +894,8 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
+                runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -872,6 +920,8 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
+                is_service: false,
+                runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -888,6 +938,8 @@ mod tests {
                 container_id: "test123".to_string(),
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now() - chrono::Duration::seconds(2),
+                is_service: false,
+                runtime: "docker".to_string(),
             },
             config_hash: 12345,
             last_used: std::time::Instant::now(),
@@ -904,6 +956,8 @@ mod tests {
                 container_id: "test123".to_string(),
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now(),
+                is_service: false,
+                runtime: "docker".to_string(),
             },
             12345,
         );

@@ -1701,6 +1701,36 @@ pub async fn llama_setup(
         );
     };
 
+    // On hardware that cannot run a model usefully, ask every time.
+    //
+    // The capability check already reports that a turn would take minutes
+    // rather than seconds, but reporting it once is not enough: a setup done
+    // months ago keeps running at every launch, and nobody re-reads the
+    // warning they clicked past. Requiring `confirm` on each call means the
+    // interface has to put the cost in front of the user again, and a caller
+    // that skips the question gets a refusal rather than a slow assistant.
+    //
+    // Suitable hardware is unaffected - there is nothing to warn about.
+    let capability = assess_local_ai(&detect_hardware().await);
+    if !capability.suitable {
+        let confirmed = req
+            .get("confirm")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !confirmed {
+            return (
+                StatusCode::PRECONDITION_REQUIRED,
+                Json(serde_json::json!({
+                    "error": "local AI needs confirming on this machine",
+                    "reason": capability.reason,
+                    "est_minutes_per_agent_turn": capability.est_minutes_per_agent_turn,
+                    "requirements": capability.requirements,
+                    "confirm_with": {"confirm": true},
+                })),
+            );
+        }
+    }
+
     {
         let mut s = state.local_ai.write().await;
         if s.running {

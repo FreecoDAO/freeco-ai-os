@@ -6421,7 +6421,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
       <div class="freeco-approval">
         <div class="freeco-approval-txt">
           <strong>Permission needed</strong>
-          <div x-text="a.summary || a.action || a.description || 'An agent wants to do something that needs your approval.'"></div>
+          <!-- Why, then what, then the command. The raw command was all this
+               showed, which asks the user to approve something the interface
+               never explained. -->
+          <div x-show="a.aim" class="freeco-approval-aim" x-text="a.aim" style="font-weight:600;margin-bottom:4px"></div>
+          <div x-show="a.consequences" class="text-xs text-dim" style="margin-bottom:6px" x-text="'If you allow it: ' + a.consequences"></div>
+          <div x-show="a.reversible === false" class="text-xs" style="color:var(--danger);margin-bottom:6px">This cannot be undone.</div>
+          <div class="text-xs text-dim" style="font-family:monospace;word-break:break-all"
+               x-text="a.summary || a.action || a.description || 'An agent wants to do something that needs your approval.'"></div>
           <div class="freeco-approval-meta" x-show="a.agent_name || a.tool" x-text="(a.agent_name || '') + (a.tool ? ' · ' + a.tool : '')"></div>
         </div>
         <div class="freeco-approval-btns">

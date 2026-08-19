@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-agent-ceo"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "freeco-agent-core",
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-agent-core"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "freeco-types",
@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-agent-secretary"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "freeco-agent-core",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-agent-shopping"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "freeco-agent-core",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-ai-cli"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-api"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-budget-engine"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-channels"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "aes",
  "async-trait",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-datagateway"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "chrono",
  "rand 0.9.5",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-desktop"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "axum",
  "freeco-api",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-extensions"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-hands"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "chrono",
  "dashmap",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-input-parser"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "base64 0.22.1",
  "mockito",
@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-kernel"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2333,6 +2333,7 @@ dependencies = [
  "freeco-agent-secretary",
  "freeco-agent-shopping",
  "freeco-channels",
+ "freeco-datagateway",
  "freeco-extensions",
  "freeco-hands",
  "freeco-kernel-runtime",
@@ -2364,7 +2365,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-kernel-runtime"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2372,6 +2373,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "freeco-datagateway",
  "freeco-memory",
  "freeco-skills",
  "freeco-types",
@@ -2400,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-learning"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2418,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-memory"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2438,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-migrate"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2457,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-runtime"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "freeco-agent-core",
@@ -2474,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-skills"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2499,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-tool-gateway"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "base64 0.22.1",
  "mockito",
@@ -2514,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-types"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "bitflags 2.13.1",
@@ -2534,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "freeco-wire"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9094,7 +9096,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.9.5"
+version = "0.9.7"
 
 [[package]]
 name = "yoke"

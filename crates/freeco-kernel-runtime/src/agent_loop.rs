@@ -571,6 +571,35 @@ pub async fn run_agent_loop(
             k.touch_agent(&agent_id_str);
         }
 
+        // Mask secrets before the request leaves this machine.
+        //
+        // This is the only point every provider call passes through, so it is
+        // the only place the gateway can be applied once rather than in each
+        // of the twenty-odd drivers. A gateway wired into just one driver
+        // protects only the users who chose that provider.
+        let gateway = kernel.as_ref().and_then(|k| k.data_gateway());
+        let mut request = request;
+        if let Some(gw) = gateway.as_ref() {
+            match mask_request(gw, request) {
+                Ok((masked, report)) => {
+                    if report.masked > 0 {
+                        info!(
+                            masked = report.masked,
+                            kinds = ?report.kinds,
+                            "Data gateway masked values before the provider call"
+                        );
+                    }
+                    request = masked;
+                }
+                Err(blocked) => {
+                    // Blocked, not silently stripped: a user whose request was
+                    // refused needs to know it was refused rather than wonder
+                    // why the answer ignores what they asked about.
+                    return Err(FreecoError::LlmDriver(blocked));
+                }
+            }
+        }
+
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
         let mut response = call_with_retry(
@@ -581,6 +610,18 @@ pub async fn run_agent_loop(
             &manifest.fallback_models,
         )
         .await?;
+
+        // Restore the real values in the reply. Models echo their input, so
+        // without this the user reads their own data back as placeholders.
+        if let Some(gw) = gateway.as_ref() {
+            for block in &mut response.content {
+                if let ContentBlock::Text { text, .. } = block {
+                    if let Ok(restored) = gw.process_inbound(text) {
+                        *text = restored;
+                    }
+                }
+            }
+        }
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -1175,6 +1216,39 @@ pub async fn run_agent_loop(
 ///
 /// When the primary model returns a `ModelNotFound` error and `fallback_models`
 /// is non-empty, each fallback is tried in order before propagating the error.
+
+/// Run every message in a request through the gateway.
+///
+/// Returns the masked request, or the reason it was refused. Tool definitions
+/// and system prompts are scanned along with user text: a key pasted into a
+/// system prompt leaves the machine exactly as readily as one in a message.
+fn mask_request(
+    gw: &freeco_datagateway::DataGateway,
+    mut request: CompletionRequest,
+) -> Result<(CompletionRequest, freeco_datagateway::Report), String> {
+    let mut total = freeco_datagateway::Report {
+        masked: 0,
+        allowed: 0,
+        kinds: Vec::new(),
+    };
+    for message in &mut request.messages {
+        if let MessageContent::Text(text) = &message.content {
+            let (masked, report) = gw.process_outbound(text).map_err(|e| e.to_string())?;
+            if masked != *text {
+                message.content = MessageContent::Text(masked);
+            }
+            total.masked += report.masked;
+            total.allowed += report.allowed;
+            for kind in report.kinds {
+                if !total.kinds.contains(&kind) {
+                    total.kinds.push(kind);
+                }
+            }
+        }
+    }
+    Ok((request, total))
+}
+
 async fn call_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
@@ -5526,5 +5600,65 @@ mod tests {
         assert!(!is_silent_token("Hello, how can I help?"));
         assert!(!is_silent_token("SILENT"));
         assert!(!is_silent_token(""));
+    }
+}
+
+#[cfg(test)]
+mod gateway_wiring_tests {
+    use super::*;
+    use freeco_datagateway::{DataGateway, Policy};
+    use std::sync::{Arc, Mutex};
+
+    fn gw() -> DataGateway {
+        let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        DataGateway::new(conn, Policy::default()).unwrap()
+    }
+
+    fn text_request(body: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message::user(body)],
+            tools: Vec::new(),
+            max_tokens: 256,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        }
+    }
+
+    /// The wiring, not the gateway: the gateway's own masking is tested in its
+    /// crate. What matters here is that a request travelling this path is
+    /// actually handed to it, which is exactly what was missing.
+    #[test]
+    fn a_key_in_a_message_does_not_reach_the_provider() {
+        let g = gw();
+        let (masked, report) =
+            mask_request(&g, text_request("deploy with sk-ant-0123456789abcdefgh")).unwrap();
+        assert_eq!(report.masked, 1, "the key should have been masked");
+        let MessageContent::Text(sent) = &masked.messages[0].content else {
+            panic!("expected text");
+        };
+        assert!(!sent.contains("sk-ant-"), "key still in outbound text: {sent}");
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        let g = gw();
+        let original = "Summarise the attached report.";
+        let (masked, report) = mask_request(&g, text_request(original)).unwrap();
+        assert_eq!(report.masked, 0);
+        let MessageContent::Text(sent) = &masked.messages[0].content else {
+            panic!("expected text");
+        };
+        assert_eq!(sent, original);
+    }
+
+    /// Blocking has to surface as an error. A silently stripped card number
+    /// gives the user a wrong answer and no idea why.
+    #[test]
+    fn a_blocked_value_stops_the_request() {
+        let g = gw();
+        let err = mask_request(&g, text_request("card 4242 4242 4242 4242")).unwrap_err();
+        assert!(err.to_lowercase().contains("card"), "unhelpful error: {err}");
     }
 }

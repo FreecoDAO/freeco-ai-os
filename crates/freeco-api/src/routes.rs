@@ -11775,6 +11775,16 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
                 "description": a.description,
                 "action_summary": a.action_summary,
                 "action": a.action_summary,
+                // The plain-language fields. The kernel fills these in for
+                // every request, and this endpoint used to drop them, so the
+                // dashboard could only show the raw command - the exact thing
+                // the explanation exists to replace. A user reading
+                // `shell_exec: {"command":"ls -la /workspace/"}` is being
+                // asked to approve something the interface never explained.
+                "aim": a.aim,
+                "consequences": a.consequences,
+                "reversible": a.reversible,
+                "explanation": a.plain_language(),
                 "risk_level": a.risk_level,
                 "requested_at": a.requested_at,
                 "created_at": a.requested_at,

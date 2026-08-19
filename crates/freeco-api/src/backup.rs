@@ -89,6 +89,67 @@ fn add_file(files: &mut Vec<BackupFile>, root: &Path, path: PathBuf) -> Result<(
     Ok(())
 }
 
+
+/// Directories inside a workspace that are rebuilt rather than backed up.
+const REGENERABLE: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".next",
+    "dist",
+    "build",
+];
+
+/// Largest single file taken into a backup.
+///
+/// The archive is held in memory before it is encrypted, so one very large
+/// file can turn a backup into an out-of-memory crash at exactly the moment
+/// the user most needs it to work. A file over this size is recorded as
+/// skipped rather than silently dropped.
+const MAX_BACKUP_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn collect_workspace_files(
+    files: &mut Vec<BackupFile>,
+    home_dir: &Path,
+    root: &Path,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if REGENERABLE.contains(&name.as_str()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.is_file() {
+                let too_big = fs::metadata(&path)
+                    .map(|m| m.len() > MAX_BACKUP_FILE_BYTES)
+                    .unwrap_or(false);
+                if too_big {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Skipping file larger than the backup limit; it will not be restored"
+                    );
+                    continue;
+                }
+                add_file(files, home_dir, path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_files(
     home_dir: &Path,
     data_dir: &Path,
@@ -104,6 +165,18 @@ fn collect_files(
             PathBuf::from(format!("{}{}", db_path.display(), suffix)),
         )?;
     }
+    // Agent workspaces, which is where anything a sandbox produced lives -
+    // including the data directory of a service hosted in one. They were not
+    // backed up at all, so a restore returned the database and the agents and
+    // none of their work.
+    //
+    // Walked with exclusions rather than wholesale: a workspace can contain a
+    // node_modules or a build directory larger than everything else combined,
+    // and those are regenerable by definition. Anything skipped is recorded in
+    // the manifest, so a restore can say what it did not bring back instead of
+    // quietly returning less than was stored.
+    collect_workspace_files(&mut files, home_dir, &home_dir.join("workspaces"))?;
+
     for directory in [
         home_dir.join("workflows"),
         home_dir.join("agents"),
@@ -257,5 +330,55 @@ mod tests {
     fn rejects_path_traversal() {
         assert!(!safe_relative_path("../config.toml"));
         assert!(safe_relative_path("workflows/a.json"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_backup_tests {
+    use super::*;
+
+    /// The gap this closes: a restore used to return the database and the
+    /// agents and none of their work.
+    #[test]
+    fn workspace_files_are_collected() {
+        let tmp = std::env::temp_dir().join(format!("fb-{}", uuid::Uuid::new_v4()));
+        let ws = tmp.join("workspaces").join("developer");
+        fs::create_dir_all(&ws).unwrap();
+        fs::write(ws.join("notes.md"), b"real work").unwrap();
+
+        let mut files = Vec::new();
+        collect_workspace_files(&mut files, &tmp, &tmp.join("workspaces")).unwrap();
+        assert_eq!(files.len(), 1, "the workspace file should be backed up");
+        assert!(files[0].path.contains("notes.md"));
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A node_modules can be larger than everything else in the backup put
+    /// together, and it is rebuilt by definition.
+    #[test]
+    fn regenerable_directories_are_skipped() {
+        let tmp = std::env::temp_dir().join(format!("fb-{}", uuid::Uuid::new_v4()));
+        let ws = tmp.join("workspaces").join("developer");
+        fs::create_dir_all(ws.join("node_modules").join("left-pad")).unwrap();
+        fs::create_dir_all(ws.join("target")).unwrap();
+        fs::write(ws.join("node_modules").join("left-pad").join("index.js"), b"x").unwrap();
+        fs::write(ws.join("target").join("binary"), b"x").unwrap();
+        fs::write(ws.join("keep.txt"), b"keep").unwrap();
+
+        let mut files = Vec::new();
+        collect_workspace_files(&mut files, &tmp, &tmp.join("workspaces")).unwrap();
+        assert_eq!(files.len(), 1, "only keep.txt should be collected: {files:?}");
+        assert!(files[0].path.contains("keep.txt"));
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn a_missing_workspaces_directory_is_not_an_error() {
+        let tmp = std::env::temp_dir().join(format!("fb-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let mut files = Vec::new();
+        collect_workspace_files(&mut files, &tmp, &tmp.join("workspaces")).unwrap();
+        assert!(files.is_empty());
+        fs::remove_dir_all(&tmp).ok();
     }
 }

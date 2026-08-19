@@ -7,6 +7,7 @@ description = "Agent runtime and execution environment for Freeco"
 
 [dependencies]
 freeco-types = { path = "../freeco-types" }
+freeco-datagateway = { path = "../freeco-datagateway" }
 freeco-memory = { path = "../freeco-memory" }
 freeco-skills = { path = "../freeco-skills" }
 tokio = { workspace = true }

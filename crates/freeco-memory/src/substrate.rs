@@ -226,6 +226,16 @@ impl MemorySubstrate {
         self.sessions.create_session(agent_id)
     }
 
+    /// The underlying database handle.
+    ///
+    /// Exposed so the data gateway can keep its token table in the same file
+    /// as everything else: a mapping that lives in a second database is a
+    /// second thing to back up, and losing it makes every masked conversation
+    /// permanently unreadable.
+    pub fn connection(&self) -> std::sync::Arc<std::sync::Mutex<rusqlite::Connection>> {
+        self.conn.clone()
+    }
+
     /// List all sessions with metadata.
     pub fn list_sessions(&self) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_sessions()

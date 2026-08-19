@@ -404,7 +404,14 @@ pub async fn execute_tool(
 
         // Docker sandbox tool
         "docker_exec" => {
-            tool_docker_exec(input, docker_config, workspace_root, caller_agent_id).await
+            tool_docker_exec(
+                input,
+                docker_config,
+                workspace_root,
+                caller_agent_id,
+                kernel,
+            )
+            .await
         }
 
         // Location tool
@@ -3370,6 +3377,7 @@ async fn tool_docker_exec(
     docker_config: Option<&freeco_types::config::DockerSandboxConfig>,
     workspace_root: Option<&Path>,
     caller_agent_id: Option<&str>,
+    kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
 ) -> Result<String, String> {
     let config = docker_config.ok_or("Docker sandbox not configured")?;
 
@@ -3421,13 +3429,43 @@ async fn tool_docker_exec(
     // Check Docker availability. Failing here is the correct outcome: the
     // sandbox is the safety boundary, so when it is unavailable the tool
     // refuses rather than quietly running the code on the user's own machine.
-    if !crate::docker_sandbox::is_docker_available().await {
+    if !crate::docker_sandbox::is_docker_available(&config.runtime).await {
         return Err(
             "Docker is not running, so there is no sandbox to execute in. \
                     Nothing was run on the host. Start Docker Desktop (or install it from \
                     https://docker.com/products/docker-desktop) and try again."
                 .into(),
         );
+    }
+
+    // Starting a service is a different act from running a command, and it
+    // needs saying out loud. A service keeps running after the tool returns,
+    // publishes a port on this machine, and is exempt from the cleanup that
+    // removes ordinary sandboxes - so it is the one docker_exec call that
+    // leaves something behind. Approving "run a command" should not silently
+    // approve that.
+    if config.service {
+        if let Some(kh) = kernel {
+            let ports = if config.ports.is_empty() {
+                "no published ports".to_string()
+            } else {
+                format!("publishing {}", config.ports.join(", "))
+            };
+            let summary = format!(
+                "start a long-running service in the sandbox for agent {agent_id}, {ports}.                  It keeps running after this command finishes, restarts with Docker, and is                  not removed by the idle cleanup. Files in the agent workspace persist."
+            );
+            match kh.request_approval(agent_id, "docker_service", &summary).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(
+                        "Starting the service was denied, so nothing was started.".to_string()
+                    );
+                }
+                Err(e) => {
+                    return Err(format!("Could not ask about starting the service: {e}"));
+                }
+            }
+        }
     }
 
     let pool = docker_container_pool();

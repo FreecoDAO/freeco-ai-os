@@ -23,11 +23,11 @@ use std::sync::Arc;
 pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.kernel.config.docker;
 
-    let docker_running = freeco_kernel_runtime::docker_sandbox::is_docker_available().await;
+    let docker_running = freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
     // Only probe the image when Docker answers; otherwise the inspect call
     // just times out and we would report "image missing" for the wrong reason.
     let image_present = if docker_running {
-        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.image).await
+        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.runtime, &config.image).await
     } else {
         false
     };
@@ -78,15 +78,18 @@ pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// theirs.
 pub async fn sandbox_pull(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let image = state.kernel.config.docker.image.clone();
+    let runtime = state.kernel.config.docker.runtime.clone();
 
-    if !freeco_kernel_runtime::docker_sandbox::is_docker_available().await {
+    if !freeco_kernel_runtime::docker_sandbox::is_docker_available(&runtime).await {
         return Json(serde_json::json!({
             "ok": false,
-            "error": "Docker is not running, so the image cannot be downloaded. Start Docker Desktop and try again.",
+            "error": format!(
+                "{runtime} is not running, so the image cannot be downloaded. Start it and try again."
+            ),
         }));
     }
 
-    match freeco_kernel_runtime::quiet_command::quiet_async("docker")
+    match freeco_kernel_runtime::quiet_command::quiet_async(&runtime)
         .arg("pull")
         .arg(&image)
         .output()
