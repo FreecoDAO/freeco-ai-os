@@ -642,6 +642,18 @@ pub struct DockerSandboxConfig {
     /// Maximum age before forced destruction (seconds). Default: 604800 (7 days).
     #[serde(default = "default_docker_max_age")]
     pub max_age_secs: u64,
+    /// Container runtime binary: `docker` or `podman`.
+    ///
+    /// Podman is daemonless. Docker routes every command through a background
+    /// daemon, and when that daemon wedges - a routine occurrence on Windows,
+    /// where it runs inside WSL - the CLI blocks with no error, so the sandbox
+    /// becomes unavailable with nothing to read. Podman has no such component:
+    /// each command is a process that either runs or fails.
+    ///
+    /// The command-line surface used here is identical between the two, so
+    /// this is a binary name and nothing else.
+    #[serde(default = "default_container_runtime")]
+    pub runtime: String,
     /// Host:container port mappings for a long-running service, e.g.
     /// `["3000:3000"]`.
     ///
@@ -695,6 +707,12 @@ fn default_docker_idle_timeout() -> u64 {
     86400
 }
 
+fn default_container_runtime() -> String {
+    // Docker remains the default: it is what existing installs have, and
+    // switching a working sandbox out from under someone is not an upgrade.
+    "docker".to_string()
+}
+
 fn default_restart_policy() -> String {
     // `unless-stopped` rather than `always`: if the user deliberately stops a
     // service, it should stay stopped rather than resurrect on the next
@@ -739,6 +757,7 @@ impl Default for DockerSandboxConfig {
             // No ports and not a service: the default sandbox runs a command
             // and is thrown away, so it has nothing to serve and nothing to
             // keep alive. Hosting a service is an explicit choice.
+            runtime: default_container_runtime(),
             ports: Vec::new(),
             service: false,
             restart_policy: default_restart_policy(),
