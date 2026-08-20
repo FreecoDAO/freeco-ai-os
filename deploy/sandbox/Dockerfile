@@ -32,6 +32,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sqlite3 \
         unzip \
         less \
+        socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node, because without it a JavaScript project cannot be built at all.
+#
+# The default sandbox image was python:3.12-slim, which has no Node, so an
+# agent asked to build a web app could not install a single dependency.
+# Most of what these agents get asked to build - a CRM, a dashboard,
+# anything with a front end - is JavaScript, so this is the difference
+# between a sandbox that can do the work and one that can only run scripts.
+#
+# NodeSource rather than Debian's package, which lags several major
+# versions behind what a modern lockfile expects.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g pnpm yarn \
+    && rm -rf /var/lib/apt/lists/*
+
+# The GitHub CLI, so an agent can read an issue or open a pull request
+# from inside the sandbox instead of asking for host shell to do it.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Clippy and rustfmt: the CI gates. An agent that can compile but cannot run
@@ -53,4 +79,4 @@ WORKDIR /workspace
 
 # Stated so `docker run freeco-sandbox` without a command is self-explaining
 # rather than silently exiting.
-CMD ["bash", "-lc", "echo 'FreEco.ai sandbox: rust, cargo, clippy, git, python3, jq, rg. Mount your work at /workspace.'; bash"]
+CMD ["bash", "-lc", "echo 'FreEco.ai sandbox: rust, cargo, clippy, node 22, pnpm, yarn, gh, git, python3, jq, rg, socat. Mount your work at /workspace.'; bash"]
