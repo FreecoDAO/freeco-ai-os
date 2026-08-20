@@ -54,7 +54,11 @@ pub struct Signup {
 /// OpenRouter is the only entry that is free, needs no card, and reaches
 /// models from every other vendor with a single key — which is what makes it
 /// the honest answer to "what should I pick first".
-pub const RECOMMENDED_PROVIDER: &str = "openrouter";
+// NVIDIA NIM is free, has no daily token cap, and serves Nemotron 3
+// Ultra 550B -- so the recommended option is also the most capable one,
+// and a new user has no reason to move off it to get a good answer.
+// OpenRouter remains the better second choice: one key, every vendor.
+pub const RECOMMENDED_PROVIDER: &str = "nvidia";
 
 /// Look up where to get a key for `provider_id`.
 pub fn signup_for(provider_id: &str) -> Option<Signup> {

@@ -98,6 +98,66 @@ function agentsPage() {
     catalogModels: [],
     catalogLoading: false,
 
+    // Env-var options for the config dropdown, built from the provider
+    // registry so a provider added later appears without anyone editing a list
+    // here. Each option says whether that key is already set, because "which of
+    // these actually works" is the question being asked.
+    providerKeyOptions() {
+      var out = [], seen = {};
+      var idx = this.providerIndex || {};
+      Object.keys(idx).forEach(function (id) {
+        var p = idx[id];
+        if (!p.api_key_env || seen[p.api_key_env]) return;
+        seen[p.api_key_env] = true;
+        out.push({
+          env: p.api_key_env,
+          label: (p.display_name || id) + ' — ' + p.api_key_env +
+                 (p.auth_status === 'configured' ? '  (key set)' : '  (no key yet)')
+        });
+      });
+      out.sort(function (a, b) { return a.label.localeCompare(b.label); });
+      return out;
+    },
+
+    // The provider that owns the selected env var, so the key box below knows
+    // where to send what the user pastes.
+    providerForKeyEnv() {
+      var env = this.configForm && this.configForm.api_key_env;
+      if (!env) return null;
+      var idx = this.providerIndex || {};
+      var hit = Object.keys(idx).filter(function (id) { return idx[id].api_key_env === env; });
+      return hit.length ? idx[hit[0]] : null;
+    },
+
+    // Paste-the-key, in the same place the model is chosen.
+    //
+    // The key box used to live only under Settings, while the screen that made
+    // you need a key was here. Sending someone to another tab to finish the
+    // thing they started is how "it does not work" happens.
+    inlineKey: '',
+    inlineKeySaving: false,
+
+    async saveInlineKey() {
+      var p = this.providerForKeyEnv();
+      var key = (this.inlineKey || '').trim();
+      if (!p || !key) return;
+      // People paste `NAME=value` because that is what a .env line looks like.
+      // Taking the value is friendlier than rejecting it.
+      var eq = key.indexOf('=');
+      if (eq > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(key.slice(0, eq))) key = key.slice(eq + 1).trim();
+      this.inlineKeySaving = true;
+      try {
+        await FreecoAPI.post('/api/providers/' + encodeURIComponent(p.id) + '/key', { key: key });
+        FreecoToast.success((p.display_name || p.id) + ' key saved.');
+        this.inlineKey = '';
+        this.providerIndex = {};
+        await this.loadProviders();
+      } catch (e) {
+        FreecoToast.error('Could not save the key: ' + (e.message || e));
+      }
+      this.inlineKeySaving = false;
+    },
+
     // Providers, so the model picker can warn that the chosen one has no key
     // and say where to get one. Picking a model from a provider you have not
     // configured otherwise fails at the first message with a bare 401, and

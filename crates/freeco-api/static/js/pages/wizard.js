@@ -371,7 +371,7 @@ function wizardPage() {
     },
 
     get popularProviders() {
-      var popular = ['openrouter', 'anthropic', 'openai', 'gemini', 'deepseek', 'groq', 'claude-code'];
+      var popular = ['nvidia', 'openrouter', 'anthropic', 'openai', 'gemini', 'deepseek', 'groq', 'claude-code'];
       return this.providers.filter(function(p) {
         return popular.indexOf(p.id) >= 0;
       }).sort(function(a, b) {
@@ -380,7 +380,7 @@ function wizardPage() {
     },
 
     get otherProviders() {
-      var popular = ['openrouter', 'anthropic', 'openai', 'gemini', 'deepseek', 'groq', 'claude-code'];
+      var popular = ['nvidia', 'openrouter', 'anthropic', 'openai', 'gemini', 'deepseek', 'groq', 'claude-code'];
       return this.providers.filter(function(p) {
         return popular.indexOf(p.id) < 0;
       });
@@ -588,6 +588,8 @@ function wizardPage() {
 
     defaultModelForProvider(providerId) {
       var defaults = {
+        // Free on NVIDIA's own endpoint, and the most capable there.
+        nvidia: 'nvidia/nemotron-3-ultra-550b-a55b',
         anthropic: 'claude-sonnet-4-20250514',
         openai: 'gpt-4o',
         gemini: 'gemini-2.5-flash',

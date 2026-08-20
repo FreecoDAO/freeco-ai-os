@@ -1888,9 +1888,24 @@ pub struct DefaultModelConfig {
 impl Default for DefaultModelConfig {
     fn default() -> Self {
         Self {
-            provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            // NVIDIA's free NIM tier, and the most capable model on it.
+            //
+            // This defaulted to Anthropic, which bills before the first
+            // message: a new user installed FreEco.ai, typed hello, and got an
+            // authentication failure. Nothing in that error says the product
+            // had chosen a paid provider on their behalf.
+            //
+            // Nemotron 3 Ultra is free on NVIDIA's own endpoint with no daily
+            // token cap, and at 550B it is a frontier model rather than a
+            // consolation prize -- so the default a user can actually run is
+            // also the capable one.
+            //
+            // base_url stays None: the provider registry already holds
+            // NVIDIA's endpoint, and repeating it here would be a second copy
+            // to keep in step.
+            provider: "nvidia".to_string(),
+            model: "nvidia/nemotron-3-ultra-550b-a55b".to_string(),
+            api_key_env: "NVIDIA_API_KEY".to_string(),
             base_url: None,
             subprocess_timeout_secs: None,
         }
