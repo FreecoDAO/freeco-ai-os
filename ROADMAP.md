@@ -97,6 +97,75 @@ recorded as such.
 
 ## Unreleased
 
+## Planned — containers, users, local and cloud
+
+The sequence matters more than the items. Phase 1 is a gate: every later phase
+assumes a row can say who owns it, and today no row can.
+
+### Phase 1 — Foundation
+
+- [ ] **`users` and `tenants` tables, `tenant_id` on every owned row.** This
+  does not exist. `/api/auth/login` and `/api/users` are on `main`, but the
+  database has no user or tenant concept, so nothing can be scoped to anyone.
+  Multi-tenancy is not half-built here; it is designed-for and not started.
+- [ ] **Merge `copilot/introduce-multiuser-support`** for local accounts. It
+  stores users in `config.toml` (`name`, `role`, `password_hash`,
+  `api_key_hash`, `enabled`), which is right for a handful of accounts on one
+  machine and wrong as a tenancy model — a config entry cannot scope a database
+  row. Take its session hardening; treat config users as a seed for the local
+  case, not a second user system.
+- [ ] **Wire the data gateway into the LLM call path.** `freeco-datagateway`
+  is built and tested and called by nothing, so prompts are not scanned for
+  keys today. This must land before social login, which routes real Google,
+  GitHub and Microsoft tokens through the same path.
+
+### Phase 2 — Containers that can actually build
+
+Podman rather than Docker: daemonless, rootless by default, and OCI-compatible,
+so the same images and the same commands work. Docker Desktop's daemon wedges
+on Windows and takes every call that probes it down with it.
+
+- [ ] **Runtime selection** (`docker.runtime = "podman" | "docker"`). Done and
+  merged; Podman needs proving on a machine that can pull an image.
+- [ ] **Raise the limits.** 512 MB and a 60-second timeout cannot build
+  anything — `pnpm install` or `cargo build` is killed mid-flight, and Postgres
+  will not start. T1 needs ~4 GB and minutes; T2 needs ~8 GB and no timeout.
+- [ ] **A T1 image with Node in it.** `deploy/sandbox/Dockerfile` exists in this
+  repository with rust, cargo, clippy, git, python3, jq and ripgrep, and is not
+  the default — the default is `python:3.12-slim`, which has no Node, so a
+  JavaScript project cannot be built at all. Add Node 22, `gh` and `socat`, and
+  build it with `podman build`. The Dockerfile is OCI, so no rewrite is needed
+  for the runtime change.
+- [ ] **Hibernate rather than destroy.** Idle cleanup currently removes the
+  container. Stopping it keeps the filesystem and resumes instantly, which is
+  what makes a workspace worth returning to.
+- [ ] **A `tier` field** replacing the scattered `scope`/`service`/
+  `persistent_workspace` flags: T0 exec, T1 workspace, T2 service.
+
+### Phase 3 — Tenant isolation
+
+- [ ] **One SQLite database per tenant.** The strongest isolation model — no
+  query can cross a tenant boundary because there is no shared table to cross.
+  It is also why this project is unusually well placed for the sync
+  requirement: the tenant boundary and the sync unit are the same file, in the
+  same format a local install already uses.
+- [ ] **T3 tenant envelope** — a per-user container holding that user's T0–T2,
+  hibernated when they log out.
+- [ ] **Per-tenant quotas** on CPU, memory, disk and spend.
+
+### Phase 4 — Cloud
+
+- [ ] Ingress and TLS, routing `user.freeco.ai` to that tenant's envelope.
+- [ ] **Social login mapped to a tenant.** Identity, not a security boundary.
+  Depends on Phase 1's gateway work.
+- [ ] Per-tenant backup and restore.
+
+### Phase 5 — Sync
+
+- [ ] Local ↔ cloud reconciliation over the same schema.
+- [ ] Conflict resolution.
+- [ ] "Cloud only", "local only" or "synced" as a user choice.
+
 ## Partial — do not describe these as done
 
 - ⚠️ **Unified inbox and contacts (CRM).** The tables exist
