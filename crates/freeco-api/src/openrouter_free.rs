@@ -95,6 +95,15 @@ pub async fn list_free_models(State(_state): State<Arc<AppState>>) -> impl IntoR
                         "id": m["id"].as_str().unwrap_or(""),
                         "name": m["name"].as_str().unwrap_or(""),
                         "context_length": m["context_length"].as_u64().unwrap_or(0),
+                        // Whether the model can call tools at all. Without it
+                        // the picker offers models that fail on the very first
+                        // turn with an error about tool support -- which reads
+                        // as the product being broken rather than the model
+                        // being unsuitable for agent work.
+                        "supports_tools": m["supported_parameters"]
+                            .as_array()
+                            .map(|ps| ps.iter().any(|p| p.as_str() == Some("tools")))
+                            .unwrap_or(false),
                         "free": is_free(m),
                         "description": truncate(m["description"].as_str().unwrap_or(""), 220),
                     })

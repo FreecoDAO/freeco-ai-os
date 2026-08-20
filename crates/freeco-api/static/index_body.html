@@ -1129,8 +1129,27 @@
                               <a x-show="modelKeyWarning().url" :href="modelKeyWarning().url" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline" x-text="'Get a ' + modelKeyWarning().provider + ' key'"></a>
                             </div>
                           </template>
+                          <!-- Choose by intent, not by knowing model ids.
+                               "Best free" resolves to the widest-context
+                               tool-capable free model currently served, so it
+                               stays correct as providers rotate models rather
+                               than pinning an id that gets delisted. -->
+                          <select class="form-input" style="width:220px;font-size:12px;margin-right:6px"
+                                  x-model="modelMode" @change="applyModelMode()">
+                            <option value="best-free">Best free (recommended)</option>
+                            <option value="free">Free models only</option>
+                            <option value="all">All models</option>
+                          </select>
+                          <span class="text-xs text-dim" x-show="modelMode === 'best-free' && bestFreeModel()">
+                            &rarr; <span x-text="bestFreeModel() ? bestFreeModel().id : ''"></span>
+                          </span>
+                          <div class="text-xs text-dim" style="margin-top:4px">
+                            <span x-text="usableModels().length"></span> models can run agents
+                            (tool-capable). Models without tool support are hidden &mdash; they
+                            fail on the first turn.
+                          </div>
                           <datalist id="of-model-list">
-                            <template x-for="m in catalogModels" :key="m.id">
+                            <template x-for="m in usableModels()" :key="m.id">
                               <option :value="m.id" x-text="(m.free ? 'FREE - ' : '') + (m.name || m.id)"></option>
                             </template>
                           </datalist>
@@ -1307,6 +1326,33 @@
                       <div class="flex gap-1">
                         <input class="form-input" style="font-size:12px;flex:1" x-model="newAllowTool" list="of-tool-names" placeholder="search tools..." @keydown.enter="addAllowTool()">
                         <button class="btn btn-ghost btn-sm" @click="addAllowTool()">Add</button>
+                        <button class="btn btn-ghost btn-sm" @click="showToolPicker = !showToolPicker; loadToolFilters()"
+                                x-text="showToolPicker ? 'Hide list' : 'Pick from list'"></button>
+                      </div>
+                      <!-- 65 tools added one at a time is not a workflow anyone
+                           finishes, and a typed name that does not exist filters
+                           nothing without saying so. Show the real list and let
+                           it be ticked. -->
+                      <div x-show="showToolPicker" style="margin-top:8px;border:1px solid var(--border);border-radius:4px;padding:8px">
+                        <div class="flex gap-1" style="margin-bottom:6px;align-items:center">
+                          <input class="form-input" style="font-size:12px;flex:1" x-model="toolSearch" placeholder="filter...">
+                          <button class="btn btn-ghost btn-sm" @click="selectAllVisible()">Select all<span x-show="toolSearch"> shown</span></button>
+                          <button class="btn btn-ghost btn-sm" @click="clearAllowlist()">Clear</button>
+                        </div>
+                        <div class="text-xs text-dim" style="margin-bottom:6px">
+                          An empty allowlist means <strong>every tool is available</strong>, not none.
+                        </div>
+                        <div style="max-height:220px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:2px">
+                          <template x-for="t in visibleTools()" :key="'tp-'+t">
+                            <label style="font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;padding:2px 4px">
+                              <input type="checkbox" :checked="isAllowed(t)" @change="toggleAllowTool(t)">
+                              <span x-text="t"></span>
+                            </label>
+                          </template>
+                        </div>
+                        <div class="text-xs text-dim" style="margin-top:6px">
+                          <span x-text="toolFilters.tool_allowlist.length"></span> of <span x-text="(availableTools || []).length"></span> selected
+                        </div>
                       </div>
                     </div>
                     <div class="form-group">

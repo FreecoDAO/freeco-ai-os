@@ -158,6 +158,47 @@ function agentsPage() {
       this.inlineKeySaving = false;
     },
 
+    // Tool filters as a checkbox list rather than type-a-name-and-press-Add.
+    //
+    // There are 65 tools. Adding them one at a time is not a workflow anyone
+    // completes, and typing a name blind means a typo silently filters
+    // nothing. The list is what the agent can actually call, so it should be
+    // shown and ticked.
+    showToolPicker: false,
+    toolSearch: '',
+
+    visibleTools() {
+      var q = (this.toolSearch || '').toLowerCase().trim();
+      var all = this.availableTools || [];
+      return q ? all.filter(function (t) { return t.toLowerCase().indexOf(q) >= 0; }) : all;
+    },
+
+    isAllowed(tool) {
+      return (this.toolFilters.tool_allowlist || []).indexOf(tool) >= 0;
+    },
+
+    toggleAllowTool(tool) {
+      var list = this.toolFilters.tool_allowlist || (this.toolFilters.tool_allowlist = []);
+      var i = list.indexOf(tool);
+      if (i >= 0) list.splice(i, 1); else list.push(tool);
+    },
+
+    // Select-all applies to what is currently filtered, not the whole list:
+    // searching then selecting all is the point of searching.
+    selectAllVisible() {
+      var self = this;
+      var list = this.toolFilters.tool_allowlist || (this.toolFilters.tool_allowlist = []);
+      this.visibleTools().forEach(function (t) {
+        if (list.indexOf(t) < 0) list.push(t);
+      });
+    },
+
+    clearAllowlist() {
+      // Empty means "all tools", which is not the same as "none" -- say so
+      // rather than leaving the user to infer it from an empty box.
+      this.toolFilters.tool_allowlist = [];
+    },
+
     // Providers, so the model picker can warn that the chosen one has no key
     // and say where to get one. Picking a model from a provider you have not
     // configured otherwise fails at the first message with a bare 401, and
@@ -193,6 +234,43 @@ function agentsPage() {
         url: p.signup_url || '',
         hint: p.signup_hint || "Add this provider's API key in Settings."
       };
+    },
+
+    // How the model is chosen, rather than making everyone know model ids.
+    //
+    // "Best free" is the honest default: it picks the widest-context
+    // tool-capable free model currently served, so it stays right as providers
+    // rotate models in and out instead of pinning an id that will be delisted.
+    modelMode: 'best-free',
+
+    // Only models that can actually run an agent. A model without tool support
+    // fails on the first turn with an error about tools, which reads as the
+    // product being broken rather than the model being unsuitable.
+    usableModels() {
+      var mode = this.modelMode;
+      var all = (this.catalogModels || []).filter(function (m) {
+        return m.supports_tools !== false;
+      });
+      if (mode === 'free') return all.filter(function (m) { return m.free; });
+      if (mode === 'best-free') {
+        var free = all.filter(function (m) { return m.free; });
+        free.sort(function (a, b) { return (b.context_length || 0) - (a.context_length || 0); });
+        return free;
+      }
+      return all;
+    },
+
+    // The single model "best free" resolves to right now.
+    bestFreeModel() {
+      var f = this.usableModels();
+      return f.length ? f[0] : null;
+    },
+
+    applyModelMode() {
+      if (this.modelMode === 'best-free') {
+        var b = this.bestFreeModel();
+        if (b) this.newModelValue = b.id;
+      }
     },
 
     async loadModelCatalog() {
