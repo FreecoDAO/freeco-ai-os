@@ -8,7 +8,7 @@ use freeco_types::model_catalog::{
     AZURE_OPENAI_BASE_URL, BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
     DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
     HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
-    MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL,
+    MINIMAX_BASE_URL, OMNIROUTE_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL,
     OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
     REPLICATE_BASE_URL, REQUESTY_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL,
     VLLM_BASE_URL, VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
@@ -675,6 +675,19 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             display_name: "vLLM".into(),
             api_key_env: "VLLM_API_KEY".into(),
             base_url: VLLM_BASE_URL.into(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            // An OpenAI-compatible gateway in front of many providers, so it
+            // needs no driver of its own. Keys live in OmniRoute, not here,
+            // which is the point: one endpoint instead of a dashboard per
+            // vendor, and a free tier that keeps working when one runs dry.
+            id: "omniroute".into(),
+            display_name: "OmniRoute (gateway)".into(),
+            api_key_env: "OMNIROUTE_API_KEY".into(),
+            base_url: OMNIROUTE_BASE_URL.into(),
             key_required: false,
             auth_status: AuthStatus::NotRequired,
             model_count: 0,

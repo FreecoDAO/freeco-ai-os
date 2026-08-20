@@ -21,6 +21,15 @@ pub const FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 pub const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 pub const VLLM_BASE_URL: &str = "http://localhost:8000/v1";
 pub const LMSTUDIO_BASE_URL: &str = "http://localhost:1234/v1";
+
+/// OmniRoute, an OpenAI-compatible gateway that fronts many providers at once.
+///
+/// Runs on the user's own machine, so no key is required here: whatever keys
+/// it needs it holds itself, and requests never leave localhost until it
+/// forwards them. That is also why it appears alongside Ollama and LM Studio
+/// rather than among the hosted providers -- from FreEco.ai's side it is a
+/// local endpoint, and the routing happens behind it.
+pub const OMNIROUTE_BASE_URL: &str = "http://localhost:20128/v1";
 pub const LEMONADE_BASE_URL: &str = "http://localhost:8888/api/v1";
 pub const PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
 pub const COHERE_BASE_URL: &str = "https://api.cohere.com/v2";
