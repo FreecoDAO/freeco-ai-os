@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+### Fixed
+
+- Model ids where the provider name is part of the id are no longer corrupted
+  when saved. `nvidia/nemotron-3-ultra-550b-a55b` was stored as
+  `nemotron-3-ultra-550b-a55b`, which NVIDIA does not serve: the request 404'd,
+  the fallback chain fired, and the user was shown an error about a different
+  model on a provider they never chose, while the dashboard still displayed the
+  model they picked.
+- Agent workspaces pointed at `~/.openfang` after the data had moved to
+  `~/.freeco-ai`. Both paths resolving hid it; one agent had already dropped
+  out of the registry, and archiving the old directory would have stopped the
+  rest from starting.
+- Agent config no longer asks for the name of an environment variable. It asks
+  which provider's key to use, and accepts the key itself in the same screen.
+
+### Added
+
+- NVIDIA NIM as the default provider: Nemotron 3 Ultra 550B, free with no daily
+  token cap, recorded at zero cost because that is what the provider charges.
+- Working and secret-handling guidelines in every agent's system prompt,
+  subagents included.
+- Tool filters as a checkbox list with select-all.
+- Model selection by intent -- best free, free only, or all -- with models that
+  cannot call tools hidden, since they fail on the first turn.
+- `scripts/refresh_model_catalog.py`, which checks the catalog against what
+  providers actually serve. It found 15 delisted ids.
+
 ## [0.9.7] - 2026-08-15
 
 ### Fixed
