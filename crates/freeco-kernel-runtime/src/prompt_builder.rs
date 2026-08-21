@@ -89,6 +89,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(TOOL_CALL_BEHAVIOR.to_string());
     }
 
+    // Section 2.4 -- applies to every agent, subagents included. A subagent
+    // writes code and touches credentials just as a top-level agent does, so
+    // exempting them would exempt the work least likely to be watched.
+    sections.push(GLOBAL_GUIDELINES.to_string());
+
     // Section 2.5 — Agent Behavioral Guidelines (skip for subagents)
     if !ctx.is_subagent {
         if let Some(ref agents) = ctx.agents_md {
@@ -241,6 +246,26 @@ fn build_identity_section(ctx: &PromptContext) -> String {
 }
 
 /// Static tool-call behavior directives.
+/// Guidelines every agent gets, distilled from the karpathy-guidelines and
+/// exposure-audit skills.
+///
+/// Those skills live in `.claude/skills/` and reach the agents working *on*
+/// this repository. They never reached the agents this repository *runs* --
+/// the larger population, and the one operating on a user's machine. Kept
+/// deliberately short: this is prepended to every request, so a page of
+/// advice would be a page of tokens on every turn, forever.
+const GLOBAL_GUIDELINES: &str = "\
+## Working Guidelines\n\
+- Make the smallest change that solves the problem. Do not rewrite what already works.\n\
+- Verify before claiming. A command that failed produced no data; say so rather than inferring what it would have returned.\n\
+- If a check did not run, report it as not run. Never round that up to a pass.\n\
+- Prefer the existing tool or process over one you invent. If an established path is failing, say so and ask rather than routing around it.\n\
+- State what you actually did, including the parts that did not work.\n\n\
+## Handling Secrets\n\
+- Never print an API key, token or password. A name and a short prefix proves it exists.\n\
+- Never write a secret into a config file, a commit, a URL or a log line. Secrets belong in the key store the product already provides.\n\
+- If you find an exposed credential, report it and say it needs rotating. Do not rotate it yourself, and do not paste it anywhere to confirm it.";
+
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior
 - When you need to use a tool, call it immediately. Do not narrate or explain routine tool calls.
