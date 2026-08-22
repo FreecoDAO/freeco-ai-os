@@ -15,6 +15,7 @@ pub mod migration;
 pub mod org;
 pub mod semantic;
 pub mod session;
+pub mod tenancy;
 pub mod structured;
 pub mod usage;
 

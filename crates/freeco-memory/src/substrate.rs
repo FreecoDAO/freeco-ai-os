@@ -7,6 +7,7 @@ use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
 use crate::migration::run_migrations;
 use crate::org::OrgStore;
+use crate::tenancy::TenancyStore;
 use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
@@ -35,6 +36,7 @@ pub struct MemorySubstrate {
     knowledge: KnowledgeStore,
     sessions: SessionStore,
     org: OrgStore,
+    tenancy: TenancyStore,
     consolidation: ConsolidationEngine,
     usage: UsageStore,
 }
@@ -71,6 +73,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             org: OrgStore::new(Arc::clone(&shared)),
+            tenancy: TenancyStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
         })
@@ -125,6 +128,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             org: OrgStore::new(Arc::clone(&shared)),
+            tenancy: TenancyStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
         })
@@ -244,6 +248,11 @@ impl MemorySubstrate {
     /// List agent conversations (the canonical store) with their names.
     pub fn list_canonical_sessions(&self) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_canonical_sessions()
+    }
+
+    /// Tenants and users: who owns a row, and who may sign in.
+    pub fn tenancy(&self) -> &TenancyStore {
+        &self.tenancy
     }
 
     /// Conversations whose owning agent no longer exists.

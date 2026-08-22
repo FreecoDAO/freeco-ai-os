@@ -6648,6 +6648,79 @@ fn session_json(session: &freeco_memory::session::Session) -> serde_json::Value 
     })
 }
 
+/// GET /api/tenancy — who owns this install, and who may sign in.
+///
+/// The dashboard had `/api/users` before this and no table behind it, so it
+/// could show accounts without anything being able to say which data belonged
+/// to whom. This returns both halves together because they are only useful
+/// together: a user without a tenant cannot be scoped, and a tenant without
+/// users cannot be reached.
+pub async fn get_tenancy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = state.kernel.memory.tenancy();
+    let tenant = match store.local_tenant() {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            );
+        }
+    };
+    let users = store.users_in_tenant(&tenant.id).unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "tenant": {
+                "id": tenant.id,
+                "name": tenant.name,
+                "kind": tenant.kind,
+                "status": tenant.status,
+            },
+            "users": users,
+            // Reported so the dashboard can say "one account, no sign-in
+            // required" rather than implying a multi-user setup that is not
+            // configured.
+            "user_count": users.len(),
+        })),
+    )
+}
+
+/// POST /api/tenancy/users — add a person to this install.
+pub async fn create_tenancy_user(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let name = body["name"].as_str().unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "name is required"})),
+        );
+    }
+    let role = freeco_memory::tenancy::Role::parse(body["role"].as_str().unwrap_or("user"));
+    let email = body["email"].as_str();
+
+    let store = state.kernel.memory.tenancy();
+    let tenant = match store.local_tenant() {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            );
+        }
+    };
+
+    match store.create_user(&tenant.id, &name, email, role, None, None, None) {
+        Ok(user) => (StatusCode::CREATED, Json(serde_json::json!(user))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 /// DELETE /api/sessions/:id — Delete a session.
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
