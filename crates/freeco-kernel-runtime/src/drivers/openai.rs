@@ -160,7 +160,17 @@ struct OaiRequest {
     tools: Vec<OaiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    /// Always sent, including when false.
+    ///
+    /// The OpenAI spec defaults this to false when omitted, so skipping it was
+    /// correct on paper. OmniRoute streams when the field is absent and returns
+    /// JSON only when it is explicitly false, so omission produced an SSE body
+    /// where the driver expected an object -- surfacing as
+    /// "Parse error: expected value at line 1 column 1", which says nothing
+    /// about streaming and sends you looking at the wrong thing entirely.
+    ///
+    /// Sending it explicitly is what the spec describes either way, and costs
+    /// one field.
     stream: bool,
     /// Request usage stats in streaming responses (OpenAI extension, supported by Groq et al).
     #[serde(skip_serializing_if = "Option::is_none")]
