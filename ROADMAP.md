@@ -119,19 +119,17 @@ recorded as such.
   had migrated; the paths inside each `agent.toml` had not, and one agent had
   already dropped out of the registry because of it.
 
+- 🟨 The Assistant can perform setup, not just describe it: provider_key_set,
+  provider_list and agent_set_model. Keys are never echoed back.
+- 🟨 OmniRoute runs in a container and FreEco routes through it: 115 models
+  including the auto/best-* routes, plus 130 Arena leaderboard ratings.
+- 🟨 The sandbox works with Podman as well as Docker. It was Docker-only, so on
+  a Podman machine an agent was told to use a container it could not start.
+- 🟨 Agents are instructed never to install software on the host, to work in
+  their sandbox, and to ask first if something truly must touch the machine.
+- 🟨 `stream` is always sent. Omitting it made gateways that default to
+  streaming return SSE where the driver expected JSON.
 ## Partial — do not describe these as done
-
-- ⚠️ **OmniRoute** — registered as an OpenAI-compatible provider pointing at
-  `http://localhost:20128/v1`. Nothing installs or starts it, so selecting it
-  fails unless the user is already running it. Making it real means pulling the
-  image into the sandbox, starting it, and health-checking the port before the
-  provider is offered. Podman 6.1.0 is present and reachable on the dev machine
-  while the Docker daemon is not, and the sandbox code knows only about Docker.
-- ⚠️ **Agent-driven setup** — the Assistant can describe how to add a key or
-  change a model but cannot do either: none of its 65 tools reach providers,
-  keys, models or config. It needs `KernelHandle` methods behind the approval
-  flow, since a tool that writes API keys is the most injection-sensitive one
-  in the system.
 
 - ⚠️ **Unified inbox and contacts (CRM).** The tables exist
   (`inbox_messages`, `contacts`, `contact_handles`, migration v12) and are
