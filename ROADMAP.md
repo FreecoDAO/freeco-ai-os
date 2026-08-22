@@ -155,6 +155,15 @@ recorded as such.
 
 ### Not done — next
 
+- ✅ **Step 1 done — `users` and `tenants` tables, `tenant_id` on 16 owned
+  rows.** Both keyed by a generated id, never by display name: the previous
+  auth work keyed users by `name` and looked them up with
+  `find(|u| u.name == ...)`, which is the same shape as the bug that left 126
+  messages unreachable this week. Roles are ordered so a check is a
+  comparison, and an unknown role parses to the least privilege. Verified
+  against a copy of the real database - 1298 rows preserved, none left
+  without a tenant - and live on `GET /api/tenancy` and
+  `POST /api/tenancy/users`.
 - [ ] **Wire the data gateway into the LLM path.** Still called by nothing, so
   prompts are not scanned for keys. Must land before social login.
 - [ ] **`users` and `tenants` tables.** No row can say who owns it.
