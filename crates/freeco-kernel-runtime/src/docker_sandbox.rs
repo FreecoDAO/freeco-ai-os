@@ -111,19 +111,49 @@ fn workspace_owner(workspace: &Path) -> Result<Option<String>, String> {
 }
 
 /// Check if Docker is available on this system.
-pub async fn is_docker_available() -> bool {
-    match crate::quiet_command::quiet_async("docker")
-        .arg("version")
-        .arg("--format")
-        .arg("{{.Server.Version}}")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-    {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
+/// The container runtime to shell out to: `docker` or `podman`.
+///
+/// Docker was assumed everywhere, which meant the sandbox simply did not exist
+/// for anyone running Podman -- and Podman is the rootless default on Fedora,
+/// RHEL and increasingly elsewhere. The agent would be told to work in a
+/// container it had no way to start, and would reach for the host instead,
+/// which is precisely what the sandbox is there to prevent.
+///
+/// Docker is preferred when its daemon answers, so existing installs are
+/// unaffected; Podman is used when it does not. Both take the same arguments
+/// for everything here, so only the executable name changes.
+///
+/// Checked once and cached: this runs on every sandboxed tool call, and
+/// probing a runtime each time would add a process spawn to every one.
+pub async fn container_runtime() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<Option<&'static str>> = OnceLock::new();
+    if let Some(cached) = RUNTIME.get() {
+        return *cached;
     }
+    let mut found = None;
+    for candidate in ["docker", "podman"] {
+        let ok = crate::quiet_command::quiet_async(candidate)
+            .arg("version")
+            .arg("--format")
+            .arg("{{.Server.Version}}")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            found = Some(candidate);
+            break;
+        }
+    }
+    let _ = RUNTIME.set(found);
+    found
+}
+
+pub async fn is_docker_available() -> bool {
+    container_runtime().await.is_some()
 }
 
 /// Check whether an image is already in the local Docker cache.
@@ -132,7 +162,7 @@ pub async fn is_docker_available() -> bool {
 /// connection means an unannounced multi-hundred-megabyte download. We check
 /// first so the user is told what it costs and decides when to pay it.
 pub async fn is_image_present(image: &str) -> bool {
-    match crate::quiet_command::quiet_async("docker")
+    match crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"))
         .arg("image")
         .arg("inspect")
         .arg(image)
@@ -174,7 +204,7 @@ pub async fn create_sandbox(
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
 
-    let mut cmd = crate::quiet_command::quiet_async("docker");
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
@@ -257,7 +287,7 @@ pub async fn exec_in_sandbox(
 ) -> Result<ExecResult, String> {
     validate_command(command)?;
 
-    let mut cmd = crate::quiet_command::quiet_async("docker");
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("exec")
         .arg(&container.container_id)
         .arg("sh")
@@ -304,7 +334,7 @@ pub async fn exec_in_sandbox(
 pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String> {
     debug!(container = %container.container_id, "Destroying Docker sandbox");
 
-    let output = crate::quiet_command::quiet_async("docker")
+    let output = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"))
         .arg("rm")
         .arg("-f")
         .arg(&container.container_id)

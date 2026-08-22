@@ -82,11 +82,16 @@ pub async fn sandbox_pull(State(state): State<Arc<AppState>>) -> impl IntoRespon
     if !freeco_kernel_runtime::docker_sandbox::is_docker_available().await {
         return Json(serde_json::json!({
             "ok": false,
-            "error": "Docker is not running, so the image cannot be downloaded. Start Docker Desktop and try again.",
+            "error": "No container runtime is running, so the image cannot be downloaded. Start Docker Desktop, or start Podman with `podman machine start`, and try again.",
         }));
     }
 
-    match freeco_kernel_runtime::quiet_command::quiet_async("docker")
+    // Whichever runtime is actually available -- the sandbox supports both,
+    // and assuming Docker left Podman users unable to pull the image at all.
+    let runtime = freeco_kernel_runtime::docker_sandbox::container_runtime()
+        .await
+        .unwrap_or("docker");
+    match freeco_kernel_runtime::quiet_command::quiet_async(runtime)
         .arg("pull")
         .arg(&image)
         .output()
@@ -103,7 +108,7 @@ pub async fn sandbox_pull(State(state): State<Arc<AppState>>) -> impl IntoRespon
         })),
         Err(e) => Json(serde_json::json!({
             "ok": false,
-            "error": format!("could not run docker pull: {e}"),
+            "error": format!("could not run {runtime} pull: {e}"),
         })),
     }
 }

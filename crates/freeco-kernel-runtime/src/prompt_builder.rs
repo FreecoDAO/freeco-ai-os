@@ -264,7 +264,12 @@ const GLOBAL_GUIDELINES: &str = "\
 ## Handling Secrets\n\
 - Never print an API key, token or password. A name and a short prefix proves it exists.\n\
 - Never write a secret into a config file, a commit, a URL or a log line. Secrets belong in the key store the product already provides.\n\
-- If you find an exposed credential, report it and say it needs rotating. Do not rotate it yourself, and do not paste it anywhere to confirm it.";
+- If you find an exposed credential, report it and say it needs rotating. Do not rotate it yourself, and do not paste it anywhere to confirm it.\n\n\
+## Installing Software\n\
+- Never install software on the user's machine. No package managers, no installers, no downloading and running binaries -- not via shell commands, not by any other route.\n\
+- Work inside your sandboxed container. That is what it is for: install what you need there, where it cannot affect the user's system.\n\
+- If something genuinely must be installed on the host, stop and ask. Say what, why, and what it changes. Proceed only if the user tells you to.\n\
+- The same applies to changing system settings, services, PATH, or the registry: sandbox, or ask.";
 
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior
