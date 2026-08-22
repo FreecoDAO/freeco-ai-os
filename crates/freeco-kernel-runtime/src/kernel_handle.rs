@@ -38,6 +38,32 @@ pub trait KernelHandle: Send + Sync {
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
 
     /// List all running agents.
+    /// Store an API key for a provider, and report whether it now works.
+    ///
+    /// Setup is the one thing the Assistant is asked for constantly and could
+    /// not do: it could describe where to paste a key and then watch the user
+    /// fail. The key goes to the same store the dashboard writes to, so it
+    /// never lands in config.toml or a log.
+    ///
+    /// The key is never echoed back. Callers get "configured" or an error,
+    /// which is all that is needed to decide what to say next.
+    fn set_provider_key(&self, provider: &str, key: &str) -> Result<String, String>;
+
+    /// Point an agent at a different model.
+    ///
+    /// Returns the id as stored, which is not always the id passed in -- the
+    /// catalog resolves aliases -- and the caller should report the stored one
+    /// so the user is told what actually happened.
+    fn set_agent_model_by_id(
+        &self,
+        agent_id: &str,
+        model: &str,
+        provider: Option<&str>,
+    ) -> Result<(String, String), String>;
+
+    /// Providers, with whether each already has a working key.
+    fn list_providers_status(&self) -> Vec<(String, String, bool)>;
+
     fn list_agents(&self) -> Vec<AgentInfo>;
 
     /// Kill an agent by ID.

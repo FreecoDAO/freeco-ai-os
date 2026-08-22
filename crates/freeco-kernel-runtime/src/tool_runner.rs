@@ -362,6 +362,12 @@ pub async fn execute_tool(
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
         "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
+        // Setup tools. These change configuration rather than reading it, so
+        // they are gated by the capability system like any other write.
+        "provider_key_set" => tool_provider_key_set(input, kernel),
+        "provider_list" => tool_provider_list(kernel),
+        "agent_set_model" => tool_agent_set_model(input, kernel),
+
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
         "agent_activate" => tool_agent_activate(input, kernel),
@@ -755,6 +761,39 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["manifest_toml"]
+            }),
+        },
+        ToolDefinition {
+            name: "provider_key_set".to_string(),
+            description: "Store an API key for a model provider so its models can be used.                           Pass the key itself, not the name of an environment variable.                           Use provider_list first to see which providers still need one.                           Never repeat the key back to the user."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "provider": { "type": "string", "description": "Provider id, e.g. nvidia, openrouter, anthropic" },
+                    "key": { "type": "string", "description": "The API key value itself" }
+                },
+                "required": ["provider", "key"]
+            }),
+        },
+        ToolDefinition {
+            name: "provider_list".to_string(),
+            description: "List model providers and whether each already has a working API key.                           Use this before telling a user to add one, so you know what is missing."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "agent_set_model".to_string(),
+            description: "Point an agent at a different model. The provider is derived from the                           model id unless given. Returns the id as stored, which can differ from                           the one passed because aliases are resolved -- report the stored one."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" },
+                    "model": { "type": "string", "description": "Model id, e.g. nvidia/nemotron-3-ultra-550b-a55b" },
+                    "provider": { "type": "string", "description": "Optional explicit provider id" }
+                },
+                "required": ["agent_id", "model"]
             }),
         },
         ToolDefinition {
@@ -1888,6 +1927,69 @@ async fn tool_agent_spawn(
     let (id, name) = kh.spawn_agent(manifest_toml, parent_id).await?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {name}"
+    ))
+}
+
+/// Store a provider key.
+///
+/// The key is never echoed, not in the result and not in an error. An agent
+/// that repeats a key back has written it into the conversation, which is
+/// stored, and that is a leak regardless of who was watching.
+fn tool_provider_key_set(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let provider = input["provider"]
+        .as_str()
+        .ok_or("provider is required")?
+        .trim();
+    let key = input["key"].as_str().ok_or("key is required")?;
+    kh.set_provider_key(provider, key)
+}
+
+fn tool_provider_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let rows = kh.list_providers_status();
+    if rows.is_empty() {
+        return Ok("No providers registered.".to_string());
+    }
+    let ready: Vec<&(String, String, bool)> = rows.iter().filter(|r| r.2).collect();
+    let mut out = format!(
+        "{} providers, {} with a working key.
+
+Ready:
+",
+        rows.len(),
+        ready.len()
+    );
+    for (id, env, _) in &ready {
+        out.push_str(&format!("  {id} ({env})
+"));
+    }
+    out.push_str("
+Need a key:
+");
+    for (id, env, ok) in &rows {
+        if !ok && !env.is_empty() {
+            out.push_str(&format!("  {id} ({env})
+"));
+        }
+    }
+    Ok(out)
+}
+
+fn tool_agent_set_model(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent_id = input["agent_id"].as_str().ok_or("agent_id is required")?;
+    let model = input["model"].as_str().ok_or("model is required")?;
+    let provider = input["provider"].as_str();
+    let (stored_model, stored_provider) = kh.set_agent_model_by_id(agent_id, model, provider)?;
+    Ok(format!(
+        "{agent_id} now uses {stored_model} on {stored_provider}."
     ))
 }
 
@@ -4995,6 +5097,29 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::kernel_handle::KernelHandle for FakeKernelHandle {
+        // Test double. Records nothing and touches no real key store: a mock
+        // that wrote to secrets.env would put a key on the developer's disk
+        // every time the suite ran.
+        fn set_provider_key(&self, provider: &str, key: &str) -> Result<String, String> {
+            if key.trim().is_empty() {
+                return Err("the key is empty".to_string());
+            }
+            Ok(format!("{provider} key stored"))
+        }
+
+        fn set_agent_model_by_id(
+            &self,
+            _agent_id: &str,
+            model: &str,
+            provider: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Ok((model.to_string(), provider.unwrap_or("test").to_string()))
+        }
+
+        fn list_providers_status(&self) -> Vec<(String, String, bool)> {
+            vec![("test".to_string(), "TEST_API_KEY".to_string(), true)]
+        }
+
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,

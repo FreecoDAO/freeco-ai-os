@@ -4233,7 +4233,22 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 42);
+        // Not an exact count. This asserted 42 and broke the moment a provider
+        // was added, which turns "we support one more provider" into a red
+        // build that says nothing about correctness. What matters is that the
+        // registry is populated and every entry is usable.
+        let providers = catalog.list_providers();
+        assert!(providers.len() >= 40, "provider registry looks truncated");
+        assert!(
+            providers.iter().all(|p| !p.id.is_empty()),
+            "a provider with no id cannot be selected"
+        );
+        for want in ["openrouter", "nvidia", "anthropic", "openai"] {
+            assert!(
+                providers.iter().any(|p| p.id == want),
+                "{want} missing from the provider registry"
+            );
+        }
     }
 
     #[test]

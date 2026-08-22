@@ -7329,6 +7329,86 @@ impl KernelHandle for FreecoKernel {
         Ok((id.to_string(), name))
     }
 
+    fn set_provider_key(&self, provider: &str, key: &str) -> Result<String, String> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("the key is empty".to_string());
+        }
+        // People paste the .env line rather than the value, because that is
+        // what they were given. Take the value instead of refusing.
+        let key = match key.split_once('=') {
+            Some((name, value))
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) =>
+            {
+                value.trim()
+            }
+            _ => key,
+        };
+
+        let env_var = self.config.resolve_api_key_env(provider);
+        if env_var.is_empty() {
+            return Err(format!("{provider} does not take an API key"));
+        }
+
+        let path = self.config.home_dir.join("secrets.env");
+        freeco_types::secrets::write_secret_env(&path, &env_var, key)
+            .map_err(|e| format!("could not store the key: {e}"))?;
+        // The running process must see it too, or the very next request still
+        // fails and the agent reports success for something that did not work.
+        std::env::set_var(&env_var, key);
+
+        if let Ok(mut catalog) = self.model_catalog.write() {
+            catalog.detect_auth();
+        }
+        Ok(format!("{provider} key stored in {env_var}"))
+    }
+
+    fn set_agent_model_by_id(
+        &self,
+        agent_id: &str,
+        model: &str,
+        provider: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let id: AgentId = match agent_id.parse() {
+            Ok(id) => id,
+            Err(_) => self
+                .registry
+                .find_by_name(agent_id)
+                .map(|e| e.id)
+                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
+        };
+        self.set_agent_model(id, model, provider)
+            .map_err(|e| e.to_string())?;
+        // Report what was stored, not what was asked for: the catalog resolves
+        // aliases, so those can differ and the user should be told the truth.
+        self.registry
+            .get(id)
+            .map(|e| (e.manifest.model.model.clone(), e.manifest.model.provider.clone()))
+            .ok_or_else(|| "agent vanished while setting its model".to_string())
+    }
+
+    fn list_providers_status(&self) -> Vec<(String, String, bool)> {
+        let catalog = match self.model_catalog.read() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        catalog
+            .list_providers()
+            .iter()
+            .map(|p| {
+                let configured = !p.api_key_env.is_empty()
+                    && std::env::var(&p.api_key_env)
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .is_some();
+                (p.id.clone(), p.api_key_env.clone(), configured)
+            })
+            .collect()
+    }
+
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String> {
         // Try UUID first, then fall back to name lookup
         let id: AgentId = match agent_id.parse() {
