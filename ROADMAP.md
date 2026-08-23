@@ -97,6 +97,83 @@ recorded as such.
 
 ## Unreleased
 
+### Done — sandbox tiers and a working container runtime
+
+- ✅ **Podman runs containers on this machine.** Verified end to end:
+  `podman machine init` from a locally fetched image, `machine start`,
+  `podman run` pulling and executing a container, and `podman version`
+  answering in seconds. This is the first container runtime that has ever
+  worked here — Docker Desktop's daemon never completed an image pull.
+- ✅ **The image had to be fetched with resume.** `podman machine init` pulls
+  in one shot with no resume, so on a connection that drops mid-transfer it
+  restarts from zero and never finishes; four attempts failed that way. The
+  WSL rootfs on GitHub releases is 238 MB rather than the ~1 GB OCI image, and
+  `curl -C -` in a retry loop completed it. Verified by zstd magic number, not
+  by file size, so a truncated file could not be mistaken for a finished one.
+- ✅ **Runtime is selectable** (`docker.runtime`). Zero hardcoded `docker`
+  invocations remain; every call goes through the configured binary, and the
+  runtime is carried per container because a container must be exec'd into and
+  removed by the runtime that created it.
+- ✅ **Sandbox tiers.** `exec` / `workspace` / `service`, with memory, timeout,
+  PID limit, network and reapability following from the tier. The old defaults
+  — 512 MB, 60 seconds, 100 PIDs — were correct for running a command and made
+  building anything impossible: `pnpm install` was killed mid-flight and
+  Postgres would not start. Explicit limits in an existing config still win.
+- ✅ **A build-capable image.** `deploy/sandbox/Dockerfile` gains Node 22,
+  pnpm, yarn, `gh` and `socat`. The default was `python:3.12-slim`, which has
+  no Node at all, so an agent asked to build a web app could not install a
+  single dependency.
+- ✅ **Hibernate instead of destroy.** Idle cleanup now stops the container
+  rather than removing it, so dependencies installed into it survive. Files
+  under the workspace were always safe — that is a host bind mount — but
+  everything in the image layers was thrown away.
+- ✅ **Approval before a service starts.** A service keeps running after the
+  call returns, publishes a port, and is exempt from cleanup, so approving
+  "run a command" must not silently approve that.
+- ✅ **The Docker probe is bounded at five seconds.** It had no timeout, so a
+  wedged CLI — routine on Windows — hung every call that checked for it, with
+  nothing reported.
+- ✅ **Backups include agent workspaces.** They were excluded entirely, so a
+  restore returned the database and the agents and none of their work.
+  Regenerable directories are skipped and files above 64 MB are reported
+  rather than silently dropped.
+- ✅ **Local AI asks every time on unsuitable hardware.** `428` unless the
+  caller confirms, with the reason and the estimated minutes per turn. A setup
+  approved once used to keep starting forever.
+- ✅ **Approvals explain themselves in the dashboard.** The kernel filled in
+  `aim` and `consequences` and the API dropped them, so the UI could only show
+  the raw command — the exact thing the explanation exists to replace.
+
+### Verified, correcting earlier claims
+
+- The WSL machine reports 2 GiB in `podman machine list`, but a container is
+  granted 8 GB and sees 14.3 GB. That figure is stale metadata, not a ceiling;
+  no resize is needed and `.wslconfig` was left as the user had it.
+- The sandbox code is runtime-agnostic. A grep for "podman" finds one comment,
+  because the code never names the binary — it invokes `config.runtime`.
+  Concluding "no Podman support" from that grep inverts the logic.
+
+### Not done — next
+
+- ✅ **Step 1 done — `users` and `tenants` tables, `tenant_id` on 16 owned
+  rows.** Both keyed by a generated id, never by display name: the previous
+  auth work keyed users by `name` and looked them up with
+  `find(|u| u.name == ...)`, which is the same shape as the bug that left 126
+  messages unreachable this week. Roles are ordered so a check is a
+  comparison, and an unknown role parses to the least privilege. Verified
+  against a copy of the real database - 1298 rows preserved, none left
+  without a tenant - and live on `GET /api/tenancy` and
+  `POST /api/tenancy/users`.
+- [ ] **Wire the data gateway into the LLM path.** Still called by nothing, so
+  prompts are not scanned for keys. Must land before social login.
+- [ ] **`users` and `tenants` tables.** No row can say who owns it.
+- [ ] Build the T1 image with `podman build` and make it the default.
+- [ ] Rebuild the desktop app from this repo. The installed one is from
+      2026-08-12, still named `openfang-desktop`, and seizes port 50051 with
+      code that predates every fix in this session.
+- [ ] Prove a service tier end to end by hosting something real in it.
+
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase

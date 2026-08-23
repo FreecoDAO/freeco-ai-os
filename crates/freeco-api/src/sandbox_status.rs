@@ -23,6 +23,37 @@ use std::sync::Arc;
 pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.kernel.config.docker;
 
+    // Report what a container would actually get, not the raw config.
+    //
+    // These fields used to read config.memory_limit and friends directly,
+    // which are the pre-tier defaults. With a workspace tier configured the
+    // panel still said "512 MB, no network, 60s" while a real container got
+    // 4 GB and a network - so the one place a user checks whether the sandbox
+    // can build anything was telling them it could not.
+    //
+    // The same precedence as create_sandbox: an explicitly tuned config wins,
+    // otherwise the tier decides.
+    let effective_memory = if config.memory_limit == "512m" {
+        config.tier.memory_limit().to_string()
+    } else {
+        config.memory_limit.clone()
+    };
+    let effective_pids = if config.pids_limit == 100 {
+        config.tier.pids_limit()
+    } else {
+        config.pids_limit
+    };
+    let effective_network = if config.network == "none" {
+        config.tier.network().to_string()
+    } else {
+        config.network.clone()
+    };
+    let effective_timeout = if config.timeout_secs == 60 {
+        config.tier.timeout_secs()
+    } else {
+        config.timeout_secs
+    };
+
     let docker_running = freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
     // Only probe the image when Docker answers; otherwise the inspect call
     // just times out and we would report "image missing" for the wrong reason.
@@ -57,13 +88,18 @@ pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         // The protections actually in force, so the user can see the boundary
         // rather than take it on faith.
         "protections": {
-            "network": config.network,
-            "network_blocked": config.network == "none",
-            "memory_limit": config.memory_limit,
+            "tier": match config.tier {
+                freeco_types::config::SandboxTier::Exec => "exec",
+                freeco_types::config::SandboxTier::Workspace => "workspace",
+                freeco_types::config::SandboxTier::Service => "service",
+            },
+            "network": effective_network,
+            "network_blocked": effective_network == "none",
+            "memory_limit": effective_memory,
             "cpu_limit": config.cpu_limit,
-            "pids_limit": config.pids_limit,
+            "pids_limit": effective_pids,
             "read_only_root": config.read_only_root,
-            "timeout_secs": config.timeout_secs,
+            "timeout_secs": effective_timeout,
             "capabilities_dropped": "ALL",
             "no_new_privileges": true,
         },

@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Current schema version.
 // Must be bumped whenever a migration is added, or the new migration
 // never runs on an existing database.
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -70,6 +70,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 13 {
         migrate_v13(conn)?;
+    }
+
+    if current_version < 14 {
+        migrate_v14(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -738,6 +742,142 @@ fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     Ok(())
 }
+
+/// Tenants and users: the row-level answer to "who owns this?".
+///
+/// Nothing in this database could say that before. There were auth endpoints
+/// and a dashboard password, but no table recorded a person, and no row
+/// recorded an owner - so every query returned everything to everyone. That is
+/// survivable for one person on one laptop and is the whole problem for a
+/// hosted service.
+///
+/// Two separate things, deliberately:
+///
+/// - a **tenant** is an isolation boundary and owns data. In the cloud it is
+///   one customer; locally it is the single install.
+/// - a **user** is a person who signs in. Several users can belong to one
+///   tenant - a family, a team - which is what the existing role work
+///   (owner/admin/user/kid/viewer) is about.
+///
+/// Both are keyed by a generated id, never by name. Display names change, and
+/// history keyed to a mutable string orphans the moment someone renames
+/// themselves. That failure has already happened in this project once, to
+/// conversation history keyed by an agent id that changed underneath it, and
+/// it looked exactly like deletion.
+fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS tenants (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            -- 'local' for an install on someone's own machine, 'cloud' for a
+            -- hosted one. The same schema serves both, which is what makes
+            -- syncing between them a reconciliation rather than a translation.
+            kind         TEXT NOT NULL DEFAULT 'local',
+            status       TEXT NOT NULL DEFAULT 'active',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id            TEXT PRIMARY KEY,
+            tenant_id     TEXT NOT NULL,
+            -- Display name. Mutable on purpose, and never used as a key.
+            name          TEXT NOT NULL,
+            email         TEXT,
+            role          TEXT NOT NULL DEFAULT 'user',
+            password_hash TEXT,
+            api_key_hash  TEXT,
+            -- Set when the account came from Google, GitHub or similar. Null
+            -- for a local password account.
+            provider      TEXT,
+            provider_sub  TEXT,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+        -- One identity per provider account, so a second sign-in with the same
+        -- Google account finds the existing user instead of creating a twin.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_provider
+            ON users(provider, provider_sub)
+            WHERE provider IS NOT NULL;
+        ",
+    )?;
+
+    // The install that is running now becomes tenant 1, and every existing row
+    // is assigned to it. Backfilling with a default is what keeps this
+    // migration non-destructive: nothing is orphaned, and a single-user
+    // install carries on behaving exactly as it did.
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO tenants (id, name, kind, status, created_at, updated_at) \
+         VALUES (?1, 'This install', 'local', 'active', ?2, ?2)",
+        rusqlite::params![LOCAL_TENANT_ID, now],
+    )?;
+
+    // `ALTER TABLE ... ADD COLUMN` fails if the column is already there, which
+    // is the normal case on a database that has run a newer build. Each is
+    // attempted independently and a failure ignored, so one already-migrated
+    // table cannot abort the rest.
+    for statement in [
+        r#"ALTER TABLE agents ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE canonical_sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE session_archive ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE companies ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE projects ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE teams ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE team_members ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE inbox_messages ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE contacts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE contact_handles ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE calendar_events ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE documents ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE tasks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE audit_entries ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+        r#"ALTER TABLE usage_events ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"#,
+    ] {
+        let _ = conn.execute(statement, []);
+    }
+
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_canonical_sessions_tenant ON canonical_sessions(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_session_archive_tenant ON session_archive(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_companies_tenant ON companies(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_projects_tenant ON projects(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_teams_tenant ON teams(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_team_members_tenant ON team_members(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_inbox_messages_tenant ON inbox_messages(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_contacts_tenant ON contacts(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_contact_handles_tenant ON contact_handles(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_calendar_events_tenant ON calendar_events(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_documents_tenant ON documents(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant ON audit_entries(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_events_tenant ON usage_events(tenant_id);
+        ",
+    )?;
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (14, datetime('now'), 'Tenants, users, and tenant_id on owned rows')",
+        [],
+    )?;
+
+    Ok(())
+}
+
+/// The tenant every pre-existing row belongs to.
+///
+/// A local install has exactly one, and it keeps the same id across upgrades
+/// so that data written before tenancy existed stays reachable afterwards.
+pub const LOCAL_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[cfg(test)]
 mod tests {

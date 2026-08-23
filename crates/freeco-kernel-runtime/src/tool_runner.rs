@@ -1332,11 +1332,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Docker sandbox tool ---
         ToolDefinition {
             name: "docker_exec".to_string(),
-            description: "Execute a command inside a Docker container sandbox. Provides OS-level isolation with resource limits, network isolation, and capability dropping. Requires Docker to be installed and docker.enabled=true.".to_string(),
+            description: "Execute a command inside an isolated Linux container. \
+Use tier='workspace' to build, test or install dependencies: that gets 4 GB, a \
+30 minute timeout, a writable workspace and network access. The default \
+tier='exec' is a throwaway container with no network and a 60 second limit, for \
+running a single command. Works with Docker or Podman.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The command to execute inside the container" }
+                    "command": { "type": "string", "description": "The command to execute inside the container" },
+                    // Declared so a model can actually pass it. The tier
+                    // existed as a config default first, which meant no caller
+                    // could ask for one and every sandbox stayed at the most
+                    // restrictive setting - the mechanism was there and nothing
+                    // reached it.
+                    "tier": {
+                        "type": "string",
+                        "enum": ["exec", "workspace"],
+                        "description": "exec (default): single command, no network, 512 MB, 60s. workspace: build and test, 4 GB, 30 min, network, writable workspace that persists between calls."
+                    }
                 },
                 "required": ["command"]
             }),
@@ -3481,7 +3495,34 @@ async fn tool_docker_exec(
     caller_agent_id: Option<&str>,
     kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
 ) -> Result<String, String> {
-    let config = docker_config.ok_or("Docker sandbox not configured")?;
+    let base = docker_config.ok_or("Docker sandbox not configured")?;
+
+    // Let the caller ask for a tier, defaulting to what the config says.
+    //
+    // Without this the tier was a config default nobody changed, so every
+    // sandbox stayed at `exec` - 512 MB, no network, 60 seconds - and the tier
+    // work changed nothing in practice. An agent that needs to run a build has
+    // to be able to say so at the point it knows, which is the call, not the
+    // config file someone edited months earlier.
+    //
+    // `service` is deliberately not requestable here. Starting one is a
+    // separate decision with its own approval, and a tool argument is not the
+    // place to make it.
+    let mut config = base.clone();
+    if let Some(requested) = input["tier"].as_str() {
+        config.tier = match requested.trim().to_ascii_lowercase().as_str() {
+            "workspace" | "build" => freeco_types::config::SandboxTier::Workspace,
+            "exec" => freeco_types::config::SandboxTier::Exec,
+            other => {
+                return Err(format!(
+                    "Unknown sandbox tier '{other}'. Use 'exec' for a single command \
+                     or 'workspace' to build and test, which gets more memory, a \
+                     longer timeout and network access."
+                ));
+            }
+        };
+    }
+    let config = &config;
 
     if !config.enabled {
         return Err("Docker sandbox is disabled. Set docker.enabled=true in config.".into());
