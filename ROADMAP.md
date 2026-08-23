@@ -174,6 +174,12 @@ recorded as such.
 - [ ] Prove a service tier end to end by hosting something real in it.
 
 
+- 🟨 Container runtime detection and the five-second probe timeout are one
+  mechanism now. Two sessions built these separately; detection probes each
+  candidate through the guarded check, so a wedged Docker costs five seconds
+  once instead of hanging, and Podman is found when Docker does not answer.
+- 🟨 `docs/services.md` records the three tiers, why containers rather than
+  WASM for persistent services, and what exists today versus what does not.
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase
