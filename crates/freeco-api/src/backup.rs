@@ -89,7 +89,6 @@ fn add_file(files: &mut Vec<BackupFile>, root: &Path, path: PathBuf) -> Result<(
     Ok(())
 }
 
-
 /// Directories inside a workspace that are rebuilt rather than backed up.
 const REGENERABLE: &[&str] = &[
     "node_modules",
@@ -361,13 +360,21 @@ mod workspace_backup_tests {
         let ws = tmp.join("workspaces").join("developer");
         fs::create_dir_all(ws.join("node_modules").join("left-pad")).unwrap();
         fs::create_dir_all(ws.join("target")).unwrap();
-        fs::write(ws.join("node_modules").join("left-pad").join("index.js"), b"x").unwrap();
+        fs::write(
+            ws.join("node_modules").join("left-pad").join("index.js"),
+            b"x",
+        )
+        .unwrap();
         fs::write(ws.join("target").join("binary"), b"x").unwrap();
         fs::write(ws.join("keep.txt"), b"keep").unwrap();
 
         let mut files = Vec::new();
         collect_workspace_files(&mut files, &tmp, &tmp.join("workspaces")).unwrap();
-        assert_eq!(files.len(), 1, "only keep.txt should be collected: {files:?}");
+        assert_eq!(
+            files.len(),
+            1,
+            "only keep.txt should be collected: {files:?}"
+        );
         assert!(files[0].path.contains("keep.txt"));
         fs::remove_dir_all(&tmp).ok();
     }

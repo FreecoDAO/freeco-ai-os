@@ -654,6 +654,15 @@ pub struct DockerSandboxConfig {
     /// this is a binary name and nothing else.
     #[serde(default = "default_container_runtime")]
     pub runtime: String,
+    /// What this sandbox is for. Decides memory, timeout, PIDs, network and
+    /// whether the pool may reap it, so those do not have to be set by hand
+    /// and cannot drift into a combination that makes no sense - a service
+    /// with a 60-second timeout, or an exec sandbox with a network.
+    ///
+    /// The explicit limit fields below still win when set, because an existing
+    /// config that tuned them must keep working.
+    #[serde(default)]
+    pub tier: SandboxTier,
     /// Host:container port mappings for a long-running service, e.g.
     /// `["3000:3000"]`.
     ///
@@ -758,6 +767,7 @@ impl Default for DockerSandboxConfig {
             // and is thrown away, so it has nothing to serve and nothing to
             // keep alive. Hosting a service is an explicit choice.
             runtime: default_container_runtime(),
+            tier: SandboxTier::Exec,
             ports: Vec::new(),
             service: false,
             restart_policy: default_restart_policy(),
@@ -1201,7 +1211,79 @@ pub enum DockerSandboxMode {
     All,
 }
 
-/// Docker container lifecycle scope.
+/// What a sandbox is for, which decides what it is allowed to cost.
+///
+/// One sandbox type cannot serve both purposes. Running an untrusted command
+/// wants the container small, offline and thrown away; building a project or
+/// hosting a CRM wants it large, connected and kept. Trying to serve both from
+/// one set of defaults is why the sandbox could not build anything: 512 MB and
+/// a 60-second timeout are correct for a command and useless for `pnpm
+/// install`, which is killed mid-flight, or for Postgres, which will not start
+/// at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxTier {
+    /// Untrusted command execution. Small, offline, thrown away.
+    #[default]
+    Exec,
+    /// Build and test. Large enough to compile, kept between calls.
+    Workspace,
+    /// Hosting a long-running service. Reachable, and never reaped.
+    Service,
+}
+
+impl SandboxTier {
+    /// Memory ceiling. A build needs room; a service needs more.
+    pub fn memory_limit(self) -> &'static str {
+        match self {
+            SandboxTier::Exec => "512m",
+            SandboxTier::Workspace => "4g",
+            SandboxTier::Service => "8g",
+        }
+    }
+
+    /// Seconds a single command may run. `0` means no limit, which is the only
+    /// sane value for a service: it is supposed to outlive the call.
+    pub fn timeout_secs(self) -> u64 {
+        match self {
+            SandboxTier::Exec => 60,
+            SandboxTier::Workspace => 1800,
+            SandboxTier::Service => 0,
+        }
+    }
+
+    /// Processes. A single command needs few; a build tree spawns many, and a
+    /// database with a connection pool more again.
+    pub fn pids_limit(self) -> u32 {
+        match self {
+            SandboxTier::Exec => 100,
+            SandboxTier::Workspace => 1024,
+            SandboxTier::Service => 2048,
+        }
+    }
+
+    /// Network. Denied for execution, because that is the whole point of it;
+    /// a build has to reach a package registry, and a service has to be
+    /// reachable.
+    pub fn network(self) -> &'static str {
+        match self {
+            SandboxTier::Exec => "none",
+            SandboxTier::Workspace | SandboxTier::Service => "bridge",
+        }
+    }
+
+    /// Whether the workspace is writable. Build output has to persist to be
+    /// worth producing.
+    pub fn writable_workspace(self) -> bool {
+        !matches!(self, SandboxTier::Exec)
+    }
+
+    /// Whether the pool may reap this container when idle.
+    pub fn reapable(self) -> bool {
+        !matches!(self, SandboxTier::Service)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DockerScope {

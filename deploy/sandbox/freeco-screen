@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Start a screen a person can watch, and open it in an ordinary browser tab.
+#
+# Xvfb draws the display, x11vnc publishes it, and noVNC serves that over HTTP
+# on 6080 — so viewing needs no VNC client, just a URL. Run this in a service
+# tier container with `ports = ["6080:6080"]` and the container can hand its
+# screen to whoever is asking.
+#
+# Not started at boot: an exec-tier sandbox runs one command and exits, and
+# paying for a virtual display and a window manager on every one of those is
+# waste. A container that wants a screen asks for it.
+set -eu
+
+export DISPLAY="${DISPLAY:-:99}"
+
+Xvfb "$DISPLAY" -screen 0 "${SCREEN_SIZE:-1600x900x24}" &
+# Give the X server a moment to create the socket before anything connects to
+# it; a window manager that starts too early exits and takes the session down.
+sleep 1
+
+fluxbox >/dev/null 2>&1 &
+
+# -shared so several viewers can watch at once. The agent driving the browser
+# and the person looking over its shoulder are usually two different viewers of
+# the same screen, and without this the second one disconnects the first.
+#
+# -nopw is safe only because this listens on the container's loopback and is
+# reached through the published noVNC port; do not expose 5900 itself.
+x11vnc -display "$DISPLAY" -forever -shared -nopw -quiet &
+
+exec websockify --web=/usr/share/novnc 6080 localhost:5900

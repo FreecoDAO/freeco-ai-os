@@ -362,6 +362,12 @@ pub async fn execute_tool(
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
         "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
+        // Setup tools. These change configuration rather than reading it, so
+        // they are gated by the capability system like any other write.
+        "provider_key_set" => tool_provider_key_set(input, kernel),
+        "provider_list" => tool_provider_list(kernel),
+        "agent_set_model" => tool_agent_set_model(input, kernel),
+
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
         "agent_activate" => tool_agent_activate(input, kernel),
@@ -762,6 +768,39 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["manifest_toml"]
+            }),
+        },
+        ToolDefinition {
+            name: "provider_key_set".to_string(),
+            description: "Store an API key for a model provider so its models can be used.                           Pass the key itself, not the name of an environment variable.                           Use provider_list first to see which providers still need one.                           Never repeat the key back to the user."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "provider": { "type": "string", "description": "Provider id, e.g. nvidia, openrouter, anthropic" },
+                    "key": { "type": "string", "description": "The API key value itself" }
+                },
+                "required": ["provider", "key"]
+            }),
+        },
+        ToolDefinition {
+            name: "provider_list".to_string(),
+            description: "List model providers and whether each already has a working API key.                           Use this before telling a user to add one, so you know what is missing."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "agent_set_model".to_string(),
+            description: "Point an agent at a different model. The provider is derived from the                           model id unless given. Returns the id as stored, which can differ from                           the one passed because aliases are resolved -- report the stored one."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" },
+                    "model": { "type": "string", "description": "Model id, e.g. nvidia/nemotron-3-ultra-550b-a55b" },
+                    "provider": { "type": "string", "description": "Optional explicit provider id" }
+                },
+                "required": ["agent_id", "model"]
             }),
         },
         ToolDefinition {
@@ -1293,11 +1332,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Docker sandbox tool ---
         ToolDefinition {
             name: "docker_exec".to_string(),
-            description: "Execute a command inside a Docker container sandbox. Provides OS-level isolation with resource limits, network isolation, and capability dropping. Requires Docker to be installed and docker.enabled=true.".to_string(),
+            description: "Execute a command inside an isolated Linux container. \
+Use tier='workspace' to build, test or install dependencies: that gets 4 GB, a \
+30 minute timeout, a writable workspace and network access. The default \
+tier='exec' is a throwaway container with no network and a 60 second limit, for \
+running a single command. Works with Docker or Podman.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "The command to execute inside the container" }
+                    "command": { "type": "string", "description": "The command to execute inside the container" },
+                    // Declared so a model can actually pass it. The tier
+                    // existed as a config default first, which meant no caller
+                    // could ask for one and every sandbox stayed at the most
+                    // restrictive setting - the mechanism was there and nothing
+                    // reached it.
+                    "tier": {
+                        "type": "string",
+                        "enum": ["exec", "workspace"],
+                        "description": "exec (default): single command, no network, 512 MB, 60s. workspace: build and test, 4 GB, 30 min, network, writable workspace that persists between calls."
+                    }
                 },
                 "required": ["command"]
             }),
@@ -1895,6 +1948,75 @@ async fn tool_agent_spawn(
     let (id, name) = kh.spawn_agent(manifest_toml, parent_id).await?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {name}"
+    ))
+}
+
+/// Store a provider key.
+///
+/// The key is never echoed, not in the result and not in an error. An agent
+/// that repeats a key back has written it into the conversation, which is
+/// stored, and that is a leak regardless of who was watching.
+fn tool_provider_key_set(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let provider = input["provider"]
+        .as_str()
+        .ok_or("provider is required")?
+        .trim();
+    let key = input["key"].as_str().ok_or("key is required")?;
+    kh.set_provider_key(provider, key)
+}
+
+fn tool_provider_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let rows = kh.list_providers_status();
+    if rows.is_empty() {
+        return Ok("No providers registered.".to_string());
+    }
+    let ready: Vec<&(String, String, bool)> = rows.iter().filter(|r| r.2).collect();
+    let mut out = format!(
+        "{} providers, {} with a working key.
+
+Ready:
+",
+        rows.len(),
+        ready.len()
+    );
+    for (id, env, _) in &ready {
+        out.push_str(&format!(
+            "  {id} ({env})
+"
+        ));
+    }
+    out.push_str(
+        "
+Need a key:
+",
+    );
+    for (id, env, ok) in &rows {
+        if !ok && !env.is_empty() {
+            out.push_str(&format!(
+                "  {id} ({env})
+"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn tool_agent_set_model(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent_id = input["agent_id"].as_str().ok_or("agent_id is required")?;
+    let model = input["model"].as_str().ok_or("model is required")?;
+    let provider = input["provider"].as_str();
+    let (stored_model, stored_provider) = kh.set_agent_model_by_id(agent_id, model, provider)?;
+    Ok(format!(
+        "{agent_id} now uses {stored_model} on {stored_provider}."
     ))
 }
 
@@ -3379,7 +3501,34 @@ async fn tool_docker_exec(
     caller_agent_id: Option<&str>,
     kernel: Option<&std::sync::Arc<dyn crate::kernel_handle::KernelHandle>>,
 ) -> Result<String, String> {
-    let config = docker_config.ok_or("Docker sandbox not configured")?;
+    let base = docker_config.ok_or("Docker sandbox not configured")?;
+
+    // Let the caller ask for a tier, defaulting to what the config says.
+    //
+    // Without this the tier was a config default nobody changed, so every
+    // sandbox stayed at `exec` - 512 MB, no network, 60 seconds - and the tier
+    // work changed nothing in practice. An agent that needs to run a build has
+    // to be able to say so at the point it knows, which is the call, not the
+    // config file someone edited months earlier.
+    //
+    // `service` is deliberately not requestable here. Starting one is a
+    // separate decision with its own approval, and a tool argument is not the
+    // place to make it.
+    let mut config = base.clone();
+    if let Some(requested) = input["tier"].as_str() {
+        config.tier = match requested.trim().to_ascii_lowercase().as_str() {
+            "workspace" | "build" => freeco_types::config::SandboxTier::Workspace,
+            "exec" => freeco_types::config::SandboxTier::Exec,
+            other => {
+                return Err(format!(
+                    "Unknown sandbox tier '{other}'. Use 'exec' for a single command \
+                     or 'workspace' to build and test, which gets more memory, a \
+                     longer timeout and network access."
+                ));
+            }
+        };
+    }
+    let config = &config;
 
     if !config.enabled {
         return Err("Docker sandbox is disabled. Set docker.enabled=true in config.".into());
@@ -3454,7 +3603,10 @@ async fn tool_docker_exec(
             let summary = format!(
                 "start a long-running service in the sandbox for agent {agent_id}, {ports}.                  It keeps running after this command finishes, restarts with Docker, and is                  not removed by the idle cleanup. Files in the agent workspace persist."
             );
-            match kh.request_approval(agent_id, "docker_service", &summary).await {
+            match kh
+                .request_approval(agent_id, "docker_service", &summary)
+                .await
+            {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(
@@ -5033,6 +5185,29 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::kernel_handle::KernelHandle for FakeKernelHandle {
+        // Test double. Records nothing and touches no real key store: a mock
+        // that wrote to secrets.env would put a key on the developer's disk
+        // every time the suite ran.
+        fn set_provider_key(&self, provider: &str, key: &str) -> Result<String, String> {
+            if key.trim().is_empty() {
+                return Err("the key is empty".to_string());
+            }
+            Ok(format!("{provider} key stored"))
+        }
+
+        fn set_agent_model_by_id(
+            &self,
+            _agent_id: &str,
+            model: &str,
+            provider: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Ok((model.to_string(), provider.unwrap_or("test").to_string()))
+        }
+
+        fn list_providers_status(&self) -> Vec<(String, String, bool)> {
+            vec![("test".to_string(), "TEST_API_KEY".to_string(), true)]
+        }
+
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,

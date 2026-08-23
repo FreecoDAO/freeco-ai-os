@@ -718,6 +718,11 @@ pub async fn build_router(
         )
         // Session endpoints
         .route("/api/sessions", axum::routing::get(routes::list_sessions))
+        .route("/api/tenancy", axum::routing::get(routes::get_tenancy))
+        .route(
+            "/api/tenancy/users",
+            axum::routing::post(routes::create_tenancy_user),
+        )
         // Registered before the `/api/sessions/{id}` routes so "orphaned" is
         // not swallowed as a session id.
         .route(

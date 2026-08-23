@@ -215,17 +215,76 @@ fn build_assistant_message_preserving_thinking(
 
 /// Strip a provider prefix from a model ID before sending to the API.
 ///
-/// Many models are stored as `provider/org/model` (e.g. `openrouter/google/gemini-2.5-flash`)
-/// but the upstream API expects just `org/model` (e.g. `google/gemini-2.5-flash`).
+/// Many models are stored as `provider/org/model` (e.g.
+/// `openrouter/google/gemini-2.5-flash`) but the upstream API expects just
+/// `org/model` (e.g. `google/gemini-2.5-flash`).
+///
+/// The prefix is only removed when what remains is still an `org/model` pair.
+/// Some providers publish models under their own name, so the leading segment
+/// is part of the real id rather than a prefix we added: NVIDIA serves
+/// `nvidia/nemotron-3-ultra-550b-a55b`, and OpenRouter's routers are
+/// `openrouter/free` and `openrouter/auto`. Stripping those produced
+/// `nemotron-3-ultra-550b-a55b` and `free`, which no provider has ever heard
+/// of, so the request 404'd, the fallback chain fired, and the user was shown
+/// an error about a different model on a provider they had not chosen — with
+/// the dashboard still displaying the model they picked.
+///
+/// This is the same rule `OpenAiDriver::effective_model` applies on the way
+/// out; the two disagreeing is what let a correct id be corrupted at save time
+/// and then look correct everywhere except in the request.
 pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     let slash_prefix = format!("{}/", provider);
     let colon_prefix = format!("{}:", provider);
-    if model.starts_with(&slash_prefix) {
-        model[slash_prefix.len()..].to_string()
-    } else if model.starts_with(&colon_prefix) {
-        model[colon_prefix.len()..].to_string()
-    } else {
-        model.to_string()
+    if let Some(rest) = model.strip_prefix(&slash_prefix) {
+        // Still qualified by an org — the prefix was ours to remove.
+        if rest.contains('/') {
+            return rest.to_string();
+        }
+        // Nothing left to qualify it: the provider name was part of the id.
+        return model.to_string();
+    }
+    if let Some(rest) = model.strip_prefix(&colon_prefix) {
+        return rest.to_string();
+    }
+    model.to_string()
+}
+
+#[cfg(test)]
+mod strip_provider_prefix_tests {
+    use super::strip_provider_prefix;
+
+    #[test]
+    fn removes_a_prefix_we_added() {
+        assert_eq!(
+            strip_provider_prefix("openrouter/google/gemini-2.5-flash", "openrouter"),
+            "google/gemini-2.5-flash"
+        );
+    }
+
+    /// The regression this guard exists for. NVIDIA publishes under its own
+    /// name, so `nvidia/` is the id, not a prefix.
+    #[test]
+    fn keeps_a_provider_name_that_is_part_of_the_id() {
+        for id in [
+            "nvidia/nemotron-3-ultra-550b-a55b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
+        ] {
+            assert_eq!(strip_provider_prefix(id, "nvidia"), id);
+        }
+        // OpenRouter's own routers are the same shape.
+        assert_eq!(
+            strip_provider_prefix("openrouter/free", "openrouter"),
+            "openrouter/free"
+        );
+        assert_eq!(
+            strip_provider_prefix("openrouter/auto", "openrouter"),
+            "openrouter/auto"
+        );
+    }
+
+    #[test]
+    fn leaves_unprefixed_ids_alone() {
+        assert_eq!(strip_provider_prefix("gpt-4o", "openai"), "gpt-4o");
     }
 }
 
@@ -1209,14 +1268,6 @@ pub async fn run_agent_loop(
     Err(FreecoError::MaxIterationsExceeded(max_iterations))
 }
 
-/// Call an LLM driver with automatic retry on rate-limit and overload errors.
-///
-/// Uses the `llm_errors` classifier for smart error handling and the
-/// `ProviderCooldown` circuit breaker to prevent request storms.
-///
-/// When the primary model returns a `ModelNotFound` error and `fallback_models`
-/// is non-empty, each fallback is tried in order before propagating the error.
-
 /// Run every message in a request through the gateway.
 ///
 /// Returns the masked request, or the reason it was refused. Tool definitions
@@ -1249,6 +1300,13 @@ fn mask_request(
     Ok((request, total))
 }
 
+/// Call an LLM driver with automatic retry on rate-limit and overload errors.
+///
+/// Uses the `llm_errors` classifier for smart error handling and the
+/// `ProviderCooldown` circuit breaker to prevent request storms.
+///
+/// When the primary model returns a `ModelNotFound` error and `fallback_models`
+/// is non-empty, each fallback is tried in order before propagating the error.
 async fn call_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
@@ -5638,7 +5696,10 @@ mod gateway_wiring_tests {
         let MessageContent::Text(sent) = &masked.messages[0].content else {
             panic!("expected text");
         };
-        assert!(!sent.contains("sk-ant-"), "key still in outbound text: {sent}");
+        assert!(
+            !sent.contains("sk-ant-"),
+            "key still in outbound text: {sent}"
+        );
     }
 
     #[test]
@@ -5659,6 +5720,9 @@ mod gateway_wiring_tests {
     fn a_blocked_value_stops_the_request() {
         let g = gw();
         let err = mask_request(&g, text_request("card 4242 4242 4242 4242")).unwrap_err();
-        assert!(err.to_lowercase().contains("card"), "unhelpful error: {err}");
+        assert!(
+            err.to_lowercase().contains("card"),
+            "unhelpful error: {err}"
+        );
     }
 }

@@ -89,6 +89,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(TOOL_CALL_BEHAVIOR.to_string());
     }
 
+    // Section 2.4 -- applies to every agent, subagents included. A subagent
+    // writes code and touches credentials just as a top-level agent does, so
+    // exempting them would exempt the work least likely to be watched.
+    sections.push(GLOBAL_GUIDELINES.to_string());
+
     // Section 2.5 — Agent Behavioral Guidelines (skip for subagents)
     if !ctx.is_subagent {
         if let Some(ref agents) = ctx.agents_md {
@@ -241,6 +246,31 @@ fn build_identity_section(ctx: &PromptContext) -> String {
 }
 
 /// Static tool-call behavior directives.
+/// Guidelines every agent gets, distilled from the karpathy-guidelines and
+/// exposure-audit skills.
+///
+/// Those skills live in `.claude/skills/` and reach the agents working *on*
+/// this repository. They never reached the agents this repository *runs* --
+/// the larger population, and the one operating on a user's machine. Kept
+/// deliberately short: this is prepended to every request, so a page of
+/// advice would be a page of tokens on every turn, forever.
+const GLOBAL_GUIDELINES: &str = "\
+## Working Guidelines\n\
+- Make the smallest change that solves the problem. Do not rewrite what already works.\n\
+- Verify before claiming. A command that failed produced no data; say so rather than inferring what it would have returned.\n\
+- If a check did not run, report it as not run. Never round that up to a pass.\n\
+- Prefer the existing tool or process over one you invent. If an established path is failing, say so and ask rather than routing around it.\n\
+- State what you actually did, including the parts that did not work.\n\n\
+## Handling Secrets\n\
+- Never print an API key, token or password. A name and a short prefix proves it exists.\n\
+- Never write a secret into a config file, a commit, a URL or a log line. Secrets belong in the key store the product already provides.\n\
+- If you find an exposed credential, report it and say it needs rotating. Do not rotate it yourself, and do not paste it anywhere to confirm it.\n\n\
+## Installing Software\n\
+- Never install software on the user's machine. No package managers, no installers, no downloading and running binaries -- not via shell commands, not by any other route.\n\
+- Work inside your sandboxed container. That is what it is for: install what you need there, where it cannot affect the user's system.\n\
+- If something genuinely must be installed on the host, stop and ask. Say what, why, and what it changes. Proceed only if the user tells you to.\n\
+- The same applies to changing system settings, services, PATH, or the registry: sandbox, or ask.";
+
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior
 - When you need to use a tool, call it immediately. Do not narrate or explain routine tool calls.
@@ -592,7 +622,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         // Docker. Spelling out the isolation matters: an agent that does not
         // know it has a safe place to run code will either refuse work it
         // could do, or reach for shell on the user's own machine instead.
-        "docker_exec" => "run a command inside an isolated Linux sandbox: no network, throwaway container, dropped capabilities. It has rust, cargo, clippy, git, python3, jq and ripgrep. Use this for ANY code, build, test or install. Do NOT use shell_exec on the host for work that belongs here - if a tool seems missing, say so rather than reaching for the host",
+        "docker_exec" => "run a command inside an isolated Linux sandbox. Pass tier=\"workspace\" to build or test - that gets 4 GB, a 30 minute timeout, a writable workspace and network access for package installs. The default tier=\"exec\" is a throwaway container with no network, for a single command. It has rust, cargo, clippy, git, python3, jq and ripgrep. Use this for ANY code, build, test or install. Do NOT use shell_exec on the host for work that belongs here - if a tool seems missing, say so rather than reaching for the host",
         "docker_build" => "build a Docker image",
         "docker_run" => "start a Docker container",
 

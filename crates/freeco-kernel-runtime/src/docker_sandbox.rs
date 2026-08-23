@@ -16,6 +16,8 @@ pub struct SandboxContainer {
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Hosting a service, so the pool must not reap it.
     pub is_service: bool,
+    /// What this container is for. Decides whether the pool may reap it.
+    pub tier: freeco_types::config::SandboxTier,
     /// The binary that created this container.
     ///
     /// Carried per container rather than read from config at each call: a
@@ -119,18 +121,16 @@ fn workspace_owner(workspace: &Path) -> Result<Option<String>, String> {
 }
 
 /// Check if Docker is available on this system.
+/// Probe one runtime, bounded.
+///
+/// While Docker Desktop is starting, or when its backend is wedged,
+/// `docker version` blocks indefinitely rather than failing. This probe had no
+/// timeout, so every caller inherited the hang: an agent asking to run one
+/// command would sit there forever with nothing reported. A probe that cannot
+/// fail is worse than one that returns false -- false is recoverable and says
+/// so. Five seconds is far longer than a healthy daemon needs and short enough
+/// that a person notices nothing.
 pub async fn is_docker_available(runtime: &str) -> bool {
-    // Bounded, because the Docker CLI does not always answer.
-    //
-    // While Docker Desktop is starting, or when its backend is wedged,
-    // `docker version` blocks indefinitely rather than failing. This probe had
-    // no timeout, so every call that checked for Docker inherited that hang -
-    // an agent asking to run one command would sit there forever with nothing
-    // reported. A probe that cannot fail is worse than one that returns false:
-    // false is recoverable and says so.
-    //
-    // Five seconds is far longer than a healthy daemon needs and short enough
-    // that a person notices nothing.
     let probe = crate::quiet_command::quiet_async(runtime)
         .arg("version")
         .arg("--format")
@@ -143,12 +143,42 @@ pub async fn is_docker_available(runtime: &str) -> bool {
         Ok(Ok(output)) => output.status.success(),
         Ok(Err(_)) => false,
         Err(_) => {
-            warn!("Docker did not respond within 5s; treating it as unavailable");
+            warn!("{runtime} did not respond within 5s; treating it as unavailable");
             false
         }
     }
 }
 
+/// Which container runtime to shell out to: `docker` or `podman`.
+///
+/// Docker was assumed everywhere, so the sandbox did not exist at all for
+/// anyone running Podman -- the rootless default on Fedora and RHEL. The agent
+/// was told to work in a container it had no way to start, leaving the host as
+/// the only route, which is precisely what the sandbox exists to prevent.
+///
+/// Docker is preferred when its daemon answers, so existing installs are
+/// untouched; Podman is used when it does not. Both take identical arguments
+/// for everything here, so only the executable name changes.
+///
+/// Cached: this runs on every sandboxed tool call, and probing each time would
+/// add two process spawns to all of them. The timeout above applies to each
+/// probe, so a wedged Docker costs five seconds once rather than forever.
+pub async fn container_runtime() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<Option<&'static str>> = OnceLock::new();
+    if let Some(cached) = RUNTIME.get() {
+        return *cached;
+    }
+    let mut found = None;
+    for candidate in ["docker", "podman"] {
+        if is_docker_available(candidate).await {
+            found = Some(candidate);
+            break;
+        }
+    }
+    let _ = RUNTIME.set(found);
+    found
+}
 /// Check whether an image is already in the local Docker cache.
 ///
 /// `docker run` silently pulls a missing image, which on a metered or slow
@@ -197,16 +227,31 @@ pub async fn create_sandbox(
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
 
-    let mut cmd = crate::quiet_command::quiet_async(&config.runtime);
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
     }
 
-    // Resource limits
-    cmd.arg("--memory").arg(&config.memory_limit);
+    // Resource limits, taken from the tier unless the config set them by hand.
+    //
+    // The defaults were one size for every purpose: 512 MB and 100 PIDs, which
+    // is right for running a command and cannot build a project or start a
+    // database. A tier says what the sandbox is for and the limits follow, so
+    // they cannot drift into a combination that makes no sense.
+    let memory = if config.memory_limit == "512m" {
+        config.tier.memory_limit().to_string()
+    } else {
+        config.memory_limit.clone()
+    };
+    let pids = if config.pids_limit == 100 {
+        config.tier.pids_limit()
+    } else {
+        config.pids_limit
+    };
+    cmd.arg("--memory").arg(&memory);
     cmd.arg("--cpus").arg(config.cpu_limit.to_string());
-    cmd.arg("--pids-limit").arg(config.pids_limit.to_string());
+    cmd.arg("--pids-limit").arg(pids.to_string());
 
     // Security: drop ALL capabilities, prevent privilege escalation
     cmd.arg("--cap-drop").arg("ALL");
@@ -228,7 +273,12 @@ pub async fn create_sandbox(
     }
 
     // Network isolation
-    cmd.arg("--network").arg(&config.network);
+    let network = if config.network == "none" {
+        config.tier.network().to_string()
+    } else {
+        config.network.clone()
+    };
+    cmd.arg("--network").arg(&network);
 
     // Publish ports, and ask Docker to keep the container alive, when this
     // sandbox is hosting a service. Without the port mapping a service starts
@@ -280,6 +330,7 @@ pub async fn create_sandbox(
         agent_id: agent_id.to_string(),
         created_at: chrono::Utc::now(),
         is_service: config.service,
+        tier: config.tier,
         runtime: config.runtime.clone(),
     })
 }
@@ -292,7 +343,7 @@ pub async fn exec_in_sandbox(
 ) -> Result<ExecResult, String> {
     validate_command(command)?;
 
-    let mut cmd = crate::quiet_command::quiet_async(&container.runtime);
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("exec")
         .arg(&container.container_id)
         .arg("sh")
@@ -336,10 +387,40 @@ pub async fn exec_in_sandbox(
 }
 
 /// Stop and remove a sandbox container.
+/// Stop a sandbox without deleting it.
+///
+/// Reaping used to remove the container outright, which threw away everything
+/// installed in it. A workspace that has just spent ten minutes on `pnpm
+/// install` or `cargo build` is worth returning to, and re-creating it means
+/// paying for that again on a connection that may not survive it.
+///
+/// Stopping keeps the container filesystem, so the next call starts it back up
+/// with the work still there. Files under the mounted workspace were always
+/// safe - that is a host bind mount - but everything installed into the image
+/// layers was not.
+pub async fn hibernate_sandbox(container: &SandboxContainer) -> Result<(), String> {
+    debug!(container = %container.container_id, "Hibernating sandbox");
+
+    let output = crate::quiet_command::quiet_async(&container.runtime)
+        .arg("stop")
+        .arg(&container.container_id)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to hibernate container: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to hibernate container: {stderr}"));
+    }
+    Ok(())
+}
+
 pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String> {
     debug!(container = %container.container_id, "Destroying Docker sandbox");
 
-    let output = crate::quiet_command::quiet_async(&container.runtime)
+    let output = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"))
         .arg("rm")
         .arg("-f")
         .arg(&container.container_id)
@@ -469,8 +550,11 @@ impl ContainerPool {
             let Some(container) = self.take_expired(&key, idle_timeout_secs, max_age_secs) else {
                 continue;
             };
-            debug!(container_id = %container.container_id, "Cleaning up stale pool container");
-            let _ = destroy_sandbox(&container).await;
+            // Hibernate rather than destroy. An idle workspace is not a
+            // finished one, and deleting it discards every dependency
+            // installed into it - which then has to be downloaded again.
+            debug!(container_id = %container.container_id, "Hibernating idle pool container");
+            let _ = hibernate_sandbox(&container).await;
         }
     }
 
@@ -529,6 +613,9 @@ fn pool_entry_is_expired(entry: &PoolEntry, idle_timeout_secs: u64, max_age_secs
     // service they delete a running database after thirty idle minutes -
     // idleness is the normal state of a service that is waiting for a request.
     if entry.container.is_service {
+        return false;
+    }
+    if !entry.container.tier.reapable() {
         return false;
     }
     let age_secs = chrono::Utc::now()
@@ -850,8 +937,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert_eq!(pool.len(), 1);
@@ -872,8 +960,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
 
@@ -894,8 +983,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -920,8 +1010,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -939,6 +1030,7 @@ mod tests {
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now() - chrono::Duration::seconds(2),
                 is_service: false,
+                tier: Default::default(),
                 runtime: "docker".to_string(),
             },
             config_hash: 12345,
@@ -957,6 +1049,7 @@ mod tests {
                 agent_id: "agent1".to_string(),
                 created_at: chrono::Utc::now(),
                 is_service: false,
+                tier: Default::default(),
                 runtime: "docker".to_string(),
             },
             12345,

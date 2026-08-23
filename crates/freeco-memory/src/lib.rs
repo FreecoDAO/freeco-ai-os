@@ -16,6 +16,7 @@ pub mod org;
 pub mod semantic;
 pub mod session;
 pub mod structured;
+pub mod tenancy;
 pub mod usage;
 
 mod substrate;

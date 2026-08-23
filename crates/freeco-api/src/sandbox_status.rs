@@ -23,11 +23,44 @@ use std::sync::Arc;
 pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = &state.kernel.config.docker;
 
-    let docker_running = freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
+    // Report what a container would actually get, not the raw config.
+    //
+    // These fields used to read config.memory_limit and friends directly,
+    // which are the pre-tier defaults. With a workspace tier configured the
+    // panel still said "512 MB, no network, 60s" while a real container got
+    // 4 GB and a network - so the one place a user checks whether the sandbox
+    // can build anything was telling them it could not.
+    //
+    // The same precedence as create_sandbox: an explicitly tuned config wins,
+    // otherwise the tier decides.
+    let effective_memory = if config.memory_limit == "512m" {
+        config.tier.memory_limit().to_string()
+    } else {
+        config.memory_limit.clone()
+    };
+    let effective_pids = if config.pids_limit == 100 {
+        config.tier.pids_limit()
+    } else {
+        config.pids_limit
+    };
+    let effective_network = if config.network == "none" {
+        config.tier.network().to_string()
+    } else {
+        config.network.clone()
+    };
+    let effective_timeout = if config.timeout_secs == 60 {
+        config.tier.timeout_secs()
+    } else {
+        config.timeout_secs
+    };
+
+    let docker_running =
+        freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
     // Only probe the image when Docker answers; otherwise the inspect call
     // just times out and we would report "image missing" for the wrong reason.
     let image_present = if docker_running {
-        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.runtime, &config.image).await
+        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.runtime, &config.image)
+            .await
     } else {
         false
     };
@@ -57,13 +90,18 @@ pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         // The protections actually in force, so the user can see the boundary
         // rather than take it on faith.
         "protections": {
-            "network": config.network,
-            "network_blocked": config.network == "none",
-            "memory_limit": config.memory_limit,
+            "tier": match config.tier {
+                freeco_types::config::SandboxTier::Exec => "exec",
+                freeco_types::config::SandboxTier::Workspace => "workspace",
+                freeco_types::config::SandboxTier::Service => "service",
+            },
+            "network": effective_network,
+            "network_blocked": effective_network == "none",
+            "memory_limit": effective_memory,
             "cpu_limit": config.cpu_limit,
-            "pids_limit": config.pids_limit,
+            "pids_limit": effective_pids,
             "read_only_root": config.read_only_root,
-            "timeout_secs": config.timeout_secs,
+            "timeout_secs": effective_timeout,
             "capabilities_dropped": "ALL",
             "no_new_privileges": true,
         },
@@ -83,13 +121,16 @@ pub async fn sandbox_pull(State(state): State<Arc<AppState>>) -> impl IntoRespon
     if !freeco_kernel_runtime::docker_sandbox::is_docker_available(&runtime).await {
         return Json(serde_json::json!({
             "ok": false,
-            "error": format!(
-                "{runtime} is not running, so the image cannot be downloaded. Start it and try again."
-            ),
+            "error": "No container runtime is running, so the image cannot be downloaded. Start Docker Desktop, or start Podman with `podman machine start`, and try again.",
         }));
     }
 
-    match freeco_kernel_runtime::quiet_command::quiet_async(&runtime)
+    // Whichever runtime is actually available -- the sandbox supports both,
+    // and assuming Docker left Podman users unable to pull the image at all.
+    let runtime = freeco_kernel_runtime::docker_sandbox::container_runtime()
+        .await
+        .unwrap_or("docker");
+    match freeco_kernel_runtime::quiet_command::quiet_async(runtime)
         .arg("pull")
         .arg(&image)
         .output()
@@ -106,7 +147,7 @@ pub async fn sandbox_pull(State(state): State<Arc<AppState>>) -> impl IntoRespon
         })),
         Err(e) => Json(serde_json::json!({
             "ok": false,
-            "error": format!("could not run docker pull: {e}"),
+            "error": format!("could not run {runtime} pull: {e}"),
         })),
     }
 }
