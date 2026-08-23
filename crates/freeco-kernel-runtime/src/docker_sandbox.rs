@@ -937,9 +937,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                tier: Default::default(),
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert_eq!(pool.len(), 1);
@@ -960,9 +960,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                tier: Default::default(),
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
 
@@ -983,9 +983,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                tier: Default::default(),
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(
@@ -1010,9 +1010,9 @@ mod tests {
             container_id: "test123".to_string(),
             agent_id: "agent1".to_string(),
             created_at: chrono::Utc::now(),
-                is_service: false,
-                tier: Default::default(),
-                runtime: "docker".to_string(),
+            is_service: false,
+            tier: Default::default(),
+            runtime: "docker".to_string(),
         };
         pool.release("agent:one".to_string(), container, 12345);
         assert!(matches!(

@@ -10,7 +10,11 @@
 //! the write fails, rather than leaving plaintext keys readable to other
 //! accounts on the machine.
 
-pub fn write_secret_env(path: &std::path::Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+pub fn write_secret_env(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), std::io::Error> {
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()

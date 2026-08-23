@@ -272,8 +272,14 @@ mod strip_provider_prefix_tests {
             assert_eq!(strip_provider_prefix(id, "nvidia"), id);
         }
         // OpenRouter's own routers are the same shape.
-        assert_eq!(strip_provider_prefix("openrouter/free", "openrouter"), "openrouter/free");
-        assert_eq!(strip_provider_prefix("openrouter/auto", "openrouter"), "openrouter/auto");
+        assert_eq!(
+            strip_provider_prefix("openrouter/free", "openrouter"),
+            "openrouter/free"
+        );
+        assert_eq!(
+            strip_provider_prefix("openrouter/auto", "openrouter"),
+            "openrouter/auto"
+        );
     }
 
     #[test]
@@ -1262,14 +1268,6 @@ pub async fn run_agent_loop(
     Err(FreecoError::MaxIterationsExceeded(max_iterations))
 }
 
-/// Call an LLM driver with automatic retry on rate-limit and overload errors.
-///
-/// Uses the `llm_errors` classifier for smart error handling and the
-/// `ProviderCooldown` circuit breaker to prevent request storms.
-///
-/// When the primary model returns a `ModelNotFound` error and `fallback_models`
-/// is non-empty, each fallback is tried in order before propagating the error.
-
 /// Run every message in a request through the gateway.
 ///
 /// Returns the masked request, or the reason it was refused. Tool definitions
@@ -1302,6 +1300,13 @@ fn mask_request(
     Ok((request, total))
 }
 
+/// Call an LLM driver with automatic retry on rate-limit and overload errors.
+///
+/// Uses the `llm_errors` classifier for smart error handling and the
+/// `ProviderCooldown` circuit breaker to prevent request storms.
+///
+/// When the primary model returns a `ModelNotFound` error and `fallback_models`
+/// is non-empty, each fallback is tried in order before propagating the error.
 async fn call_with_retry(
     driver: &dyn LlmDriver,
     request: CompletionRequest,
@@ -5691,7 +5696,10 @@ mod gateway_wiring_tests {
         let MessageContent::Text(sent) = &masked.messages[0].content else {
             panic!("expected text");
         };
-        assert!(!sent.contains("sk-ant-"), "key still in outbound text: {sent}");
+        assert!(
+            !sent.contains("sk-ant-"),
+            "key still in outbound text: {sent}"
+        );
     }
 
     #[test]
@@ -5712,6 +5720,9 @@ mod gateway_wiring_tests {
     fn a_blocked_value_stops_the_request() {
         let g = gw();
         let err = mask_request(&g, text_request("card 4242 4242 4242 4242")).unwrap_err();
-        assert!(err.to_lowercase().contains("card"), "unhelpful error: {err}");
+        assert!(
+            err.to_lowercase().contains("card"),
+            "unhelpful error: {err}"
+        );
     }
 }

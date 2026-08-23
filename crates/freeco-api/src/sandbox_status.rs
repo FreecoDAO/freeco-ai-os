@@ -54,11 +54,13 @@ pub async fn sandbox_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         config.timeout_secs
     };
 
-    let docker_running = freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
+    let docker_running =
+        freeco_kernel_runtime::docker_sandbox::is_docker_available(&config.runtime).await;
     // Only probe the image when Docker answers; otherwise the inspect call
     // just times out and we would report "image missing" for the wrong reason.
     let image_present = if docker_running {
-        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.runtime, &config.image).await
+        freeco_kernel_runtime::docker_sandbox::is_image_present(&config.runtime, &config.image)
+            .await
     } else {
         false
     };

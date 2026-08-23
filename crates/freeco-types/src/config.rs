@@ -1211,8 +1211,6 @@ pub enum DockerSandboxMode {
     All,
 }
 
-/// Docker container lifecycle scope.
-
 /// What a sandbox is for, which decides what it is allowed to cost.
 ///
 /// One sandbox type cannot serve both purposes. Running an untrusted command

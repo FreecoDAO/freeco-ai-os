@@ -1985,16 +1985,22 @@ Ready:
         ready.len()
     );
     for (id, env, _) in &ready {
-        out.push_str(&format!("  {id} ({env})
-"));
+        out.push_str(&format!(
+            "  {id} ({env})
+"
+        ));
     }
-    out.push_str("
+    out.push_str(
+        "
 Need a key:
-");
+",
+    );
     for (id, env, ok) in &rows {
         if !ok && !env.is_empty() {
-            out.push_str(&format!("  {id} ({env})
-"));
+            out.push_str(&format!(
+                "  {id} ({env})
+"
+            ));
         }
     }
     Ok(out)
@@ -3597,7 +3603,10 @@ async fn tool_docker_exec(
             let summary = format!(
                 "start a long-running service in the sandbox for agent {agent_id}, {ports}.                  It keeps running after this command finishes, restarts with Docker, and is                  not removed by the idle cleanup. Files in the agent workspace persist."
             );
-            match kh.request_approval(agent_id, "docker_service", &summary).await {
+            match kh
+                .request_approval(agent_id, "docker_service", &summary)
+                .await
+            {
                 Ok(true) => {}
                 Ok(false) => {
                     return Err(

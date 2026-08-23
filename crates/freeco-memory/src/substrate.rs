@@ -7,10 +7,10 @@ use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
 use crate::migration::run_migrations;
 use crate::org::OrgStore;
-use crate::tenancy::TenancyStore;
 use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
+use crate::tenancy::TenancyStore;
 use crate::usage::UsageStore;
 
 use async_trait::async_trait;

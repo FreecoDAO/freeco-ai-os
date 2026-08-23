@@ -7314,8 +7314,9 @@ impl KernelHandle for FreecoKernel {
     /// else. Tokens have to outlive a restart: a mapping held only in memory
     /// makes every conversation masked before the restart unreadable after it.
     fn data_gateway(&self) -> Option<std::sync::Arc<freeco_datagateway::DataGateway>> {
-        static GATEWAY: std::sync::OnceLock<Option<std::sync::Arc<freeco_datagateway::DataGateway>>> =
-            std::sync::OnceLock::new();
+        static GATEWAY: std::sync::OnceLock<
+            Option<std::sync::Arc<freeco_datagateway::DataGateway>>,
+        > = std::sync::OnceLock::new();
         GATEWAY
             .get_or_init(|| {
                 match freeco_datagateway::DataGateway::new(
@@ -7328,7 +7329,9 @@ impl KernelHandle for FreecoKernel {
                         // must be visible, but it should not stop an agent
                         // answering. It is announced here so "my prompts are
                         // not being scanned" is never a silent state.
-                        tracing::error!("Data gateway unavailable, prompts will not be scanned: {e}");
+                        tracing::error!(
+                            "Data gateway unavailable, prompts will not be scanned: {e}"
+                        );
                         None
                     }
                 }
@@ -7412,7 +7415,12 @@ impl KernelHandle for FreecoKernel {
         // aliases, so those can differ and the user should be told the truth.
         self.registry
             .get(id)
-            .map(|e| (e.manifest.model.model.clone(), e.manifest.model.provider.clone()))
+            .map(|e| {
+                (
+                    e.manifest.model.model.clone(),
+                    e.manifest.model.provider.clone(),
+                )
+            })
             .ok_or_else(|| "agent vanished while setting its model".to_string())
     }
 

@@ -225,7 +225,7 @@ impl TenancyStore {
             .map_err(|e| FreecoError::Memory(e.to_string()))?;
         match rows.next() {
             Some(Ok(user)) => Ok(Some(user)),
-            Some(Err(e)) => Err(FreecoError::Memory(e.to_string()).into()),
+            Some(Err(e)) => Err(FreecoError::Memory(e.to_string())),
             None => Ok(None),
         }
     }
@@ -263,7 +263,7 @@ impl TenancyStore {
             .map_err(|e| FreecoError::Memory(e.to_string()))?;
         match rows.next() {
             Some(Ok(user)) => Ok(Some(user)),
-            Some(Err(e)) => Err(FreecoError::Memory(e.to_string()).into()),
+            Some(Err(e)) => Err(FreecoError::Memory(e.to_string())),
             None => Ok(None),
         }
     }
@@ -296,7 +296,10 @@ mod tests {
         let s = store();
         let a = s.local_tenant().unwrap();
         let b = s.local_tenant().unwrap();
-        assert_eq!(a.id, b.id, "the local tenant id must not change between calls");
+        assert_eq!(
+            a.id, b.id,
+            "the local tenant id must not change between calls"
+        );
         assert_eq!(a.id, LOCAL_TENANT_ID);
     }
 
@@ -412,6 +415,10 @@ mod live_migration_check {
                 .unwrap_or(-1);
             assert_eq!(orphans, 0, "{t} has rows with no tenant");
         }
-        println!("verified {} tables, rows preserved: {:?}", tables.len(), after);
+        println!(
+            "verified {} tables, rows preserved: {:?}",
+            tables.len(),
+            after
+        );
     }
 }
