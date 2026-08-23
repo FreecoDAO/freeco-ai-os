@@ -755,6 +755,10 @@ pub async fn build_router(
         // Model catalog endpoints
         .route("/api/models", axum::routing::get(routes::list_models))
         .route(
+            "/api/models/refresh",
+            axum::routing::post(routes::refresh_models),
+        )
+        .route(
             "/api/models/aliases",
             axum::routing::get(routes::list_aliases),
         )

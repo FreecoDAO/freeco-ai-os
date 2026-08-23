@@ -1380,6 +1380,103 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec![],
         },
+        // GPT-5.6. Context and pricing read from the live provider listing on
+        // 2026-08-23, not inferred from GPT-5: the context window is 1.05M
+        // rather than 400k, and carrying the older figure over would cap
+        // requests at a third of what these accept.
+        //
+        // Luna is a tenth the price of Terra for the same context and the same
+        // tool and vision support. The provider listing does not say what the
+        // `-pro` variants change -- their published specs are identical -- so
+        // they are listed without a claim about the difference.
+        // Sol sits between Luna and Terra. Prices are the live provider
+        // figures ($2/$10), not the $4/$20 quoted to us -- a catalog price
+        // that disagrees with what the provider charges makes the budget page
+        // wrong in the direction that matters.
+        ModelCatalogEntry {
+            id: "gpt-5.6-sol".into(),
+            display_name: "GPT-5.6 Sol".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 2.0,
+            output_cost_per_m: 10.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["sol".into(), "gpt-sol".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.6-sol-pro".into(),
+            display_name: "GPT-5.6 Sol Pro".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 2.0,
+            output_cost_per_m: 10.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["sol-pro".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.6-terra".into(),
+            display_name: "GPT-5.6 Terra".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 2.0,
+            output_cost_per_m: 12.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["terra".into(), "gpt-terra".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.6-terra-pro".into(),
+            display_name: "GPT-5.6 Terra Pro".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 2.0,
+            output_cost_per_m: 12.0,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["terra-pro".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.6-luna".into(),
+            display_name: "GPT-5.6 Luna".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 0.20,
+            output_cost_per_m: 1.20,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["luna".into(), "gpt-luna".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.6-luna-pro".into(),
+            display_name: "GPT-5.6 Luna Pro".into(),
+            provider: "openai".into(),
+            tier: ModelTier::Frontier,
+            context_window: 1_050_000,
+            max_output_tokens: 128_000,
+            input_cost_per_m: 0.20,
+            output_cost_per_m: 1.20,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["luna-pro".into()],
+        },
         ModelCatalogEntry {
             id: "gpt-5".into(),
             display_name: "GPT-5".into(),

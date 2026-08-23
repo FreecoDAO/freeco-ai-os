@@ -38,6 +38,16 @@ function approvalsPage() {
     // Returns { text, severity } where severity is 'danger'|'warn'|'info'.
     // Derived from the action string so it needs no backend change.
     consequence(a) {
+      // Prefer what the kernel actually said. It fills in aim, consequences and
+      // reversible for every request; guessing from keywords when the real
+      // explanation is present means showing the user a worse answer than the
+      // one we already have -- and one that can be wrong, since it matches on
+      // words in the command rather than on what the tool does.
+      if (a.consequences) {
+        var sev = a.reversible === false ? 'danger' : (a.reversible === true ? 'info' : 'warn');
+        return { severity: sev, text: a.consequences, aim: a.aim || '', reversible: a.reversible };
+      }
+      // No explanation from the backend (older request): fall back to guessing.
       var act = ((a.action || '') + ' ' + (a.description || '')).toLowerCase();
       var has = function(){ for (var i=0;i<arguments.length;i++){ if (act.indexOf(arguments[i])!==-1) return true; } return false; };
       if (has('shell', 'exec', 'command', 'bash', 'powershell'))

@@ -233,17 +233,50 @@ fn build_assistant_message_preserving_thinking(
 /// out; the two disagreeing is what let a correct id be corrupted at save time
 /// and then look correct everywhere except in the request.
 pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
+    strip_provider_prefix_known(model, provider, |_| false)
+}
+
+/// Remove a redundant `provider/` prefix, deciding by what the provider serves.
+///
+/// Whether the prefix belongs to the id cannot be worked out from its shape.
+/// NVIDIA genuinely serves `nvidia/nemotron-3-ultra-550b-a55b`, prefix and all.
+/// OpenAI serves `gpt-5.6-terra-pro`, and `openai/gpt-5.6-terra-pro` is
+/// OpenRouter's name for the same model -- send that to OpenAI directly and it
+/// 404s, then the fallback chain reports an error about a different model on a
+/// provider the user never picked.
+///
+/// An earlier version guessed from shape: strip only if a `/` remained. That is
+/// right for `nvidia/...` and wrong for `openai/gpt-...`, which left agents
+/// displaying `openai / openai/gpt-5.6-terra-pro` -- a doubled prefix that is
+/// not a real id anywhere.
+///
+/// So ask instead. `known` reports whether the catalog carries an id for this
+/// provider: if the full prefixed form is real, keep it; if only the bare form
+/// is, strip. When the catalog knows neither -- a model newer than our list --
+/// fall back to keeping what the user typed, since inventing an id they did not
+/// ask for is worse than passing theirs through unchanged.
+pub fn strip_provider_prefix_known(
+    model: &str,
+    provider: &str,
+    known: impl Fn(&str) -> bool,
+) -> String {
     let slash_prefix = format!("{}/", provider);
-    let colon_prefix = format!("{}:", provider);
     if let Some(rest) = model.strip_prefix(&slash_prefix) {
-        // Still qualified by an org — the prefix was ours to remove.
+        if known(model) {
+            return model.to_string(); // the prefix is part of the real id
+        }
+        if known(rest) {
+            return rest.to_string(); // the prefix was ours to remove
+        }
+        // Neither is in the catalog. Keep the shape heuristic as a last resort:
+        // a remaining `/` means it still names an org, which is the common form
+        // for gateway ids.
         if rest.contains('/') {
             return rest.to_string();
         }
-        // Nothing left to qualify it: the provider name was part of the id.
         return model.to_string();
     }
-    if let Some(rest) = model.strip_prefix(&colon_prefix) {
+    if let Some(rest) = model.strip_prefix(&format!("{}:", provider)) {
         return rest.to_string();
     }
     model.to_string()

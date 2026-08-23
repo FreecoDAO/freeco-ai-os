@@ -7462,6 +7462,167 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 ///
 /// Persists to `~/.freeco-ai/custom_models.json` and makes the model immediately
 /// available for agent assignment.
+/// POST /api/models/refresh — pull each configured provider's current model list.
+///
+/// The catalog is a table compiled into the binary, so a model released after
+/// the last build is invisible however long it has existed upstream: GPT-5.6
+/// shipped weeks before anyone here noticed, because nothing was looking. This
+/// asks the providers instead, and registers anything the catalog lacks.
+///
+/// Only providers with a working key are queried -- the rest would 401 and add
+/// nothing but noise. Models already known are left alone rather than
+/// overwritten, so hand-tuned pricing and tier survive a refresh.
+pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // (provider id, models endpoint, whether ids carry a vendor prefix)
+    let sources: Vec<(&str, String, bool)> = vec![
+        (
+            "openrouter",
+            "https://openrouter.ai/api/v1/models".to_string(),
+            true,
+        ),
+        (
+            "nvidia",
+            "https://integrate.api.nvidia.com/v1/models".to_string(),
+            false,
+        ),
+        (
+            "openai",
+            "https://api.openai.com/v1/models".to_string(),
+            false,
+        ),
+    ];
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(45))
+        .build();
+    let client = match client {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("http client: {e}")})),
+            )
+        }
+    };
+
+    let mut added: Vec<String> = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for (provider, url, vendor_prefixed) in sources {
+        let env_var = state.kernel.config.resolve_api_key_env(provider);
+        let key = std::env::var(&env_var).unwrap_or_default();
+        if key.is_empty() {
+            skipped.push(format!("{provider} (no key)"));
+            continue;
+        }
+        let resp = client.get(&url).bearer_auth(&key).send().await;
+        let body: serde_json::Value = match resp {
+            Ok(r) if r.status().is_success() => match r.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    skipped.push(format!("{provider} ({e})"));
+                    continue;
+                }
+            },
+            Ok(r) => {
+                skipped.push(format!("{provider} (HTTP {})", r.status()));
+                continue;
+            }
+            Err(e) => {
+                skipped.push(format!("{provider} ({e})"));
+                continue;
+            }
+        };
+        let list = body["data"].as_array().cloned().unwrap_or_default();
+        checked.push(format!("{provider}: {} served", list.len()));
+
+        for m in list {
+            let Some(raw_id) = m["id"].as_str() else { continue };
+            // Batch and free variants are addressing modes of a model already
+            // listed; adding them triples the catalog without adding choice.
+            if raw_id.contains(":batch") || raw_id.contains(":free") {
+                continue;
+            }
+            // Store the id the provider itself answers to. OpenRouter prefixes
+            // with the vendor; the direct APIs do not.
+            let id = if vendor_prefixed {
+                raw_id.to_string()
+            } else {
+                raw_id.to_string()
+            };
+            {
+                let catalog = state
+                    .kernel
+                    .model_catalog
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                if catalog.find_model(&id).is_some() {
+                    continue;
+                }
+            }
+            let ctx = m["context_length"].as_u64().unwrap_or(0);
+            let price = |k: &str| -> f64 {
+                m["pricing"][k]
+                    .as_str()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+                    * 1_000_000.0
+            };
+            let supports_tools = m["supported_parameters"]
+                .as_array()
+                .map(|a| a.iter().any(|p| p.as_str() == Some("tools")))
+                // Endpoints that do not report parameters are assumed capable:
+                // hiding a usable model is worse than showing one that errors.
+                .unwrap_or(true);
+            let entry = freeco_types::model_catalog::ModelCatalogEntry {
+                id: id.clone(),
+                display_name: id.clone(),
+                provider: provider.to_string(),
+                tier: freeco_types::model_catalog::ModelTier::Custom,
+                context_window: if ctx > 0 { ctx } else { 128_000 },
+                max_output_tokens: 32_768,
+                input_cost_per_m: price("prompt"),
+                output_cost_per_m: price("completion"),
+                supports_tools,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: vec![],
+            };
+            let mut catalog = state
+                .kernel
+                .model_catalog
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if catalog.add_custom_model(entry) {
+                added.push(id);
+            }
+        }
+    }
+
+    {
+        let catalog = state
+            .kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let path = state.kernel.config.home_dir.join("custom_models.json");
+        if let Err(e) = catalog.save_custom_models(&path) {
+            tracing::warn!("Failed to persist refreshed models: {e}");
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "added": added.len(),
+            "models": added,
+            "checked": checked,
+            "skipped": skipped,
+        })),
+    )
+}
+
 pub async fn add_custom_model(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -11883,6 +12044,14 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
             "description": request.description,
             "action_summary": request.action_summary,
             "action": request.action_summary,
+            // Same plain-language fields as the pending list above. There are
+            // two serialisation sites for approvals and only one carried them,
+            // so a request explained itself while pending and lost the
+            // explanation the moment it was decided -- leaving the history as
+            // a list of raw commands with no record of what the user was told.
+            "aim": request.aim,
+            "consequences": request.consequences,
+            "reversible": request.reversible,
             "risk_level": request.risk_level,
             "requested_at": request.requested_at,
             "created_at": request.requested_at,

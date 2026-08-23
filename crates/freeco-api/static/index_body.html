@@ -1611,7 +1611,23 @@
                       <div x-data="{ c: consequence(a) }" style="display:flex;gap:8px;align-items:flex-start;border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:12px;line-height:1.45"
                            :style="c.severity === 'danger' ? 'background:var(--error-subtle);color:var(--error);border:1px solid var(--error-muted)' : c.severity === 'warn' ? 'background:var(--warning-subtle);color:var(--warning);border:1px solid var(--warning-muted)' : 'background:var(--surface2);color:var(--text-dim);border:1px solid var(--border)'">
                         <span x-text="c.severity === 'danger' ? '⛔' : c.severity === 'warn' ? '⚠️' : 'ℹ️'"></span>
-                        <span x-text="c.text"></span>
+                        <span>
+                          <!-- What it is for, then what it costs. The aim was
+                               being dropped, so the card warned about risk
+                               without ever saying what the agent was trying to
+                               achieve -- which is the half that lets someone
+                               decide rather than just be alarmed. -->
+                          <span x-show="c.aim" style="display:block;font-weight:600;margin-bottom:2px">
+                            Wants to: <span x-text="c.aim"></span>
+                          </span>
+                          <span x-text="c.text"></span>
+                          <span x-show="c.reversible === false" style="display:block;margin-top:2px;font-weight:600">
+                            This cannot be undone.
+                          </span>
+                          <span x-show="c.reversible === null || c.reversible === undefined" class="text-dim" style="display:block;margin-top:2px">
+                            Whether this can be undone depends on the command.
+                          </span>
+                        </span>
                       </div>
                     </template>
                     <div class="text-xs text-dim">Agent: <span x-text="a.agent_name"></span> &middot; <span x-text="timeAgo(a.created_at)"></span></div>
@@ -4349,6 +4365,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <option :value="t" x-text="t"></option>
                 </template>
               </select>
+              <!-- The catalog is compiled into the binary, so a model released
+                   after the last build is invisible no matter how long it has
+                   been available upstream. This asks each configured provider
+                   what it serves today, which is the only source that cannot
+                   go stale. -->
+              <button class="btn btn-ghost btn-sm" @click="refreshModels()" :disabled="refreshingModels"
+                      style="margin-right:6px"
+                      title="Ask each configured provider for its current model list">
+                <span x-show="!refreshingModels">Update models</span>
+                <span x-show="refreshingModels">Checking providers&hellip;</span>
+              </button>
               <button class="btn btn-primary btn-sm" @click="showCustomModelForm = !showCustomModelForm" x-text="showCustomModelForm ? 'Cancel' : '+ Custom Model'"></button>
             </div>
             <!-- Custom model form -->

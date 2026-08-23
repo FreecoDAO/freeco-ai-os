@@ -14,7 +14,8 @@ use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
 
 use freeco_kernel_runtime::agent_loop::{
-    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix, AgentLoopResult,
+    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix,
+    strip_provider_prefix_known, AgentLoopResult,
 };
 use freeco_kernel_runtime::audit::AuditLog;
 use freeco_kernel_runtime::drivers;
@@ -1704,7 +1705,15 @@ impl FreecoKernel {
                     manifest.model.provider.is_empty() || manifest.model.provider == "default";
                 if provider_is_default || manifest.model.provider == entry.provider {
                     manifest.model.provider = entry.provider.clone();
-                    manifest.model.model = strip_provider_prefix(&entry.id, &entry.provider);
+                    manifest.model.model = strip_provider_prefix_known(
+                        &entry.id,
+                        &entry.provider,
+                        // The catalog read lock is already held here.
+                        |id| {
+                            catalog.find_model_for_provider(id, &entry.provider).is_some()
+                                || catalog.find_model(id).is_some()
+                        },
+                    );
                     if manifest.model.api_key_env.is_none() {
                         manifest.model.api_key_env =
                             Some(self.config.resolve_api_key_env(&entry.provider));
@@ -1721,7 +1730,8 @@ impl FreecoKernel {
         }
 
         // Normalize: strip provider prefix from model name if present
-        let normalized = strip_provider_prefix(&manifest.model.model, &manifest.model.provider);
+        let normalized =
+            self.normalize_model_id(&manifest.model.model, &manifest.model.provider);
         if normalized != manifest.model.model {
             manifest.model.model = normalized;
         }
@@ -2950,7 +2960,7 @@ impl FreecoKernel {
             router.resolve_aliases(&self.model_catalog.read().unwrap_or_else(|e| e.into_inner()));
             // Build a probe request to score complexity
             let probe = CompletionRequest {
-                model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
+                model: self.normalize_model_id(&manifest.model.model, &manifest.model.provider),
                 messages: vec![freeco_types::message::Message::user(message)],
                 tools: tools.clone(),
                 max_tokens: manifest.model.max_tokens,
@@ -7304,6 +7314,25 @@ async fn cron_fan_out_targets(
                 error = %r.error.as_deref().unwrap_or("unknown"),
                 "Cron fan-out target failed"
             );
+        }
+    }
+}
+
+impl FreecoKernel {
+    /// Normalise a model id, asking the catalog whether a `provider/` prefix is
+    /// part of the real id or a gateway's addition.
+    ///
+    /// Shape alone cannot answer it: NVIDIA really does serve
+    /// `nvidia/nemotron-3-ultra-550b-a55b`, while `openai/gpt-5.6-terra-pro` is
+    /// OpenRouter's name for a model OpenAI itself calls `gpt-5.6-terra-pro`.
+    fn normalize_model_id(&self, model: &str, provider: &str) -> String {
+        let catalog = self.model_catalog.read();
+        match catalog {
+            Ok(c) => strip_provider_prefix_known(model, provider, |id| {
+                c.find_model_for_provider(id, provider).is_some() || c.find_model(id).is_some()
+            }),
+            // Catalog unavailable: keep the old behaviour rather than guess.
+            Err(_) => strip_provider_prefix(model, provider),
         }
     }
 }

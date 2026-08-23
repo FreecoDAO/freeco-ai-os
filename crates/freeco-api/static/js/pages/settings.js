@@ -24,6 +24,37 @@ function settingsPage() {
     modelProviderFilter: '',
     modelTierFilter: '',
     showCustomModelForm: false,
+
+    // Ask every configured provider what it serves right now.
+    //
+    // The catalog ships compiled into the binary, so anything released since
+    // the last build is invisible -- GPT-5.6 existed upstream for weeks before
+    // it appeared here. This is the only source that cannot go stale.
+    refreshingModels: false,
+
+    async refreshModels() {
+      if (this.refreshingModels) return;
+      this.refreshingModels = true;
+      try {
+        var r = await FreecoAPI.post('/api/models/refresh', {});
+        var added = (r && r.added) || 0;
+        if (added > 0) {
+          FreecoToast.success(added + ' new model(s) added.');
+        } else {
+          FreecoToast.info('No new models — the catalog is current.');
+        }
+        // Say which providers could not be checked rather than reporting a
+        // clean result that quietly covered half the list.
+        if (r && r.skipped && r.skipped.length) {
+          FreecoToast.warn('Not checked: ' + r.skipped.join(', '));
+        }
+        await this.loadModels();
+      } catch (e) {
+        FreecoToast.error('Could not refresh models: ' + (e.message || e));
+      }
+      this.refreshingModels = false;
+    },
+
     customModelId: '',
     customModelProvider: 'openrouter',
     customModelContext: 128000,
