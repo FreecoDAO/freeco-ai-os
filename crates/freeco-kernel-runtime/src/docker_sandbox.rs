@@ -119,18 +119,16 @@ fn workspace_owner(workspace: &Path) -> Result<Option<String>, String> {
 }
 
 /// Check if Docker is available on this system.
+/// Probe one runtime, bounded.
+///
+/// While Docker Desktop is starting, or when its backend is wedged,
+/// `docker version` blocks indefinitely rather than failing. This probe had no
+/// timeout, so every caller inherited the hang: an agent asking to run one
+/// command would sit there forever with nothing reported. A probe that cannot
+/// fail is worse than one that returns false -- false is recoverable and says
+/// so. Five seconds is far longer than a healthy daemon needs and short enough
+/// that a person notices nothing.
 pub async fn is_docker_available(runtime: &str) -> bool {
-    // Bounded, because the Docker CLI does not always answer.
-    //
-    // While Docker Desktop is starting, or when its backend is wedged,
-    // `docker version` blocks indefinitely rather than failing. This probe had
-    // no timeout, so every call that checked for Docker inherited that hang -
-    // an agent asking to run one command would sit there forever with nothing
-    // reported. A probe that cannot fail is worse than one that returns false:
-    // false is recoverable and says so.
-    //
-    // Five seconds is far longer than a healthy daemon needs and short enough
-    // that a person notices nothing.
     let probe = crate::quiet_command::quiet_async(runtime)
         .arg("version")
         .arg("--format")
@@ -143,12 +141,42 @@ pub async fn is_docker_available(runtime: &str) -> bool {
         Ok(Ok(output)) => output.status.success(),
         Ok(Err(_)) => false,
         Err(_) => {
-            warn!("Docker did not respond within 5s; treating it as unavailable");
+            warn!("{runtime} did not respond within 5s; treating it as unavailable");
             false
         }
     }
 }
 
+/// Which container runtime to shell out to: `docker` or `podman`.
+///
+/// Docker was assumed everywhere, so the sandbox did not exist at all for
+/// anyone running Podman -- the rootless default on Fedora and RHEL. The agent
+/// was told to work in a container it had no way to start, leaving the host as
+/// the only route, which is precisely what the sandbox exists to prevent.
+///
+/// Docker is preferred when its daemon answers, so existing installs are
+/// untouched; Podman is used when it does not. Both take identical arguments
+/// for everything here, so only the executable name changes.
+///
+/// Cached: this runs on every sandboxed tool call, and probing each time would
+/// add two process spawns to all of them. The timeout above applies to each
+/// probe, so a wedged Docker costs five seconds once rather than forever.
+pub async fn container_runtime() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<Option<&'static str>> = OnceLock::new();
+    if let Some(cached) = RUNTIME.get() {
+        return *cached;
+    }
+    let mut found = None;
+    for candidate in ["docker", "podman"] {
+        if is_docker_available(candidate).await {
+            found = Some(candidate);
+            break;
+        }
+    }
+    let _ = RUNTIME.set(found);
+    found
+}
 /// Check whether an image is already in the local Docker cache.
 ///
 /// `docker run` silently pulls a missing image, which on a metered or slow
@@ -197,7 +225,7 @@ pub async fn create_sandbox(
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
 
-    let mut cmd = crate::quiet_command::quiet_async(&config.runtime);
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
@@ -292,7 +320,7 @@ pub async fn exec_in_sandbox(
 ) -> Result<ExecResult, String> {
     validate_command(command)?;
 
-    let mut cmd = crate::quiet_command::quiet_async(&container.runtime);
+    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
     cmd.arg("exec")
         .arg(&container.container_id)
         .arg("sh")
@@ -339,7 +367,7 @@ pub async fn exec_in_sandbox(
 pub async fn destroy_sandbox(container: &SandboxContainer) -> Result<(), String> {
     debug!(container = %container.container_id, "Destroying Docker sandbox");
 
-    let output = crate::quiet_command::quiet_async(&container.runtime)
+    let output = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"))
         .arg("rm")
         .arg("-f")
         .arg(&container.container_id)

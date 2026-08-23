@@ -166,6 +166,38 @@ on Windows and takes every call that probes it down with it.
 - [ ] Conflict resolution.
 - [ ] "Cloud only", "local only" or "synced" as a user choice.
 
+- 🟨 Agents no longer lose their conversations on reinstall: ids derive from
+  names, so rebuilding the registry reattaches history instead of orphaning it.
+- 🟨 Model ids where the provider name is part of the id are no longer
+  corrupted on save. `nvidia/nemotron-3-ultra-550b-a55b` was stored as
+  `nemotron-3-ultra-550b-a55b`, which NVIDIA does not serve, so the request
+  404'd and the fallback chain reported an error about a different model.
+- 🟨 NVIDIA NIM free tier as the default: Nemotron 3 Ultra 550B, no daily token
+  cap, recorded at zero cost because that is what the provider charges.
+- 🟨 Every agent's system prompt carries working and secret-handling
+  guidelines, subagents included.
+- 🟨 Agent config asks which provider's key to use rather than the name of an
+  environment variable, and takes the key itself in the same screen.
+- 🟨 Tool filters are a checkbox list with select-all, not 65 names typed one
+  at a time.
+- 🟨 Models are chosen by intent (best free / free only / all); models without
+  tool support are hidden because they fail on the first turn.
+- 🟨 `scripts/refresh_model_catalog.py` checks the catalog against what
+  providers actually serve. It found 15 delisted ids.
+- 🟨 Agent workspaces repointed from `~/.openfang` to `~/.freeco-ai`. The data
+  had migrated; the paths inside each `agent.toml` had not, and one agent had
+  already dropped out of the registry because of it.
+
+- 🟨 The Assistant can perform setup, not just describe it: provider_key_set,
+  provider_list and agent_set_model. Keys are never echoed back.
+- 🟨 OmniRoute runs in a container and FreEco routes through it: 115 models
+  including the auto/best-* routes, plus 130 Arena leaderboard ratings.
+- 🟨 The sandbox works with Podman as well as Docker. It was Docker-only, so on
+  a Podman machine an agent was told to use a container it could not start.
+- 🟨 Agents are instructed never to install software on the host, to work in
+  their sandbox, and to ask first if something truly must touch the machine.
+- 🟨 `stream` is always sent. Omitting it made gateways that default to
+  streaming return SSE where the driver expected JSON.
 ## Partial — do not describe these as done
 
 - ⚠️ **Unified inbox and contacts (CRM).** The tables exist

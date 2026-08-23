@@ -222,6 +222,15 @@ pub fn signup_for(provider_id: &str) -> Option<Signup> {
             Cost::Paid,
         ),
 
+        // A gateway rather than a vendor: it holds the keys and picks the
+        // provider, so from here it is a local endpoint with nothing to sign up
+        // for. Worth naming the free tier, since that is the reason to run it.
+        "omniroute" => (
+            "https://github.com/FreecoDAO/omniroute",
+            "Free, MIT, runs on your machine. One endpoint across 340+ providers              with 90+ free ones, so a model running dry does not stop you.",
+            Cost::Local,
+        ),
+
         // ── Local: no account, no key ──
         "ollama" => (
             "https://ollama.com/download",
