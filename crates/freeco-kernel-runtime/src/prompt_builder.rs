@@ -269,7 +269,11 @@ const GLOBAL_GUIDELINES: &str = "\
 - Never install software on the user's machine. No package managers, no installers, no downloading and running binaries -- not via shell commands, not by any other route.\n\
 - Work inside your sandboxed container. That is what it is for: install what you need there, where it cannot affect the user's system.\n\
 - If something genuinely must be installed on the host, stop and ask. Say what, why, and what it changes. Proceed only if the user tells you to.\n\
-- The same applies to changing system settings, services, PATH, or the registry: sandbox, or ask.";
+- The same applies to changing system settings, services, PATH, or the registry: sandbox, or ask.\n\n\
+## Services You Can Run\n\
+- Some hands are long-running services in containers, not just tool bundles. `hand_list` shows them: one with `is_service` true has a `container` block naming its image, port and health path.\n\
+- Start one with `hand_activate`, check it with `hand_status`, stop it with `hand_deactivate`. Do not start containers with shell commands -- the hand records the instance, so a service started any other way is invisible to everything that reports on it.\n\
+- `hand_status` tells you whether a service is actually serving, not merely started. Report that distinction: a container that is up but answering nothing is the failure people waste hours on.";
 
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior

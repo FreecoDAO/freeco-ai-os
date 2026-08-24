@@ -4797,6 +4797,19 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 })).collect::<Vec<_>>(),
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
+                // Whether this hand is a long-running service, and where it
+                // serves. An agent could see the hand existed but not that it
+                // was container-backed, so it had no way to answer "is
+                // OmniRoute up, and on what port" without being told out of
+                // band -- which is how a shell script ends up being the only
+                // thing that knows.
+                "is_service": d.container.is_some(),
+                "container": d.container.as_ref().map(|c| serde_json::json!({
+                    "image": c.image,
+                    "port": freeco_hands::container::first_host_port(c),
+                    "health_path": c.health_path,
+                    "host_network": c.host_network,
+                })),
                 "settings_count": d.settings.len(),
             })
         })
@@ -4805,11 +4818,45 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
 }
 
+/// The tenant a request belongs to, from its session cookie.
+///
+/// Returns `None` when nobody is signed in, which on a local install is the
+/// normal case: one user, no tenants, and `belongs_to` treats an ownerless
+/// instance as visible to everyone.
+///
+/// Resolving this per request is what makes `tenant_id` on an instance mean
+/// something. Recording an owner and never reading it leaves the isolation in
+/// the database and absent from every answer the API gives.
+fn caller_tenant(state: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
+    let cookie = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    let token = cookie.split(';').find_map(|c| {
+        let c = c.trim();
+        c.strip_prefix("freeco_session=")
+            .or_else(|| c.strip_prefix("session="))
+    })?;
+    let secret = &state.kernel.config.auth.password_hash;
+    let login = crate::session_auth::verify_session_token(token, secret)?;
+    state
+        .kernel
+        .memory
+        .tenancy()
+        .tenant_for_login(&login)
+        .ok()
+        .flatten()
+}
+
 /// GET /api/hands/active — List active hand instances.
-pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_active_hands(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let tenant = caller_tenant(&state, &headers);
     let instances = state.kernel.hand_registry.list_instances();
     let items: Vec<serde_json::Value> = instances
         .iter()
+        // A service instance can hold another tenant's data, so this is a
+        // visibility boundary rather than a display filter.
+        .filter(|i| i.belongs_to(tenant.as_deref()))
         .map(|i| {
             // Effective agent name: custom instance_name takes priority, otherwise HAND.toml default.
             let effective_agent_name = i

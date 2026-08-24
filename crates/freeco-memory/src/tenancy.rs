@@ -250,6 +250,33 @@ impl TenancyStore {
     }
 
     /// Look a user up by id.
+    /// Which tenant a signed-in user belongs to.
+    ///
+    /// The session token carries a username, not a tenant, so every request
+    /// that needs scoping has to resolve one from the other. Without this the
+    /// `tenant_id` on a service instance is recorded and never read -- the
+    /// isolation exists in the data and not in any answer the API gives.
+    ///
+    /// Matched on name or email because sign-in accepts either, and a user who
+    /// logged in with their email should not become invisible to their own
+    /// services.
+    pub fn tenant_for_login(&self, login: &str) -> FreecoResult<Option<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT tenant_id FROM users                  WHERE (name = ?1 OR email = ?1) AND enabled = 1 LIMIT 1",
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let mut rows = stmt
+            .query_map([login], |r| r.get::<_, String>(0))
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        match rows.next() {
+            Some(Ok(t)) => Ok(Some(t)),
+            Some(Err(e)) => Err(FreecoError::Memory(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
     pub fn user(&self, id: &str) -> FreecoResult<Option<User>> {
         let conn = self.lock()?;
         let mut stmt = conn
