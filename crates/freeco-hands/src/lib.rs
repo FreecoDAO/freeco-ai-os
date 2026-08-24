@@ -501,6 +501,19 @@ pub struct HandInstance {
     /// applies.
     #[serde(default)]
     pub instance_name: Option<String>,
+    /// Which tenant this instance belongs to.
+    ///
+    /// A service hand runs real software holding real data -- a CRM's database,
+    /// a voice server's recordings. Without an owner, one tenant's activation
+    /// and another's are the same row, and listing "your services" has no way
+    /// to exclude someone else's. The container name already carries the
+    /// instance id so two tenants cannot collide on a container; this is what
+    /// makes the *records* separable.
+    ///
+    /// `None` means single-tenant, which is what a local install is. Existing
+    /// instances load as `None` rather than being assigned an arbitrary owner.
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     /// Current status.
     pub status: HandStatus,
     /// The agent that was spawned for this hand.
@@ -528,12 +541,39 @@ impl HandInstance {
             instance_id: Uuid::new_v4(),
             hand_id: hand_id.to_string(),
             instance_name,
+            // Single-tenant unless an owner is set. `for_tenant` is the way to
+            // attach one, so the ownerless case stays explicit rather than an
+            // empty string that reads as a real tenant later.
+            tenant_id: None,
             status: HandStatus::Active,
             agent_id: None,
             agent_name: agent_name.to_string(),
             config,
             activated_at: now,
             updated_at: now,
+        }
+    }
+
+    /// Attach an owning tenant.
+    ///
+    /// Separate from `new` because most callers are single-tenant and adding a
+    /// parameter there would make every one of them pass `None`.
+    #[must_use]
+    pub fn for_tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    /// Does this instance belong to `tenant`?
+    ///
+    /// An ownerless instance belongs to whoever asks: a local install has one
+    /// user and no tenants, and hiding their own services from them would be a
+    /// worse failure than the one this guards against.
+    pub fn belongs_to(&self, tenant: Option<&str>) -> bool {
+        match (&self.tenant_id, tenant) {
+            (None, _) => true,
+            (Some(owner), Some(asking)) => owner == asking,
+            (Some(_), None) => false,
         }
     }
 }

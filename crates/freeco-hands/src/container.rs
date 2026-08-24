@@ -238,4 +238,44 @@ mod tests {
         s.ports.clear();
         assert_eq!(first_host_port(&s), None);
     }
+
+    /// A tenant must not see another tenant's services.
+    ///
+    /// This is the whole point of the field: a CRM instance holds one
+    /// customer's data, and "list my services" returning someone else's is a
+    /// data leak rather than a display bug.
+    #[test]
+    fn tenants_do_not_see_each_others_instances() {
+        use crate::HandInstance;
+        use std::collections::HashMap;
+        let acme = HandInstance::new("crm", "agent", HashMap::new(), None).for_tenant("acme");
+        assert!(acme.belongs_to(Some("acme")));
+        assert!(!acme.belongs_to(Some("globex")));
+        // An owned instance is not visible to an untenanted request either,
+        // or single-tenant callers would see every tenant's services.
+        assert!(!acme.belongs_to(None));
+    }
+
+    /// A local install has no tenants; its own services must stay visible.
+    #[test]
+    fn ownerless_instances_are_visible_to_everyone() {
+        use crate::HandInstance;
+        use std::collections::HashMap;
+        let local = HandInstance::new("omniroute", "agent", HashMap::new(), None);
+        assert_eq!(local.tenant_id, None);
+        assert!(local.belongs_to(None));
+        assert!(local.belongs_to(Some("acme")));
+    }
+
+    /// Two tenants running the same hand get separate containers.
+    #[test]
+    fn same_hand_different_tenants_get_separate_containers() {
+        use crate::HandInstance;
+        use std::collections::HashMap;
+        let a = HandInstance::new("crm", "agent", HashMap::new(), None).for_tenant("acme");
+        let b = HandInstance::new("crm", "agent", HashMap::new(), None).for_tenant("globex");
+        let na = container_name(&a.hand_id, &a.instance_id.to_string());
+        let nb = container_name(&b.hand_id, &b.instance_id.to_string());
+        assert_ne!(na, nb, "one tenant would adopt the other's container");
+    }
 }

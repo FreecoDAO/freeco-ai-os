@@ -3909,7 +3909,15 @@ impl FreecoKernel {
             })?
             .clone();
 
-        // Create the instance in the registry
+        // Create the instance in the registry, owned by the tenant activating it.
+        //
+        // A service hand runs real software holding real data -- a CRM's
+        // database, a voice server's recordings -- so an instance needs an
+        // owner or "list my services" cannot exclude anyone else's. Today that
+        // is always the local tenant, since a local install has exactly one;
+        // stamping it now means the records are already attributable when more
+        // than one exists, rather than needing a backfill that guesses.
+        let owning_tenant = self.memory.tenancy().local_tenant().ok().map(|t| t.id);
         let instance = self
             .hand_registry
             .activate(hand_id, config, instance_name.clone())
@@ -3919,6 +3927,10 @@ impl FreecoKernel {
                 }
                 other => KernelError::Freeco(FreecoError::Internal(other.to_string())),
             })?;
+        let instance = match owning_tenant {
+            Some(t) => instance.for_tenant(t),
+            None => instance,
+        };
 
         // Build an agent manifest from the hand definition.
         // If the hand declares provider/model as "default", inherit the kernel's configured LLM.
