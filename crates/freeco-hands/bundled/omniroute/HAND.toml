@@ -1,0 +1,55 @@
+id = "omniroute"
+name = "OmniRoute Gateway"
+description = "One endpoint in front of 340+ model providers, 90+ of them free. A free model running dry falls through to another instead of stopping the agent."
+category = "productivity"
+icon = "\U0001F500"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+]
+
+[container]
+image = "docker.io/diegosouzapw/omniroute:latest"
+# Host networking, not published ports. Rootless podman's default `pasta`
+# accepts `-p 20128:20128`, reports the mapping, and forwards nothing: the
+# service answers inside the container while the port is dead from the host.
+host_network = true
+health_path = "/v1/models"
+health_timeout_secs = 180
+restart = "unless-stopped"
+
+[container.env]
+# No defaults upstream. Without these the container starts, logs "Ready in 0ms",
+# and never serves anything -- which reads as a broken image rather than missing
+# configuration.
+JWT_SECRET = "secret:OMNIROUTE_JWT_SECRET"
+API_KEY_SECRET = "secret:OMNIROUTE_API_KEY_SECRET"
+STORAGE_ENCRYPTION_KEY = "secret:OMNIROUTE_STORAGE_KEY"
+STORAGE_ENCRYPTION_KEY_VERSION = "v1"
+PORT = "20128"
+NODE_ENV = "production"
+AUTH_COOKIE_SECURE = "false"
+REQUIRE_API_KEY = "false"
+BASE_URL = "http://localhost:20128"
+NEXT_PUBLIC_BASE_URL = "http://localhost:20128"
+OMNIROUTE_AUTO_FREE_FALLBACK_TO_FULL_POOL = "true"
+
+[agent]
+name = "omniroute"
+description = "Looks after the OmniRoute gateway and reports what it is actually serving."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+You look after the OmniRoute gateway: a single OpenAI-compatible endpoint in \
+front of hundreds of model providers.
+
+Report what it is actually serving rather than what it should serve. If the \
+gateway is up but has no providers connected, say so - it will answer /v1/models \
+and fail every completion, which looks like a model problem and is not.
+"""
+

@@ -823,7 +823,14 @@ mod tests {
     fn load_bundled_hands() {
         let reg = HandRegistry::new();
         let count = reg.load_bundled();
-        assert_eq!(count, 9);
+        // Every bundled hand must load. An exact total was asserted here and
+        // broke on each addition without ever catching a hand that failed to
+        // parse -- which is the fault worth knowing about.
+        assert_eq!(
+            count,
+            crate::bundled::bundled_hands().len(),
+            "some bundled hands failed to load"
+        );
         assert!(!reg.list_definitions().is_empty());
 
         // Clip hand should be loaded

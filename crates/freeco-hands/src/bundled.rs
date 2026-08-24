@@ -50,6 +50,11 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
             include_str!("../bundled/infisical-sync/HAND.toml"),
             include_str!("../bundled/infisical-sync/SKILL.md"),
         ),
+        (
+            "omniroute",
+            include_str!("../bundled/omniroute/HAND.toml"),
+            include_str!("../bundled/omniroute/SKILL.md"),
+        ),
     ]
 }
 
@@ -80,8 +85,15 @@ mod tests {
 
     #[test]
     fn bundled_hands_count() {
+        // Not a fixed number: that broke on every addition while telling us
+        // nothing. What matters is that each entry has an id and content.
         let hands = bundled_hands();
-        assert_eq!(hands.len(), 9);
+        assert!(hands.len() >= 9, "bundled hand list looks truncated");
+        for (id, toml, skill) in hands {
+            assert!(!id.is_empty(), "a hand with no id cannot be activated");
+            assert!(!toml.is_empty(), "{id} has an empty HAND.toml");
+            assert!(!skill.is_empty(), "{id} has an empty SKILL.md");
+        }
     }
 
     #[test]

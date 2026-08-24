@@ -4,6 +4,9 @@
 //! from a marketplace. Unlike regular agents (you chat with them), Hands work for
 //! you (you check in on them).
 
+/// Running the containers that back service hands.
+pub mod container;
+
 pub mod bundled;
 pub mod registry;
 
@@ -356,6 +359,74 @@ pub(crate) fn copy_dir_all(
 }
 
 /// Complete Hand definition — parsed from HAND.toml.
+/// A long-running container that backs a hand.
+///
+/// Hands already carry the lifecycle a service needs -- an instance id, a name
+/// so several can coexist, and `HandStatus::{Active, Paused, Error}` that
+/// persists a failure with its reason. Containers had the opposite problem:
+/// `docker_sandbox` could start one but nothing modelled its life, so a service
+/// running for a day existed only as a process nobody could address.
+///
+/// This joins them. A hand with a `[container]` section is a service: started
+/// when the hand is activated, stopped when it is paused, and reported through
+/// the same status the rest of the product already reads.
+///
+/// Ephemeral execution deliberately stays a tool. `docker_exec` runs a command
+/// and throws the container away; there is no identity worth keeping, and
+/// modelling it as a hand would mean an instance record per shell command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HandContainer {
+    /// Image reference, digest-pinned where the upstream publishes one.
+    pub image: String,
+
+    /// Ports to publish, as `host:container`.
+    ///
+    /// Rootless podman's default `pasta` networking accepts a published port,
+    /// reports it, and forwards nothing -- the service answers inside the
+    /// container while the port is dead from outside. `host_network` exists
+    /// because of that, not as a shortcut.
+    #[serde(default)]
+    pub ports: Vec<String>,
+
+    /// Named volumes or host paths, as `source:destination`.
+    #[serde(default)]
+    pub volumes: Vec<String>,
+
+    /// Environment variables. Values naming a secret are resolved from the key
+    /// store at start time, so a token never lands in this file.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+
+    /// Path polled after start to decide whether the service is actually up.
+    ///
+    /// Without one, "started" means "the container did not exit immediately",
+    /// which is not the same thing: OmniRoute logs `Ready` and serves nothing
+    /// when its secrets are missing.
+    #[serde(default)]
+    pub health_path: Option<String>,
+
+    /// Seconds to wait for the health check before reporting failure.
+    #[serde(default = "default_health_timeout")]
+    pub health_timeout_secs: u64,
+
+    /// Use the host network instead of publishing ports. Required under
+    /// rootless podman for services that must be reachable from the host.
+    #[serde(default)]
+    pub host_network: bool,
+
+    /// Restart policy passed to the runtime.
+    #[serde(default = "default_restart_policy")]
+    pub restart: String,
+}
+
+fn default_health_timeout() -> u64 {
+    120
+}
+
+fn default_restart_policy() -> String {
+    "unless-stopped".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandDefinition {
     /// Unique hand identifier (e.g. "clip").
@@ -389,6 +460,9 @@ pub struct HandDefinition {
     /// Dashboard metrics schema.
     #[serde(default)]
     pub dashboard: HandDashboard,
+    /// Present when this hand is backed by a long-running container.
+    #[serde(default)]
+    pub container: Option<HandContainer>,
     /// Bundled skill content (populated at load time, not in TOML).
     #[serde(skip)]
     pub skill_content: Option<String>,
