@@ -1721,6 +1721,19 @@ impl FreecoKernel {
                 }
             }
         }
+
+        // The fallback chain needs the same treatment as the primary.
+        //
+        // Only the primary was normalised here, so a corrupted fallback id went
+        // to the provider verbatim. That is the worse half of the bug: the
+        // primary is what the dashboard shows, while a broken fallback only
+        // surfaces once the primary fails, as an error naming a provider and a
+        // model the user never chose.
+        for fb in &mut manifest.fallback_models {
+            if !fb.provider.is_empty() && fb.provider != "default" {
+                fb.model = self.normalize_model_id(&fb.model, &fb.provider);
+            }
+        }
         if manifest.model.api_key_env.is_none()
             && !manifest.model.provider.is_empty()
             && manifest.model.provider != "default"
@@ -3891,6 +3904,115 @@ impl FreecoKernel {
     // ─── Hand lifecycle ─────────────────────────────────────────────────────
 
     /// Activate a hand: check requirements, create instance, spawn agent.
+    /// One short completion, outside any agent's conversation.
+    ///
+    /// For product decisions that need a sentence of judgement rather than a
+    /// whole agent turn -- is this message a new task, what should this session
+    /// be called. Routing those through an agent would write them into the
+    /// user's transcript, which is the opposite of what a housekeeping question
+    /// should do.
+    ///
+    /// Uses the default driver and a small token budget, and returns the text
+    /// with surrounding whitespace and quotes removed, since models wrap short
+    /// answers in both.
+    pub async fn complete_once(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        use freeco_kernel_runtime::llm_driver::CompletionRequest;
+        use freeco_types::message::Message;
+
+        let req = CompletionRequest {
+            model: self.config.default_model.model.clone(),
+            messages: vec![Message::user(user)],
+            tools: vec![],
+            max_tokens,
+            temperature: 0.0,
+            system: Some(system.to_string()),
+            thinking: None,
+        };
+        let resp = self
+            .default_driver
+            .complete(req)
+            .await
+            .map_err(|e| e.to_string())?;
+        let text = resp
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                freeco_types::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        Ok(text.trim().trim_matches('"').trim().to_string())
+    }
+
+    /// Start the container behind a service hand, if it has one.
+    ///
+    /// Returns the container name when one was started, and `None` for a hand
+    /// that is not a service. `activate_hand` records an instance either way;
+    /// this is what makes that record correspond to something actually running.
+    ///
+    /// Kept separate from `activate_hand` because that one is synchronous and
+    /// called from a dozen places including boot, while starting a container
+    /// means waiting on a health check. Callers that can await should call this
+    /// straight after activating, and report its error rather than swallowing
+    /// it -- a hand that says Active while nothing listens is the worst of the
+    /// three possible outcomes, because everything downstream believes it.
+    pub async fn start_hand_service(
+        &self,
+        hand_id: &str,
+        instance_id: &uuid::Uuid,
+    ) -> Result<Option<String>, String> {
+        // Scoped so the registry borrow ends before the await.
+        let spec = {
+            let def = self
+                .hand_registry
+                .get_definition(hand_id)
+                .ok_or_else(|| format!("Hand not found: {hand_id}"))?;
+            def.container.clone()
+        };
+        let Some(spec) = spec else {
+            return Ok(None);
+        };
+        // `secret:NAME` refs resolve from the process environment, which the
+        // daemon populates from the secrets file at boot -- the same path the
+        // provider `api_key_env` fields already use.
+        let name = freeco_hands::container::start(&spec, hand_id, &instance_id.to_string(), |k| {
+            std::env::var(k).ok()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(Some(name))
+    }
+
+    /// Stop the container behind a service hand, if it has one.
+    ///
+    /// Errors are returned rather than ignored: a container that outlives its
+    /// instance keeps its port, and the next activation then fails with a
+    /// message about the port rather than about the leftover.
+    pub async fn stop_hand_service(
+        &self,
+        hand_id: &str,
+        instance_id: &uuid::Uuid,
+    ) -> Result<(), String> {
+        let is_service = {
+            match self.hand_registry.get_definition(hand_id) {
+                Some(def) => def.container.is_some(),
+                None => return Ok(()),
+            }
+        };
+        if !is_service {
+            return Ok(());
+        }
+        freeco_hands::container::stop(hand_id, &instance_id.to_string())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub fn activate_hand(
         &self,
         hand_id: &str,
@@ -7340,9 +7462,31 @@ impl FreecoKernel {
     fn normalize_model_id(&self, model: &str, provider: &str) -> String {
         let catalog = self.model_catalog.read();
         match catalog {
-            Ok(c) => strip_provider_prefix_known(model, provider, |id| {
-                c.find_model_for_provider(id, provider).is_some() || c.find_model(id).is_some()
-            }),
+            Ok(c) => {
+                let known = |id: &str| {
+                    c.find_model_for_provider(id, provider).is_some() || c.find_model(id).is_some()
+                };
+                let stripped = strip_provider_prefix_known(model, provider, &known);
+
+                // Restore a prefix that was wrongly removed.
+                //
+                // Stripping alone cannot repair existing data, and there is
+                // existing data to repair: fallback chains were written through
+                // a path that used the shape-only stripper, so a stored NVIDIA
+                // fallback reads back as `nemotron-3-ultra-550b-a55b` and NVIDIA
+                // answers `404 page not found` -- plain text, from a provider
+                // the user never picked, while the dashboard shows the model
+                // they did pick. Asking the catalog whether the prefixed form is
+                // the real one repairs it on read, so no migration has to find
+                // every corrupted row.
+                if !known(&stripped) {
+                    let prefixed = format!("{provider}/{stripped}");
+                    if known(&prefixed) {
+                        return prefixed;
+                    }
+                }
+                stripped
+            }
             // Catalog unavailable: keep the old behaviour rather than guess.
             Err(_) => strip_provider_prefix(model, provider),
         }
@@ -7831,12 +7975,26 @@ impl KernelHandle for FreecoKernel {
             .activate_hand(hand_id, config, None)
             .map_err(|e| format!("{e}"))?;
 
+        // Same contract the HTTP route gives: for a service hand this returns
+        // once the container answers its health check, and rolls the instance
+        // back if it does not. An agent told "Active" then reporting a working
+        // service to the user is worse than an agent told why it failed.
+        let container = match self.start_hand_service(hand_id, &instance.instance_id).await {
+            Ok(name) => name,
+            Err(e) => {
+                let _ = self.deactivate_hand(instance.instance_id);
+                return Err(format!("{hand_id} could not start: {e}"));
+            }
+        };
+
         Ok(serde_json::json!({
             "instance_id": instance.instance_id.to_string(),
             "hand_id": instance.hand_id,
             "agent_name": instance.agent_name,
             "agent_id": instance.agent_id.map(|a| a.to_string()),
             "status": format!("{}", instance.status),
+            "container": container,
+            "serving": container.is_some(),
         }))
     }
 
@@ -7847,9 +8005,28 @@ impl KernelHandle for FreecoKernel {
             .find(|i| i.hand_id == hand_id)
             .ok_or_else(|| format!("No active instance found for hand '{hand_id}'"))?;
 
-        let def = self.hand_registry.get_definition(hand_id);
-        let def_name = def.as_ref().map(|d| d.name.clone()).unwrap_or_default();
-        let def_icon = def.as_ref().map(|d| d.icon.clone()).unwrap_or_default();
+        let (def_name, def_icon, is_service) = {
+            let def = self.hand_registry.get_definition(hand_id);
+            (
+                def.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
+                def.as_ref().map(|d| d.icon.clone()).unwrap_or_default(),
+                def.as_ref().map(|d| d.container.is_some()).unwrap_or(false),
+            )
+        };
+
+        // For a service hand, ask the runtime instead of trusting the record.
+        // The registry says what was *asked for*; only the container says what
+        // is running. Those disagree exactly when it matters -- the container
+        // exited, or something outside the hand system started or stopped it.
+        let serving = if is_service {
+            let name = freeco_hands::container::container_name(
+                hand_id,
+                &instance.instance_id.to_string(),
+            );
+            Some(freeco_hands::container::is_running(&name).await)
+        } else {
+            None
+        };
 
         Ok(serde_json::json!({
             "hand_id": hand_id,
@@ -7857,6 +8034,10 @@ impl KernelHandle for FreecoKernel {
             "icon": def_icon,
             "instance_id": instance.instance_id.to_string(),
             "status": format!("{}", instance.status),
+            "is_service": is_service,
+            // null for a non-service hand; true/false only when there is a
+            // container whose state could be checked.
+            "serving": serving,
             "agent_id": instance.agent_id.map(|a| a.to_string()),
             "agent_name": instance.agent_name,
             "activated_at": instance.activated_at.to_rfc3339(),
@@ -7867,7 +8048,14 @@ impl KernelHandle for FreecoKernel {
     async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
         let uuid =
             uuid::Uuid::parse_str(instance_id).map_err(|e| format!("Invalid instance ID: {e}"))?;
-        self.deactivate_hand(uuid).map_err(|e| format!("{e}"))
+        // Resolve the hand before the record is removed -- afterwards there is
+        // nothing left to say which container this instance owned.
+        let hand_id = self.hand_registry.get_instance(uuid).map(|i| i.hand_id);
+        self.deactivate_hand(uuid).map_err(|e| format!("{e}"))?;
+        if let Some(hand_id) = hand_id {
+            self.stop_hand_service(&hand_id, &uuid).await?;
+        }
+        Ok(())
     }
 
     fn requires_approval(&self, tool_name: &str) -> bool {
@@ -7879,6 +8067,7 @@ impl KernelHandle for FreecoKernel {
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
+        purpose: Option<&str>,
     ) -> Result<bool, String> {
         use freeco_types::approval::{ApprovalDecision, ApprovalRequest as TypedRequest};
 
@@ -7898,15 +8087,25 @@ impl KernelHandle for FreecoKernel {
             id: uuid::Uuid::new_v4(),
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
-            description: format!("Agent {} requests to execute {}", agent_id, tool_name),
+            // The agent's own words when it gave them, and a UUID restating the
+            // tool name only when it did not. "Agent <uuid> requests to execute
+            // shell_exec" tells the user nothing they cannot already see, and
+            // it was what every request said, because nothing could carry an
+            // explanation this far.
+            description: match purpose {
+                Some(p) => p.chars().take(512).collect(),
+                None => format!("Agent {} requests to execute {}", agent_id, tool_name),
+            },
             action_summary: action_summary.chars().take(512).collect(),
-            // Derived from the tool, because this path has no agent-supplied
-            // reasoning to pass through. It is a floor, not the goal: a
-            // request that says only what the tool does still leaves the user
-            // guessing why, which is the problem the fields exist to solve.
-            // Agents that can explain themselves should populate these
-            // directly; see APPROVAL_REQUEST_RULE.
-            aim: describe_tool_intent(tool_name),
+            // What the agent is trying to achieve, when it said so. The
+            // per-tool text below is a floor, not the goal: it describes the
+            // mechanism ("run a command on your machine") while the user needs
+            // the purpose ("read your OmniRoute config to find why gpt-5.6
+            // fails"). Only the agent knows the second, so only the agent can
+            // supply it; see APPROVAL_REQUEST_RULE.
+            aim: purpose
+                .map(|p| p.chars().take(512).collect())
+                .unwrap_or_else(|| describe_tool_intent(tool_name)),
             consequences: describe_tool_consequences(tool_name),
             reversible: tool_is_reversible(tool_name),
             risk_level: crate::approval::ApprovalManager::classify_risk(tool_name),

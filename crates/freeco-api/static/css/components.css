@@ -3519,6 +3519,18 @@ mark.search-highlight {
 .freeco-chip svg { flex-shrink: 0; opacity: .8; }
 
 .freeco-input-row { display: flex; align-items: flex-end; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border-subtle); }
+
+/* Which model is answering. Sits under the input rather than in it: it is
+   consulted occasionally and should not compete with typing. */
+.freeco-model-row { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
+.freeco-model-select {
+  flex: 1 1 auto; min-width: 0; max-width: 100%;
+  font-size: 11px; padding: 3px 6px;
+  color: var(--text-dim); background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle); border-radius: 6px;
+}
+.freeco-model-select:hover { color: var(--text); border-color: var(--border); }
+.freeco-model-note { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 .freeco-input {
   flex: 1; resize: none; max-height: 100px; padding: 8px 10px; font-size: .85rem; font-family: inherit;
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-primary); color: var(--text);

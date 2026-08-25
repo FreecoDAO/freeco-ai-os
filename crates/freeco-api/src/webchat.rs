@@ -153,6 +153,9 @@ const WEBCHAT_HTML: &str = concat!(
     "\n",
     include_str!("../static/js/katex.js"),
     "\n",
+    // Shared chat behaviour, before the pages that mix it in.
+    include_str!("../static/js/shared/inline-approvals.js"),
+    "\n",
     include_str!("../static/js/pages/chat.js"),
     "\n",
     include_str!("../static/js/pages/agents.js"),

@@ -175,13 +175,22 @@ pub trait KernelHandle: Send + Sync {
 
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
     /// Returns `Ok(true)` if approved, `Ok(false)` if denied or timed out.
+    /// Ask the user to allow one tool call.
+    ///
+    /// `purpose` is the agent's own account of what it is trying to achieve and
+    /// why this tool is needed for it. Without it the user sees a tool name and
+    /// a string of arguments, which is not a question anyone can answer: faced
+    /// with it people approve everything or deny everything. Implementations
+    /// fall back to a generic per-tool description when it is absent, but that
+    /// describes the mechanism rather than the aim, so it is a poor substitute.
     async fn request_approval(
         &self,
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
+        purpose: Option<&str>,
     ) -> Result<bool, String> {
-        let _ = (agent_id, tool_name, action_summary);
+        let _ = (agent_id, tool_name, action_summary, purpose);
         Ok(true) // Default: auto-approve
     }
 

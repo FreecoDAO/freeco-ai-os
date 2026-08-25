@@ -783,9 +783,38 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
+                let body_lower = body.to_lowercase();
+
+                // Some models accept only their default temperature and reject
+                // any explicit value outright.
+                //
+                // Checked before the tools retry below, because that one clears
+                // the tools and continues: a temperature rejection would be
+                // "handled" by silently taking every tool away from the agent,
+                // and the request would still fail for the same reason. The
+                // symptom this fixes looked like a broken model family --
+                // gpt-5.4 worked while 5.5 and 5.6 returned 400 -- and the only
+                // difference was an agent temperature of 0.3.
+                //
+                // Dropping the field asks for the model's default rather than
+                // guessing a value it will accept.
+                if oai_request.temperature.is_some()
+                    && attempt < max_retries
+                    && status == 400
+                    && body_lower.contains("temperature")
+                    && (body_lower.contains("does not support")
+                        || body_lower.contains("unsupported"))
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Model rejects an explicit temperature, retrying with its default"
+                    );
+                    oai_request.temperature = None;
+                    continue;
+                }
+
                 // Model doesn't support function calling â€” retry without tools
                 // (e.g. GLM-5 on DashScope returns 500 "internal error" when tools are sent)
-                let body_lower = body.to_lowercase();
                 if !oai_request.tools.is_empty()
                     && attempt < max_retries
                     && (status == 500

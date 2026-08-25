@@ -284,7 +284,8 @@ pub fn strip_provider_prefix_known(
 
 #[cfg(test)]
 mod strip_provider_prefix_tests {
-    use super::strip_provider_prefix;
+    use super::{should_try_fallback, strip_provider_prefix};
+    use crate::llm_errors;
 
     #[test]
     fn removes_a_prefix_we_added() {
@@ -318,6 +319,33 @@ mod strip_provider_prefix_tests {
     #[test]
     fn leaves_unprefixed_ids_alone() {
         assert_eq!(strip_provider_prefix("gpt-4o", "openai"), "gpt-4o");
+    }
+
+    /// A model that is missing, slow, overloaded, or given too much context is
+    /// worth retrying elsewhere. The streaming path once caught only the first
+    /// of those, so a busy primary failed hard in the dashboard while the same
+    /// request recovered from the CLI.
+    #[test]
+    fn transient_and_missing_models_fall_back() {
+        use llm_errors::LlmErrorCategory as C;
+        for c in [
+            C::ModelNotFound,
+            C::Timeout,
+            C::Overloaded,
+            C::ContextOverflow,
+        ] {
+            assert!(should_try_fallback(c), "{c:?} should fall back");
+        }
+    }
+
+    /// The user's key or credit is not fixed by spending on another provider,
+    /// and doing so silently turns a clear error into a surprise bill.
+    #[test]
+    fn auth_and_billing_never_fall_back() {
+        use llm_errors::LlmErrorCategory as C;
+        for c in [C::Auth, C::Billing] {
+            assert!(!should_try_fallback(c), "{c:?} must not fall back");
+        }
     }
 }
 
@@ -1333,6 +1361,25 @@ fn mask_request(
     Ok((request, total))
 }
 
+/// Is this the kind of failure another model could plausibly succeed at?
+///
+/// Auth and Billing are excluded on purpose: those are the user's key or credit
+/// problems, and silently spending on a different provider would be worse than
+/// failing loudly. The rest are properties of the model or the moment rather
+/// than of the request, so a different model is worth trying.
+///
+/// Shared by the streaming and non-streaming paths so they cannot drift apart
+/// again -- they had, and the streaming one is the path the dashboard uses.
+pub fn should_try_fallback(category: llm_errors::LlmErrorCategory) -> bool {
+    matches!(
+        category,
+        llm_errors::LlmErrorCategory::ModelNotFound
+            | llm_errors::LlmErrorCategory::Timeout
+            | llm_errors::LlmErrorCategory::Overloaded
+            | llm_errors::LlmErrorCategory::ContextOverflow
+    )
+}
+
 /// Call an LLM driver with automatic retry on rate-limit and overload errors.
 ///
 /// Uses the `llm_errors` classifier for smart error handling and the
@@ -1445,13 +1492,7 @@ async fn call_with_retry(
                 // are excluded on purpose: those are the user's key/credit
                 // problems and silently spending on a different provider would
                 // be worse than failing loudly.
-                let should_fall_back = matches!(
-                    classified.category,
-                    llm_errors::LlmErrorCategory::ModelNotFound
-                        | llm_errors::LlmErrorCategory::Timeout
-                        | llm_errors::LlmErrorCategory::Overloaded
-                        | llm_errors::LlmErrorCategory::ContextOverflow
-                );
+                let should_fall_back = should_try_fallback(classified.category);
                 if should_fall_back && !fallback_models.is_empty() {
                     warn!(
                         "Primary model failed ({:?}), trying {} fallback model(s)",
@@ -1634,10 +1675,14 @@ async fn stream_with_retry(
                     cooldown.record_failure(provider, classified.is_billing);
                 }
 
-                // --- ModelNotFound fallback chain (issue #845) ---
-                if classified.category == llm_errors::LlmErrorCategory::ModelNotFound
-                    && !fallback_models.is_empty()
-                {
+                // --- Fallback chain (issue #845) ---
+                // Uses the same predicate as the non-streaming path. These two
+                // drifted apart: non-streaming grew Timeout, Overloaded and
+                // ContextOverflow while this one still only caught
+                // ModelNotFound, so an overloaded primary fell back in one mode
+                // and failed hard in the other. The dashboard streams, so the
+                // narrower of the two was the one users actually hit.
+                if should_try_fallback(classified.category) && !fallback_models.is_empty() {
                     warn!(
                         "Primary model not found (stream), trying {} fallback model(s)",
                         fallback_models.len()

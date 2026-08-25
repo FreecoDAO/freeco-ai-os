@@ -259,6 +259,11 @@ pub async fn build_router(
             "/api/agents/{id}/stop",
             axum::routing::post(routes::stop_agent),
         )
+        .route("/api/assistant", axum::routing::get(routes::get_assistant))
+        .route(
+            "/api/sessions/route",
+            axum::routing::post(routes::route_session),
+        )
         .route(
             "/api/agents/{id}/model",
             axum::routing::put(routes::set_model),

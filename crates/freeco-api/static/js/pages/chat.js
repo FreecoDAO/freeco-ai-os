@@ -3,7 +3,11 @@
 
 function chatPage() {
   var msgId = 0;
-  return {
+  // Permission requests are answered here too, not only in the floating
+  // assistant. Mixed in from one place so the two chat surfaces cannot drift
+  // apart again -- they already had, and a task blocked on an approval the user
+  // could not see was the result.
+  return Object.assign(window.FreecoInlineApprovals ? window.FreecoInlineApprovals() : {}, {
     currentAgent: null,
     messages: [],
     inputText: '',
@@ -136,6 +140,10 @@ function chatPage() {
 
       // Initialize slash commands with i18n
       this.initSlashCommands();
+
+      // Permission requests appear in this window too, so a task blocked on one
+      // is visible where the user is working rather than on another page.
+      if (this.startApprovalPolling) this.startApprovalPolling(5000);
 
       // Start tip cycle
       this.startTipCycle();
@@ -1445,5 +1453,5 @@ function chatPage() {
 
     renderMarkdown: renderMarkdown,
     escapeHtml: escapeHtml
-  };
+  });
 }

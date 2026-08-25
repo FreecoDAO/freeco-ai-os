@@ -241,6 +241,28 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Give an agent a role tag, if it does not already carry it.
+    ///
+    /// Returns whether anything changed, so a caller that adopts an agent into
+    /// a role can persist only when it actually did something.
+    ///
+    /// Roles are tags rather than a new column because the registry already
+    /// persists tags and already round-trips them through the manifest. A role
+    /// nobody can write is a role that has to be re-guessed on every request,
+    /// which is what name matching was.
+    pub fn add_role_tag(&self, id: AgentId, role: &str) -> FreecoResult<bool> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| FreecoError::AgentNotFound(id.to_string()))?;
+        if entry.tags.iter().any(|t| t.eq_ignore_ascii_case(role)) {
+            return Ok(false);
+        }
+        entry.tags.push(role.to_string());
+        entry.last_active = chrono::Utc::now();
+        Ok(true)
+    }
+
     /// Update an agent's MCP server allowlist.
     pub fn update_mcp_servers(&self, id: AgentId, servers: Vec<String>) -> FreecoResult<()> {
         let mut entry = self

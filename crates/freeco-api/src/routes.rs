@@ -4806,7 +4806,10 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "is_service": d.container.is_some(),
                 "container": d.container.as_ref().map(|c| serde_json::json!({
                     "image": c.image,
-                    "port": freeco_hands::container::first_host_port(c),
+                    // service_port, not first_host_port: a host-network hand
+                    // publishes no mapping and still serves a port, and an
+                    // agent told `port: null` cannot reach a running service.
+                    "port": freeco_hands::container::service_port(c),
                     "health_path": c.health_path,
                     "host_network": c.host_network,
                 })),
@@ -5340,6 +5343,32 @@ pub async fn activate_hand(
 
     match state.kernel.activate_hand(&hand_id, config, instance_name) {
         Ok(instance) => {
+            // A service hand is only activated once its container serves.
+            //
+            // Without this the instance was recorded, the response said
+            // "Active", and nothing was running -- the container module had no
+            // callers at all. Roll the instance back on failure so the registry
+            // never holds an instance that maps to no container: leaving it
+            // would make the next activation fail as "already active" while
+            // still serving nothing.
+            let container = match state
+                .kernel
+                .start_hand_service(&hand_id, &instance.instance_id)
+                .await
+            {
+                Ok(name) => name,
+                Err(e) => {
+                    let _ = state.kernel.deactivate_hand(instance.instance_id);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": format!("{hand_id} could not start: {e}"),
+                            "hand_id": hand_id,
+                        })),
+                    );
+                }
+            };
+
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
             if let Some(agent_id) = instance.agent_id {
@@ -5376,6 +5405,9 @@ pub async fn activate_hand(
                     "agent_id": instance.agent_id.map(|a| a.to_string()),
                     "agent_name": effective_agent_name,
                     "activated_at": instance.activated_at.to_rfc3339(),
+                    // Present only for service hands, and only once the health
+                    // check passed, so its presence means "serving".
+                    "container": container,
                 })),
             )
         }
@@ -5425,11 +5457,33 @@ pub async fn deactivate_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
+    // Read the hand id before deactivating: once the instance is gone there is
+    // nothing left to say which container belonged to it, and a container that
+    // outlives its instance holds the port. The next activation then fails
+    // complaining about the port rather than about the leftover.
+    let hand_id = state
+        .kernel
+        .hand_registry
+        .get_instance(id)
+        .map(|i| i.hand_id);
+
     match state.kernel.deactivate_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
-        ),
+        Ok(()) => {
+            if let Some(hand_id) = hand_id {
+                if let Err(e) = state.kernel.stop_hand_service(&hand_id, &id).await {
+                    tracing::warn!(
+                        hand_id = %hand_id,
+                        instance_id = %id,
+                        error = %e,
+                        "hand deactivated but its container did not stop"
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -8463,6 +8517,168 @@ pub async fn stop_agent(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+/// POST /api/sessions/route — does this message continue the session, or start a task?
+///
+/// The chat used to append everything to one endless conversation, so unrelated
+/// work piled into a single thread: the model carried irrelevant history into
+/// every answer, and the user had no way to find anything later. Splitting on a
+/// timer or on a button both get it wrong in the common case -- a follow-up
+/// three seconds later is the same task, and a new task typed straight after an
+/// answer is not.
+///
+/// Body: `{ "message": "...", "context": "recent turns, oldest first" }`
+/// Returns: `{ "new_session": bool, "title": "..." }`
+///
+/// Fails open. If the model is unreachable or answers something unparseable the
+/// answer is "continue", because appending to the current session is the
+/// behaviour the user already had -- a housekeeping call that cannot reach a
+/// model must not stop them from sending a message.
+pub async fn route_session(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let message = body["message"].as_str().unwrap_or("").trim().to_string();
+    let context = body["context"].as_str().unwrap_or("").trim().to_string();
+
+    if message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "message is required"})),
+        );
+    }
+
+    // No history yet: nothing to continue, and the title still helps.
+    let system = "You sort chat messages for a personal assistant. Answer with \
+                  one line of JSON and nothing else: \
+                  {\"new_session\":true|false,\"title\":\"...\"}. \
+                  new_session is true when the message starts a task unrelated to \
+                  the conversation so far, false when it continues, corrects, or \
+                  follows up on it. A short reply like \"yes\", \"go on\" or \
+                  \"why?\" always continues. title is 2-5 words naming the task in \
+                  the user's own vocabulary, capitalised like a heading, no \
+                  trailing punctuation.";
+    let prompt = if context.is_empty() {
+        format!("Conversation so far: (none)\n\nNew message: {message}")
+    } else {
+        format!("Conversation so far:\n{context}\n\nNew message: {message}")
+    };
+
+    let raw = match state.kernel.complete_once(system, &prompt, 120).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("session routing unavailable, continuing session: {e}");
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "new_session": context.is_empty(),
+                    "title": "",
+                    "degraded": true,
+                })),
+            );
+        }
+    };
+
+    // Models fence JSON even when told not to.
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: serde_json::Value = serde_json::from_str(cleaned).unwrap_or(serde_json::json!({}));
+
+    let new_session = parsed["new_session"]
+        .as_bool()
+        .unwrap_or(context.is_empty());
+    let title = parsed["title"].as_str().unwrap_or("").trim();
+    let title: String = title.chars().take(60).collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "new_session": new_session, "title": title })),
+    )
+}
+
+/// GET /api/assistant — the agent the concierge widget talks to.
+///
+/// The widget used to choose this itself, by looking for a name containing
+/// "freeco", "concierge" or "assistant" and taking the first match. "freeco" is
+/// the product name, so every bundled agent carries it: in a registry where
+/// `freeco-shopping` sorted before `Freeco.AI assistant`, messages typed to
+/// Freeco were answered by the shopping agent. Which agent is the assistant is
+/// not a question the browser can answer from a list of names, so it is
+/// answered here.
+///
+/// Resolution is by role first. The assistant is the CEO of the workspace --
+/// the coordinator that can run teams, hands and companies, act directly or
+/// delegate -- and a role is a property of the agent, not of its spelling. The
+/// name checks below it exist only so installs predating the role keep talking
+/// to the agent that already holds their history, rather than being handed a
+/// clean one; an assistant that loses its context is a new assistant.
+pub async fn get_assistant(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let agents = state.kernel.registry.list();
+
+    let by_role = agents
+        .iter()
+        .find(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")));
+
+    let canonical = freeco_types::agent::AgentId::from_string("freeco-concierge");
+    let pick = by_role
+        .or_else(|| agents.iter().find(|e| e.id == canonical))
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case("freeco.ai assistant"))
+        })
+        .or_else(|| {
+            agents.iter().find(|e| {
+                let n = e.name.to_lowercase();
+                n.contains("concierge") || n.contains("assistant")
+            })
+        });
+
+    match pick {
+        Some(e) => {
+            let matched_by = if by_role.is_some() { "role" } else { "name" };
+            // Adopt it: an agent found by name once becomes the CEO by role, so
+            // the next lookup is an answer rather than another guess -- and
+            // stays correct when agents are added, renamed or reordered.
+            if by_role.is_none() {
+                if let Ok(true) = state.kernel.registry.add_role_tag(e.id, "ceo") {
+                    if let Some(updated) = state.kernel.registry.get(e.id) {
+                        if let Err(err) = state.kernel.memory.save_agent(&updated) {
+                            tracing::warn!("could not persist CEO role: {err}");
+                        }
+                    }
+                    tracing::info!(
+                        agent = %e.name,
+                        id = %e.id,
+                        "adopted as CEO — resolved by name once, by role from now on"
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": e.id.to_string(),
+                    "name": e.name,
+                    "role": "ceo",
+                    // How it was found, so a support question about the wrong
+                    // agent answering can be settled without guessing.
+                    "matched_by": matched_by,
+                })),
+            )
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no assistant registered",
+                "create_template": "freeco-concierge",
+            })),
         ),
     }
 }

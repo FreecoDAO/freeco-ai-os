@@ -144,7 +144,14 @@ pub async fn start(
     }
 
     if let Some(path) = &spec.health_path {
-        let port = first_host_port(spec).unwrap_or_default();
+        // No derivable port is a definition error, and saying so beats waiting
+        // the full health budget to report a timeout that names nothing.
+        let port = service_port(spec).ok_or_else(|| {
+            HandError::Config(format!(
+                "{name} declares health_path {path} but no port: add a `ports` entry, \
+                 or `PORT` under [container.env] for a host-network hand"
+            ))
+        })?;
         let url = format!("http://127.0.0.1:{port}{path}");
         if !wait_healthy(&url, spec.health_timeout_secs).await {
             return Err(HandError::Config(format!(
@@ -178,6 +185,19 @@ pub fn first_host_port(spec: &HandContainer) -> Option<String> {
         .first()
         .and_then(|p| p.split(':').next())
         .map(|s| s.to_string())
+}
+
+/// The port this service answers on from the host.
+///
+/// A host-network hand publishes nothing -- there is no mapping to read,
+/// because the container shares the host's stack and simply listens. OmniRoute
+/// is exactly this: `host_network = true`, no `ports`, and `PORT` in its env.
+/// Reading only `ports` gave an empty string, so the health URL came out as
+/// `http://127.0.0.1:/v1/models`, which cannot succeed -- the first activation
+/// of the only service hand would have waited its full 180 second budget and
+/// then rolled back, reporting a timeout rather than a missing port.
+pub fn service_port(spec: &HandContainer) -> Option<String> {
+    first_host_port(spec).or_else(|| spec.env.get("PORT").cloned())
 }
 
 async fn wait_healthy(url: &str, budget_secs: u64) -> bool {
@@ -237,6 +257,34 @@ mod tests {
         let mut s = spec();
         s.ports.clear();
         assert_eq!(first_host_port(&s), None);
+    }
+
+    /// A host-network hand publishes no ports and still serves one. OmniRoute
+    /// is shaped exactly like this, and reading `ports` alone produced an empty
+    /// port in the health URL -- a check that could never pass.
+    #[test]
+    fn host_network_port_comes_from_the_env() {
+        let mut s = spec();
+        s.ports.clear();
+        s.host_network = true;
+        s.env.insert("PORT".into(), "20128".into());
+        assert_eq!(service_port(&s).as_deref(), Some("20128"));
+    }
+
+    /// A published mapping still wins: it is what the host can actually reach,
+    /// while `PORT` is what the process listens on inside the container.
+    #[test]
+    fn published_ports_win_over_the_env() {
+        let mut s = spec();
+        s.env.insert("PORT".into(), "3000".into());
+        assert_eq!(service_port(&s).as_deref(), Some("20128"));
+    }
+
+    #[test]
+    fn no_port_anywhere_is_reported_as_missing() {
+        let mut s = spec();
+        s.ports.clear();
+        assert_eq!(service_port(&s), None);
     }
 
     /// A tenant must not see another tenant's services.

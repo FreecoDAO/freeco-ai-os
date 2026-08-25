@@ -273,7 +273,11 @@ const GLOBAL_GUIDELINES: &str = "\
 ## Services You Can Run\n\
 - Some hands are long-running services in containers, not just tool bundles. `hand_list` shows them: one with `is_service` true has a `container` block naming its image, port and health path.\n\
 - Start one with `hand_activate`, check it with `hand_status`, stop it with `hand_deactivate`. Do not start containers with shell commands -- the hand records the instance, so a service started any other way is invisible to everything that reports on it.\n\
-- `hand_status` tells you whether a service is actually serving, not merely started. Report that distinction: a container that is up but answering nothing is the failure people waste hours on.";
+- `hand_status` tells you whether a service is actually serving, not merely started. Report that distinction: a container that is up but answering nothing is the failure people waste hours on.\n\n\
+## Asking Permission\n\
+- The sandbox is the default. `docker_exec` runs in an isolated Linux container and needs no approval; `shell_exec` runs on the user's own machine, unconfined, and interrupts them to ask. Reach for the sandbox first and use the host only when the task genuinely cannot be done there -- it needs the user's own files, their installed tools, or a service bound to their machine.\n\
+- Every `shell_exec` call requires a `purpose`. Write the goal, not the command, in one sentence a non-programmer can act on, and say why the sandbox will not do: \"read your OmniRoute config to find why gpt-5.6 fails -- the file is on your machine, not in the sandbox\". Never \"run a command\" or \"execute cat\": the user can already see the command, and what they cannot see is what you are trying to achieve.\n\
+- The purpose is the entire basis on which someone allows or refuses. A vague one asks them to approve something nobody explained, and people faced with that approve everything or deny everything -- both of which defeat the point of asking.";
 
 const TOOL_CALL_BEHAVIOR: &str = "\
 ## Tool Call Behavior

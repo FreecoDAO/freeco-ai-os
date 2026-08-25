@@ -883,6 +883,29 @@
                   </div>
                 </template>
               </div>
+
+              <!-- Permission requests, answered here rather than on another page.
+                   A task blocked on an approval used to stop with no sign of why,
+                   because this was only rendered in the floating assistant. -->
+              <template x-for="a in approvals" :key="a.id || a.request_id">
+                <div class="freeco-approval">
+                  <div class="freeco-approval-txt">
+                    <strong>Permission needed</strong>
+                    <div class="freeco-approval-aim" style="font-weight:600;margin-bottom:4px" x-text="approvalAim(a)"></div>
+                    <div x-show="approvalConsequence(a)" class="text-xs text-dim" style="margin-bottom:6px" x-text="'If you allow it: ' + approvalConsequence(a)"></div>
+                    <div x-show="a.reversible === false" class="text-xs" style="color:var(--danger);margin-bottom:6px">This cannot be undone.</div>
+                    <div class="text-xs text-dim" style="font-family:monospace;word-break:break-all" x-text="a.action_summary || a.action || ''"></div>
+                    <div class="freeco-approval-meta" x-show="a.agent_name" x-text="(a.agent_name || '') + (a.tool_name ? ' · ' + a.tool_name : '')"></div>
+                  </div>
+                  <div class="freeco-approval-btns">
+                    <button class="fa-once" @click="answerApproval(a.id || a.request_id, 'once')">Allow once</button>
+                    <button class="fa-always" @click="answerApproval(a.id || a.request_id, 'always')">Allow always</button>
+                    <button class="fa-deny" @click="answerApproval(a.id || a.request_id, 'deny')">Deny</button>
+                    <button class="fa-pause" @click="answerApproval(a.id || a.request_id, 'pause')">Pause</button>
+                  </div>
+                </div>
+              </template>
+
               <!-- Input row -->
               <div class="input-row">
                 <button class="btn btn-ghost btn-sm" @click="$refs.fileInput.click()" title="Attach file" style="padding:6px 8px;flex-shrink:0">
@@ -6594,6 +6617,20 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
       <button class="freeco-send" @click="send()" :disabled="!input.trim() && !attachments.length" :title="sending ? 'Queue this message' : 'Send'" aria-label="Send">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       </button>
+    </div>
+
+    <!-- Which model is answering, and how to change it.
+         The list was already being fetched into `models` and never rendered,
+         so the only way to switch the assistant's model was to leave the chat
+         and find it on another page. -->
+    <div class="freeco-model-row">
+      <select class="freeco-model-select" x-model="currentModel" @change="setModel($event.target.value)"
+              :title="'Model answering in this chat: ' + (currentModel || 'default')" aria-label="Model">
+        <template x-for="m in models" :key="m.id">
+          <option :value="m.id" x-text="m.label || m.id" :selected="m.id === currentModel"></option>
+        </template>
+      </select>
+      <span class="freeco-model-note" x-show="modelNote" x-cloak x-text="modelNote"></span>
     </div>
 
     <!-- Resize handles: bottom-right corner and the left edge -->

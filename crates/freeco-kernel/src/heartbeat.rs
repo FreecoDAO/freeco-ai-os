@@ -189,6 +189,33 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
             continue;
         }
 
+        // --- A reactive agent is idle by design ---
+        //
+        // The guard above only covers agents that were *never* used, because it
+        // compares `last_active` against `created_at`. As soon as you chat with
+        // an agent once, that no longer holds and idleness starts reading as a
+        // crash: marked unresponsive, marked Crashed, auto-recovered, idle
+        // again, forever. One daemon run here did 94 recoveries across six
+        // agents, and every agent the user had switched off came back.
+        //
+        // Reactive agents have nothing to be unresponsive about -- they act when
+        // messaged and sit still otherwise. Only an agent that is supposed to
+        // run on its own can be late. A genuine crash still routes to recovery,
+        // because this only skips the liveness check, not the Crashed state.
+        let runs_on_its_own = entry_ref.manifest.autonomous.is_some()
+            || !matches!(
+                entry_ref.manifest.schedule,
+                freeco_types::agent::ScheduleMode::Reactive
+            );
+        if !runs_on_its_own && entry_ref.state == AgentState::Running {
+            debug!(
+                agent = %entry_ref.name,
+                inactive_secs,
+                "Skipping reactive agent — idle is its normal state"
+            );
+            continue;
+        }
+
         // Crashed agents are always considered unresponsive
         let unresponsive = entry_ref.state == AgentState::Crashed || inactive_secs > timeout_secs;
 

@@ -10,6 +10,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Approval requests say what the agent is trying to achieve. Every one of them
+  read "Agent \<uuid\> requests to execute shell_exec", because the per-tool
+  fallback text was documented as covering "requests that arrive without
+  agent-supplied reasoning" and `request_approval` had no parameter to carry
+  such reasoning — so the fallback was the only path that could run. Agents now
+  pass a `purpose`, required by the `shell_exec` schema, describing the goal and
+  why the sandbox cannot do it. Their system prompt makes the sandbox the
+  default and the host a last resort.
+- The chat picked the wrong agent. It chose the first whose name contained
+  "freeco" — the product name, which every bundled agent carries — so in a
+  registry where `freeco-shopping` sorted first, messages typed to the assistant
+  were answered by the shopping agent. `GET /api/assistant` now answers by role,
+  adopts the agent it resolves as CEO, and persists that, so the guess happens
+  once rather than on every page load.
+- Idle agents are no longer treated as crashed. The guard against the
+  crash-recover loop compared `last_active` to `created_at`, so it only ever
+  protected agents that had never been used; the moment one was chatted with,
+  idleness read as a crash. One daemon run performed 94 recoveries across six
+  agents, including every agent the user had switched off. Reactive agents are
+  idle by design and are no longer liveness-checked; genuine crashes still
+  recover.
+- Newer OpenAI models work. They accept only their default temperature, so an
+  agent temperature of 0.3 failed with 400 — gpt-5.4 accepted it and 5.5 and 5.6
+  did not, which read as a broken model family. The driver now retries without
+  the temperature, and does so before the retry that clears tools, which was
+  "handling" the rejection by silently stripping the agent's capabilities while
+  failing for the same reason.
+- Model ids keep their provider prefix in fallback chains. Only the primary
+  model was normalised, so a stored NVIDIA fallback read back as
+  `nemotron-3-ultra-550b-a55b` and NVIDIA answered with a plain-text `404 page
+  not found` — an error naming a provider and a model the user never chose. The
+  catalog is now asked whether the prefixed form is the real id, which repairs
+  existing rows on read.
+
+### Added
+
+- A model picker in the assistant chat, listing only models whose provider is
+  configured and which support tools, labelled with provider and price, free
+  first. The list was already being fetched and never rendered, and the code
+  that would have switched the model built its URL from an object, so it could
+  never have worked.
+- A new task opens its own named session. Everything used to append to one
+  endless thread, so unrelated work shared a context and nothing could be found
+  later. `POST /api/sessions/route` asks the model whether a message continues
+  the conversation or starts a task, and fails open to continuing.
+- Permission requests appear in the Chat page as well as the floating
+  assistant, from one shared implementation so the two cannot drift apart.
+
+- Service hands start their container. `freeco_hands::container` had no callers
+  anywhere: activating OmniRoute recorded an instance, answered `status:
+  Active`, and started nothing. Activation now starts the container, waits for
+  its health check, and rolls the instance back if it never serves — on both
+  the HTTP route and the `hand_activate` tool agents call. Deactivation stops
+  it, reading the hand id before the record is deleted, since a container that
+  outlives its instance holds the port and makes the next activation fail
+  complaining about the port instead of the leftover.
+- A host-network service hand could never pass its health check. The port was
+  read only from published mappings, and a host-network container publishes
+  none — the URL came out as `http://127.0.0.1:/v1/models`, so the first
+  activation of the only service hand would have burned its whole 180-second
+  budget and reported a timeout naming nothing. The port now falls back to
+  `PORT` in the container env, and a health path with no derivable port fails
+  at once saying which field to add. `/api/hands` reported `port: null` for the
+  same reason.
+- `hand_status` reports whether a service is actually serving, checked against
+  the container runtime. The registry records what was asked for; only the
+  container knows what runs, and they disagree exactly when it matters.
+- Streaming requests fall back between models like non-streaming ones. The two
+  paths had drifted — non-streaming retried on model-not-found, timeout,
+  overload and context overflow, streaming only on model-not-found — and the
+  dashboard streams, so the narrower path was the one users hit. Auth and
+  billing failures still never fall back: spending on another provider to work
+  around the user's own key would be worse than failing.
+- The free-model picker no longer returns models that cannot serve agents.
+  It filtered on price and on the `tools` parameter, and both families it
+  needed to exclude pass those checks: OpenRouter's own routers advertise
+  `tools` and then answer "No endpoints found that support tool use", and
+  cloaked `stealth/*` models log prompts to an undisclosed provider — one of
+  which had the widest free context on offer, so ranking picked it first.
+
 - Model ids where the provider name is part of the id are no longer corrupted
   when saved. `nvidia/nemotron-3-ultra-550b-a55b` was stored as
   `nemotron-3-ultra-550b-a55b`, which NVIDIA does not serve: the request 404'd,

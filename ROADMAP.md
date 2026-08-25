@@ -97,6 +97,97 @@ recorded as such.
 
 ## Unreleased
 
+### Next — session tools for agents
+
+The assistant confirmed from inside a live session that this is a tool-exposure
+gap, not a design question: it searched its callable tool surface and found no
+session-label or append-canonical operation. The backing functions exist in
+`freeco-memory` (`set_session_label`, `create_session_with_label`,
+`append_canonical`) and stop at the crate boundary — nothing in
+`builtin_tool_definitions()` or `KernelHandle` reaches them. This is the same
+dead-wiring shape as `freeco_hands::container`: complete implementation, no
+caller.
+
+Blocked work, reported by the assistant as not executed:
+
+- ⬜ **`session_rename`** — rename the current thread (the pending case: rename a
+  thread to "3+5"). Backing: `set_session_label`. Needs a tool definition, a
+  `KernelHandle` method and a kernel implementation.
+- ⬜ **`session_fork`** — copy a conversation up to a chosen message into a new
+  named session, leaving the original intact. Backing:
+  `create_session_with_label` + `append_canonical`.
+- ⬜ **`session_split`** — the pending case: split one mixed thread into separate
+  sessions named "1", "2" and "4". Same operation as fork with the tail moved
+  rather than copied, so it needs message-level removal from the source and must
+  therefore wait on the soft-delete work below.
+- ⬜ **Message-level soft delete, approval-gated.** No message delete exists in
+  `freeco-memory` at all. This one must not be built casually: chat history has
+  already been lost here once, and the standing rule is that nothing is removed
+  until the user removes it. It needs a recoverable soft delete plus the
+  approval gate, so a deletion is reversible and never happens without a human
+  answering for it. Until that exists, `session_split` copies rather than moves
+  and the source thread is left untouched.
+
+### Done — the chat talks to the right agent, with the right model
+
+- ✅ **Approvals explain themselves.** `request_approval` had no parameter for
+  the agent's reasoning, while the per-tool fallback text was documented as
+  covering requests that arrive without it — so the fallback was the only
+  reachable path and every request read "Agent \<uuid\> requests to execute
+  shell_exec". Agents now supply a `purpose`, required by the `shell_exec`
+  schema, and the prompt makes the sandbox the default and the host a last
+  resort that must justify itself.
+- ✅ **The assistant is resolved by role, not by name.** The chat matched the
+  first agent whose name contained "freeco", which is the product name that
+  every bundled agent carries, so `freeco-shopping` answered messages meant for
+  the assistant. `/api/assistant` resolves by role, adopts the agent as CEO and
+  persists it, so the guess happens once.
+- ✅ **Agents stop being resurrected.** The crash-recover guard only protected
+  agents that had never been used, so any agent that had been chatted with
+  entered the loop: 94 recoveries in one daemon run, including agents the user
+  had switched off.
+- ✅ **A model picker that only offers models that work** — provider
+  configured and tools supported, labelled with provider and price. The list was
+  already fetched and never rendered, and the switch built its URL from an
+  object.
+- ✅ **A new task gets its own named session**, with relatedness judged by the
+  model and failing open to continuing the current one.
+- ✅ **Permission requests appear in both chat surfaces**, from one shared
+  implementation.
+
+### Done — service hands actually start, and the fallback chain works
+
+- ✅ **Service hands start their container.** `freeco_hands::container` had
+  **zero callers** outside its own module: the schema, the health check, the
+  `HAND.toml`, the tests and the SKILL doc all existed, and nothing ever called
+  `start`. Activating OmniRoute returned `status: Active` and started nothing.
+  Activation now starts the container and waits for its health check, and rolls
+  the instance back if it does not come up — an instance that maps to no
+  container would otherwise block the next activation as "already active" while
+  still serving nothing. Wired on both paths: the HTTP route and the
+  `hand_activate` tool agents call.
+- ✅ **Deactivation stops the container.** The hand id is read *before* the
+  instance record is removed; afterwards nothing remains to say which container
+  the instance owned, and a leftover container holds the port so the next
+  activation fails complaining about the port instead of the leftover.
+- ✅ **`hand_status` asks the runtime.** It reports `is_service` and `serving`,
+  checked against the container rather than inferred from the registry. The
+  registry records what was asked for; only the container knows what runs, and
+  they disagree exactly when it matters.
+- ✅ **Streaming requests fall back like non-streaming ones.** The two paths had
+  drifted: non-streaming fell back on ModelNotFound, Timeout, Overloaded and
+  ContextOverflow, streaming only on ModelNotFound. The dashboard streams, so
+  the narrower path was the one users hit. Both now share
+  `should_try_fallback`. Auth and Billing still never fall back — spending on
+  another provider to work around the user's own key is worse than failing.
+- ✅ **The free-model picker no longer returns models it must not.**
+  `best_free_tool_model()` filtered on price and on the `tools` parameter, and
+  both of the families it needed to exclude pass those checks: `openrouter/*`
+  routers advertise `tools` then answer "No endpoints found that support tool
+  use" — the exact failure the function exists to avoid — and `stealth/*`
+  cloaked models log prompts to an undisclosed provider. The cloaked model had
+  the widest free context on OpenRouter, so ranking picked it first.
+
 ### Done — sandbox tiers and a working container runtime
 
 - ✅ **Podman runs containers on this machine.** Verified end to end:

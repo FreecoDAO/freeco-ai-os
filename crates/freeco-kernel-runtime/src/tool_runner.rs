@@ -191,7 +191,17 @@ pub async fn execute_tool(
                 tool_name,
                 freeco_types::truncate_str(&input_str, 200)
             );
-            match kh.request_approval(agent_id_str, tool_name, &summary).await {
+            // The agent's own reason, when it supplied one. Any tool may carry
+            // `purpose`; the approval-gated ones ask for it in their schema.
+            let purpose = input
+                .get("purpose")
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            match kh
+                .request_approval(agent_id_str, tool_name, &summary, purpose)
+                .await
+            {
                 Ok(true) => {
                     debug!(tool_name, "Approval granted — proceeding with execution");
                 }
@@ -733,14 +743,30 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shell tool ---
         ToolDefinition {
             name: "shell_exec".to_string(),
-            description: "Execute a shell command and return its output.".to_string(),
+            description: "Run a command directly on the user's machine, outside any sandbox. \
+                          This is a last resort: prefer `docker_exec`, which runs in the isolated \
+                          Linux sandbox and needs no approval. Use this only when the task cannot \
+                          be done in the sandbox — because it needs the user's own files, their \
+                          installed tools, or a service bound to their machine — and say which in \
+                          `purpose`. Installing software belongs in a sandbox or a hand, never here."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The command to execute" },
+                    "purpose": {
+                        "type": "string",
+                        "description": "What you are trying to achieve, in one sentence a \
+                                        non-programmer can act on, plus why the sandbox cannot do \
+                                        it. This is shown to the user as the reason to allow or \
+                                        refuse, so describe the goal, not the command: \
+                                        \"read your OmniRoute config to find why gpt-5.6 fails — \
+                                        the file is on your machine, not in the sandbox\", not \
+                                        \"run cat on a file\"."
+                    },
                     "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default: 30)" }
                 },
-                "required": ["command"]
+                "required": ["command", "purpose"]
             }),
         },
         // --- Inter-agent tools ---
@@ -3604,7 +3630,15 @@ async fn tool_docker_exec(
                 "start a long-running service in the sandbox for agent {agent_id}, {ports}.                  It keeps running after this command finishes, restarts with Docker, and is                  not removed by the idle cleanup. Files in the agent workspace persist."
             );
             match kh
-                .request_approval(agent_id, "docker_service", &summary)
+                .request_approval(
+                    agent_id,
+                    "docker_service",
+                    &summary,
+                    // This path builds its own explanation rather than taking
+                    // one from the model, and it is already written as a
+                    // purpose, so it serves as the aim directly.
+                    Some(summary.as_str()),
+                )
                 .await
             {
                 Ok(true) => {}

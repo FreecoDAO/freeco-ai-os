@@ -88,8 +88,13 @@ function freecoAssistant() {
     init: function() {
       var self = this;
       // Re-resolve the concierge agent whenever the shared agent list changes.
-      this.$watch('$store.app.agents', function() { self._resolveAgent(); });
+      // The local guess keeps the widget usable before the server answers; the
+      // server's answer then replaces it, and is the one that decides.
+      this.$watch('$store.app.agents', function() {
+        if (!self._agentFromServer) self._resolveAgent();
+      });
       this._resolveAgent();
+      this._resolveAgentFromServer().then(function(ok) { self._agentFromServer = ok; });
       // Launcher and STOP were fixed to their corners and could not be moved.
       this.initDraggableWidgets();
       // A widget parked off the edge of a resized window becomes unreachable,
@@ -103,6 +108,9 @@ function freecoAssistant() {
       // Surface permission requests in this chat, where the user already is.
       this.loadApprovals();
       setInterval(function() { self.loadApprovals(); }, 5000);
+      // The model list was only fetched by a toggle that nothing rendered, so
+      // it was always empty. The picker in the input row needs it up front.
+      this.loadModels();
       // Browsers load TTS voices asynchronously — grab them now and again when
       // the list becomes available, so the first spoken reply already has a
       // good male voice picked.
@@ -113,16 +121,51 @@ function freecoAssistant() {
       this.booted = true;
     },
 
+    // Ask the server which agent is the assistant.
+    //
+    // This is a question about roles, and the browser only has names to go on.
+    // Guessing from names is what sent this chat to the shopping agent, so the
+    // answer now comes from /api/assistant and the local guess below is only a
+    // fallback for when that call cannot be made at all.
+    _resolveAgentFromServer: async function() {
+      try {
+        var res = await FreecoAPI.get('/api/assistant');
+        if (res && res.id) {
+          this.agent = { id: res.id, name: res.name };
+          this.noAgents = false;
+          return true;
+        }
+      } catch (e) { /* fall through to the local guess */ }
+      return false;
+    },
+
     _resolveAgent: function() {
       var agents = (window.Alpine && Alpine.store('app') && Alpine.store('app').agents) || [];
       if (!agents.length) { this.agent = null; this.noAgents = true; return; }
       this.noAgents = false;
       // Prefer an agent that is clearly the concierge; else fall back to the first.
-      var pick = agents.find(function(a) {
+      //
+      // "freeco" is NOT a signal: it is the product name, so `freeco-shopping`,
+      // `freeco-collector` and every other bundled agent contain it. Matching on
+      // it sent the concierge's chat to whichever such agent happened to sort
+      // first -- shopping, in a list where it preceded the assistant -- so
+      // messages typed to Freeco were answered by the shopping agent.
+      //
+      // Ranked rather than first-match, because `find` returns whatever comes
+      // first in registry order and the concierge is not reliably first.
+      var rank = function(a) {
         var n = (a.name || '').toLowerCase();
-        return n.indexOf('freeco') !== -1 || n.indexOf('concierge') !== -1 || n.indexOf('assistant') !== -1;
+        if (n === 'freeco.ai assistant') return 3;
+        if (n.indexOf('concierge') !== -1) return 2;
+        if (n.indexOf('assistant') !== -1) return 1;
+        return 0;
+      };
+      var best = null, bestRank = 0;
+      agents.forEach(function(a) {
+        var r = rank(a);
+        if (r > bestRank) { bestRank = r; best = a; }
       });
-      this.agent = pick || agents[0];
+      this.agent = best || agents[0];
     },
 
     // Freeco should work the moment you open it. If the workspace has no
@@ -216,20 +259,56 @@ function freecoAssistant() {
     models: [],
     currentModel: '',
 
+    // Only models that can actually answer here, labelled with who serves them
+    // and what they cost.
+    //
+    // This read `/api/models/catalog`, which lists every model the product
+    // knows of whether or not a key is configured, and showed a bare id. Two
+    // things follow from that, and both have already cost real time: a model
+    // whose provider has no key is offered and fails at send, and a model that
+    // does not support tools is offered to an agent that always sends tools,
+    // which fails with "No endpoints found that support tool use". Neither is
+    // recoverable by the user from a list of bare names.
+    //
+    // `/api/models` carries `available` (the provider is configured) and
+    // `supports_tools`, so both are filtered here rather than discovered on the
+    // first message.
     async loadModels() {
       try {
-        var status = await FreecoAPI.get('/api/status');
-        this.currentModel = status.default_model || '';
-        var data = await FreecoAPI.get('/api/models/catalog').catch(function () { return null; });
-        var list = (data && (data.models || data.catalog)) || [];
-        this.models = list.map(function (m) {
-          return typeof m === 'string'
-            ? { id: m, provider: '', label: m }
-            : { id: m.id || m.model, provider: m.provider || '', label: m.display_name || m.id || m.model };
-        }).filter(function (m) { return m.id; });
-        // Always offer what is configured, even if no catalogue came back.
+        var status = await FreecoAPI.get('/api/status').catch(function () { return {}; });
+        this.currentModel = (status && status.default_model) || this.currentModel || '';
+        var data = await FreecoAPI.get('/api/models').catch(function () { return null; });
+        var list = (data && (data.models || data)) || [];
+        if (!Array.isArray(list)) list = [];
+
+        this.models = list.filter(function (m) {
+          // `supports_tools` missing means unknown, not false: an older
+          // catalogue entry should not be hidden on a field it never had.
+          return m && m.id && m.available !== false && m.supports_tools !== false;
+        }).map(function (m) {
+          var inC = Number(m.input_cost_per_m || 0), outC = Number(m.output_cost_per_m || 0);
+          var price = (!inC && !outC) ? 'free'
+            : '$' + inC + '/$' + outC + ' per M';
+          var name = m.display_name || m.id;
+          return {
+            id: m.id,
+            provider: m.provider || '',
+            free: (!inC && !outC),
+            label: name + ' — ' + (m.provider || 'unknown') + ' · ' + price
+          };
+        });
+
+        // Free first, then by provider and name: the list is long, and the
+        // models a newcomer should reach for are the ones that cost nothing.
+        this.models.sort(function (a, b) {
+          if (a.free !== b.free) return a.free ? -1 : 1;
+          return (a.provider + a.label).localeCompare(b.provider + b.label);
+        });
+
+        // Keep whatever is configured selectable even if it was filtered out,
+        // or the dropdown would silently show a different model as current.
         if (this.currentModel && !this.models.some(function (m) { return m.id === this.currentModel; }.bind(this))) {
-          this.models.unshift({ id: this.currentModel, provider: '', label: this.currentModel + ' (current)' });
+          this.models.unshift({ id: this.currentModel, provider: '', free: false, label: this.currentModel + ' (current)' });
         }
       } catch (e) { this.models = []; }
       return this.models;
@@ -240,18 +319,31 @@ function freecoAssistant() {
       if (this.showModels && !this.models.length) this.loadModels();
     },
 
+    modelNote: '',
+
     async chooseModel(m) {
       this.showModels = false;
       if (!this.agent) this._resolveAgent();
       if (!this.agent) { FreecoToast.error('No agent to switch.'); return; }
       try {
-        await FreecoAPI.put('/api/agents/' + this.agent + '/model',
+        // `this.agent` is {id, name}; the id is what the route wants. Building
+        // the URL from the object produced /api/agents/[object Object]/model,
+        // so switching model from here could never have worked.
+        await FreecoAPI.put('/api/agents/' + this.agent.id + '/model',
           { provider: m.provider || undefined, model: m.id });
         this.currentModel = m.id;
+        this.modelNote = 'Now using ' + (m.label || m.id);
         FreecoToast.success('Now using ' + (m.label || m.id) + '.');
       } catch (e) {
+        this.modelNote = '';
         FreecoToast.error('Could not switch model: ' + e.message);
       }
+    },
+
+    // Called by the model dropdown in the input row, which hands back an id.
+    setModel: function (id) {
+      var m = this.models.find(function (x) { return x.id === id; });
+      return this.chooseModel(m || { id: id, provider: '', label: id });
     },
 
     // ---- Conversation ergonomics -------------------------------------
@@ -307,6 +399,57 @@ function freecoAssistant() {
       this.sessionId = null;
       this.showHistory = false;
       this._scroll();
+    },
+
+    // Start a fresh session for a new task, keeping what the user typed.
+    //
+    // `newChat` clears the input because the user pressed a button and is
+    // starting over. Here they are mid-send, so the text must survive: the
+    // caller is about to render and send it.
+    sessionTitle: '',
+    async startNewSession(title) {
+      var keepInput = this.input;
+      var keepAtts = this.attachments.slice();
+      var previous = this.sessionId;
+      this.messages = [];
+      this.steps = [];
+      this.sessionId = null;
+      this.sessionTitle = title || '';
+      this.input = keepInput;
+      this.attachments = keepAtts;
+      if (title) {
+        this.messages.push({
+          id: ++mId, role: 'system', ts: Date.now(),
+          html: 'New task: <strong>' + this._escape(title) + '</strong>' +
+                (previous ? ' <span class="text-dim">(the previous conversation is kept in history)</span>' : '')
+        });
+      }
+      this._scroll();
+    },
+
+    // Name the session once it exists.
+    //
+    // The title is decided before sending, but the session is only created by
+    // the send itself, so it cannot be applied until a reply comes back. The id
+    // comes from the agent record rather than the message response, which does
+    // not carry one. Runs once per new task; failure leaves the session unnamed
+    // rather than interrupting the user.
+    async _applySessionTitle() {
+      if (!this.sessionTitle || !this.agent) return;
+      var title = this.sessionTitle;
+      this.sessionTitle = '';
+      try {
+        var a = await FreecoAPI.get('/api/agents/' + this.agent.id);
+        var sid = (a && (a.session_id || (a.agent && a.agent.session_id))) || null;
+        if (sid) await FreecoAPI.put('/api/sessions/' + sid + '/label', { label: title });
+      } catch (e) { /* an unnamed session is still a usable session */ }
+    },
+
+    // Rendered HTML down to the words, for anything that needs plain text.
+    _strip: function (html) {
+      var d = document.createElement('div');
+      d.innerHTML = html || '';
+      return (d.textContent || '').trim();
     },
 
     // ---- Message actions ------------------------------------------------
@@ -551,6 +694,30 @@ function freecoAssistant() {
           html: 'You don’t have any agents yet. <a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-navigate\',{detail:\'agents\'}));return false;">Create your Freeco concierge agent</a> to get started.' });
         this.input = ''; this._scroll(); return;
       }
+      // A new task gets its own session, named for the task.
+      //
+      // Everything used to land in one endless thread, so unrelated work piled
+      // up together: the model carried irrelevant history into every answer and
+      // nothing could be found again afterwards. Relatedness is judged by the
+      // model rather than by a timer, because a follow-up seconds later belongs
+      // to the same task while a fresh request right after an answer does not.
+      // Failures here are silent and continue the current session, since a
+      // housekeeping call must never stop a message being sent.
+      // Keyed on the transcript, not on sessionId: that is only set when a past
+      // conversation is opened from history, so it is null through all normal
+      // chatting and a check on it would never fire.
+      if (this.messages.length) {
+        try {
+          var recent = this.messages.slice(-6).map(function (m) {
+            return (m.role === 'user' ? 'User: ' : 'Assistant: ') + (m.raw || this._strip(m.html || ''));
+          }.bind(this)).join('\n').slice(-2000);
+          var verdict = await FreecoAPI.post('/api/sessions/route', { message: text, context: recent });
+          if (verdict && verdict.new_session) {
+            await this.startNewSession(verdict.title || '');
+          }
+        } catch (e) { /* stay in this session */ }
+      }
+
       var bubble = this._escape(text);
       if (atts.length) {
         bubble += '<div class="freeco-att-row">' + atts.map(function(a) {
@@ -582,6 +749,7 @@ function freecoAssistant() {
         var reply = res.response || '(no reply)';
         this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(reply) });
         if (this.voiceOut) this.speak(reply);
+        this._applySessionTitle();
       } catch (e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         var msg = (e.message || 'request failed').toLowerCase();
@@ -682,6 +850,10 @@ function freecoAssistant() {
         this.sending = false;
         this.steps = [];
         if (this.voiceOut && full) this.speak(full);
+        // The streaming path is the one that normally runs -- send() returns
+        // early when the socket opens -- so naming a new session has to happen
+        // here too, not only in the POST fallback.
+        this._applySessionTitle();
         this._scroll();
         this._drainQueue();
         return;
