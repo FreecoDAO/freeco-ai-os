@@ -58,6 +58,7 @@ pub async fn build_router(
         frozen_agents: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         security: Arc::new(crate::security::SecurityService::default()),
     });
+    start_runtime_watchdog();
     start_backup_scheduler(
         kernel.config.home_dir.clone(),
         kernel.config.data_dir.clone(),
@@ -260,6 +261,10 @@ pub async fn build_router(
             axum::routing::post(routes::stop_agent),
         )
         .route("/api/assistant", axum::routing::get(routes::get_assistant))
+        .route(
+            "/api/config/default-model",
+            axum::routing::put(routes::set_default_model),
+        )
         .route(
             "/api/sessions/route",
             axum::routing::post(routes::route_session),
@@ -987,6 +992,64 @@ pub async fn build_router(
         .with_state(state.clone());
 
     (app, state)
+}
+
+/// Watch the container runtime, and say something the first time it changes.
+///
+/// `runtime()` caches the runtime name once a probe succeeds, so a VM that
+/// stops afterwards is invisible to it: every container operation fails with
+/// podman's own error and nothing reports why. Here that gap gets closed on a
+/// 60s tick.
+///
+/// Two deliberate restraints, both learned from this codebase:
+///
+/// Logging happens only on a **transition**. A warning every minute about a
+/// runtime the user deliberately stopped is noise, and a log people learn to
+/// ignore is worse than no log.
+///
+/// Auto-start is **rate-limited to once every ten minutes**. The agent
+/// auto-recovery loop performed 94 restarts in a single run precisely because
+/// nothing limited it, and starting a VM is far more expensive than restarting
+/// an agent.
+fn start_runtime_watchdog() {
+    use freeco_hands::container::RuntimeStatus;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut previous: Option<RuntimeStatus> = None;
+        let mut last_start_attempt: Option<tokio::time::Instant> = None;
+        loop {
+            interval.tick().await;
+            let status = freeco_hands::container::runtime_status().await;
+
+            if previous.as_ref() != Some(&status) {
+                match &status {
+                    RuntimeStatus::Running { name } => {
+                        info!(runtime = %name, "container runtime is available")
+                    }
+                    RuntimeStatus::Stopped => tracing::warn!(
+                        "container runtime stopped — service hands cannot run. \
+                         Recover with `podman machine start`"
+                    ),
+                    RuntimeStatus::NotInstalled => tracing::warn!(
+                        "no container runtime found — service hands are unavailable"
+                    ),
+                }
+                previous = Some(status.clone());
+            }
+
+            if status == RuntimeStatus::Stopped {
+                let due = last_start_attempt
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(600));
+                if due {
+                    last_start_attempt = Some(tokio::time::Instant::now());
+                    if freeco_hands::container::try_start_runtime().await {
+                        info!("container runtime recovered");
+                        previous = None; // re-announce the new state next tick
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Create an encrypted recovery point daily. Individual failures are logged and

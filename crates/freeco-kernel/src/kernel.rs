@@ -3978,6 +3978,12 @@ impl FreecoKernel {
         let Some(spec) = spec else {
             return Ok(None);
         };
+        // A stack's database passwords have no upstream default and nobody to
+        // type them in. Generate any that are missing and store them, rather
+        // than starting Postgres with an empty password or failing with a
+        // message about a variable the user has never heard of.
+        self.ensure_service_secrets(&spec)?;
+
         // `secret:NAME` refs resolve from the process environment, which the
         // daemon populates from the secrets file at boot -- the same path the
         // provider `api_key_env` fields already use.
@@ -3987,6 +3993,66 @@ impl FreecoKernel {
         .await
         .map_err(|e| e.to_string())?;
         Ok(Some(name))
+    }
+
+    /// Generate any `secret:` values a service hand needs that do not exist yet.
+    ///
+    /// Written to the same secrets file provider keys use, and exported into
+    /// the process so the start that follows can resolve them without a
+    /// restart. Existing values are never overwritten: rotating a database
+    /// password out from under a running stack would lock the service out of
+    /// its own data.
+    fn ensure_service_secrets(&self, spec: &freeco_hands::HandContainer) -> Result<(), String> {
+        let path = crate::config::freeco_ai_home().join("secrets.env");
+
+        // Every place a secret can be named: the hand's own env, and each
+        // service's env within a stack -- in both the whole-value `secret:NAME`
+        // form and the `${NAME}` form used inside connection strings. Walking
+        // only the first of those left a stack's database password ungenerated,
+        // which Postgres accepts as empty and then refuses every connection.
+        let mut keys: Vec<String> = Vec::new();
+        let mut collect = |value: &str| {
+            if let Some(k) = value.strip_prefix("secret:") {
+                keys.push(k.to_string());
+                return;
+            }
+            let mut rest = value;
+            while let Some(start) = rest.find("${") {
+                let after = &rest[start + 2..];
+                let Some(end) = after.find('}') else { break };
+                keys.push(after[..end].to_string());
+                rest = &after[end + 1..];
+            }
+        };
+        for value in spec.env.values() {
+            collect(value);
+        }
+        for svc in &spec.services {
+            for value in svc.env.values() {
+                collect(value);
+            }
+        }
+        keys.sort();
+        keys.dedup();
+
+        for key in &keys {
+            let key = key.as_str();
+            if std::env::var(key).is_ok_and(|v| !v.is_empty()) {
+                continue;
+            }
+            // 32 hex characters from a random UUID pair. Not a passphrase
+            // anyone types, so length beats memorability.
+            let generated = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            freeco_types::secrets::write_secret_env(&path, key, &generated)
+                .map_err(|e| format!("could not store {key}: {e}"))?;
+            std::env::set_var(key, &generated);
+            info!(key, "generated a service secret");
+        }
+        Ok(())
     }
 
     /// Stop the container behind a service hand, if it has one.
@@ -3999,16 +4065,25 @@ impl FreecoKernel {
         hand_id: &str,
         instance_id: &uuid::Uuid,
     ) -> Result<(), String> {
-        let is_service = {
+        let spec = {
             match self.hand_registry.get_definition(hand_id) {
-                Some(def) => def.container.is_some(),
+                Some(def) => match &def.container {
+                    Some(c) => c.clone(),
+                    None => return Ok(()), // not a service hand
+                },
                 None => return Ok(()),
             }
         };
-        if !is_service {
-            return Ok(());
+        if spec.is_native_stack() {
+            return freeco_hands::container::stop_native_stack(
+                &spec,
+                hand_id,
+                &instance_id.to_string(),
+            )
+            .await
+            .map_err(|e| e.to_string());
         }
-        freeco_hands::container::stop(hand_id, &instance_id.to_string())
+        freeco_hands::container::stop(hand_id, &instance_id.to_string(), spec.is_stack())
             .await
             .map_err(|e| e.to_string())
     }

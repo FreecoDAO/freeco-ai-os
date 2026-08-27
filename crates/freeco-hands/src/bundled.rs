@@ -55,6 +55,23 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
             include_str!("../bundled/omniroute/HAND.toml"),
             include_str!("../bundled/omniroute/SKILL.md"),
         ),
+        // Service hands that are stacks rather than single containers: an
+        // application plus its database, brought up with compose.
+        (
+            "crm",
+            include_str!("../bundled/crm/HAND.toml"),
+            include_str!("../bundled/crm/SKILL.md"),
+        ),
+        (
+            "accounting",
+            include_str!("../bundled/accounting/HAND.toml"),
+            include_str!("../bundled/accounting/SKILL.md"),
+        ),
+        (
+            "voice",
+            include_str!("../bundled/voice/HAND.toml"),
+            include_str!("../bundled/voice/SKILL.md"),
+        ),
     ]
 }
 
@@ -253,6 +270,39 @@ mod tests {
             assert!(!def.tools.is_empty());
             assert!(!def.agent.system_prompt.is_empty());
             assert!(def.skill_content.is_some());
+        }
+    }
+
+    /// Every service hand must declare either an image or a compose stack, and
+    /// a port its health check can reach.
+    ///
+    /// Written after all three stack hands shipped with `compose` placed *after*
+    /// `[container.env]`. TOML puts every key after a sub-table header inside
+    /// that table, so it parsed as `container.env.compose`, `image` stayed
+    /// empty, and activation took the single-container path and failed with
+    /// `podman run: reference parameter cannot be empty` -- a message about a
+    /// missing image, for a hand that specifies a whole stack. Parsing
+    /// successfully is not the same as parsing into what was meant.
+    #[test]
+    fn service_hands_declare_something_runnable() {
+        for (id, toml_content, skill_content) in bundled_hands() {
+            let def = parse_bundled(id, toml_content, skill_content).unwrap();
+            let Some(c) = &def.container else { continue };
+            assert!(
+                !c.image.is_empty() || c.is_stack(),
+                "service hand '{id}' has neither an image nor a compose stack \
+                 -- check that `compose` sits before [container.env]"
+            );
+            assert!(
+                !(!c.image.is_empty() && c.is_stack()),
+                "service hand '{id}' declares both an image and a stack"
+            );
+            if c.health_path.is_some() {
+                assert!(
+                    crate::container::service_port(c).is_some(),
+                    "service hand '{id}' has a health_path but no reachable port"
+                );
+            }
         }
     }
 

@@ -81,6 +81,8 @@ function settingsPage() {
     services: [],
     servicesLoaded: false,
     dockerReady: false,
+    containerRuntime: null,   // "docker" | "podman" | null when neither answers
+    runtimeStatus: null,      // { state: running|stopped|not_installed, fix }
     svc: { phase: 'idle', detail: '', percent: -1, service: '', running: false },
     svcPoll: null,
 
@@ -89,6 +91,12 @@ function settingsPage() {
         var data = await FreecoAPI.get('/api/services');
         this.services = data.services || [];
         this.dockerReady = !!data.docker_ready;
+        // Which of docker/podman was found, so the page can name it instead of
+        // making the user guess which one it decided to use.
+        this.containerRuntime = data.runtime || null;
+        // Full state: running / stopped / not_installed. "Stopped" has a
+        // one-line fix and used to be reported as "install Docker Desktop".
+        this.runtimeStatus = data.runtime_status || null;
         this.servicesLoaded = true;
       } catch(e) {
         this.servicesLoaded = true;

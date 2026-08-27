@@ -237,15 +237,17 @@ fn ensure_env_file(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Is Docker installed AND the daemon running?
-pub async fn docker_ready() -> bool {
-    run(
-        "docker",
-        &["version", "--format", "{{.Server.Version}}"],
-        None,
-    )
-    .await
-    .is_ok()
+/// Is a container runtime installed and answering?
+///
+/// Asks for whichever runtime is actually present rather than for Docker by
+/// name. This ran `docker version` literally, so on a machine with podman --
+/// which is the supported runtime here, and the only one that has ever worked
+/// on this Windows box -- it always failed. Every Install button on the
+/// Services page is bound to `:disabled="!dockerReady"`, so the whole page was
+/// switched off with a message telling the user to install Docker Desktop
+/// while a working runtime sat right there running their other containers.
+pub async fn container_runtime_ready() -> bool {
+    freeco_hands::container::runtime().await.is_some()
 }
 
 async fn health_ok(url: &str) -> bool {
@@ -260,7 +262,7 @@ async fn health_ok(url: &str) -> bool {
 
 /// GET /api/services — catalog plus live status of each service.
 pub async fn list_services(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let docker = docker_ready().await;
+    let docker = container_runtime_ready().await;
     let configured: std::collections::HashSet<&str> = state
         .kernel
         .config
@@ -284,7 +286,22 @@ pub async fn list_services(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "auto_connects": s.mcp_url.is_some(),
         }));
     }
-    Json(serde_json::json!({ "docker_ready": docker, "services": items }))
+    // Name the runtime that was found, so the page can say "using Podman"
+    // rather than leaving the user to guess which of the two it picked -- and
+    // so "nothing is running" can be told apart from "Docker is not installed",
+    // which are different problems with different fixes.
+    let runtime = freeco_hands::container::runtime().await;
+    // The full state, not just a boolean: "not installed" and "installed but
+    // its VM is stopped" need different things from the user, and answering
+    // both with "install Docker Desktop" sent someone to a download page while
+    // a working runtime sat there stopped.
+    let runtime_status = freeco_hands::container::runtime_status().await;
+    Json(serde_json::json!({
+        "docker_ready": docker,
+        "runtime": runtime,
+        "runtime_status": runtime_status.as_json(),
+        "services": items,
+    }))
 }
 
 /// GET /api/services/status — progress of the running install.
@@ -348,12 +365,12 @@ async fn provision(
     home: &std::path::Path,
 ) -> Result<(), String> {
     // 1. Docker
-    if !docker_ready().await {
+    if !container_runtime_ready().await {
         set_status(
             status,
             "needs-docker",
-            "Docker isn't available. Install Docker Desktop from https://docker.com/products/docker-desktop \
-             (one installer), start it, then press Install again — everything else is automatic."
+            "No container runtime is running. Start Podman (`podman machine start`) or Docker \
+             Desktop, then press Install again — everything else is automatic."
                 .into(),
             -1,
         )
@@ -412,18 +429,23 @@ async fn provision(
         ensure_env_file(&dir)?;
     }
 
-    // 3. Start it.
+    // 3. Start it, with whichever runtime is present.
+    let rt = freeco_hands::container::runtime().await.ok_or_else(|| {
+        "no container runtime found. Start Docker Desktop, or start Podman with \
+         `podman machine start`"
+            .to_string()
+    })?;
     set_status(
         status,
         "starting",
         format!(
-            "Starting {} with Docker (first run pulls images)...",
+            "Starting {} with {rt} (first run pulls images)...",
             profile.name
         ),
         -1,
     )
     .await;
-    run("docker", &["compose", "up", "-d"], Some(&dir))
+    run(rt, &["compose", "up", "-d"], Some(&dir))
         .await
         .map_err(|e| format!("could not start {}: {e}", profile.name))?;
 

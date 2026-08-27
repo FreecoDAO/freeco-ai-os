@@ -8603,6 +8603,172 @@ pub async fn route_session(
     )
 }
 
+/// PUT /api/config/default-model — change the model new agents inherit.
+///
+/// The System page showed the default model as a read-only stat, so changing it
+/// meant editing `config.toml` by hand and restarting the daemon. It is the one
+/// setting that decides what every agent created from here on will run, which
+/// makes "read only" the wrong shape for it.
+///
+/// Applies in two places on purpose: the in-memory override so it takes effect
+/// on the next agent without a restart, and `config.toml` so it survives one.
+/// Writing only the first is a setting that silently reverts; writing only the
+/// second is a setting that appears to do nothing.
+pub async fn set_default_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(model) = body["model"].as_str().filter(|m| !m.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing 'model'"})),
+        );
+    };
+
+    // Resolve the provider from the catalog when the caller did not name one,
+    // and normalise the id -- the same treatment agent models get, so a default
+    // of `nvidia/nemotron-...` keeps its prefix while `openai/gpt-...` from a
+    // gateway loses ours.
+    let (provider, model) = {
+        let explicit = body["provider"].as_str().filter(|p| !p.is_empty());
+        match state.kernel.model_catalog.read() {
+            Ok(catalog) => {
+                let entry = match explicit {
+                    Some(p) => catalog.find_model_for_provider(model, p),
+                    None => catalog.find_model(model),
+                };
+                match entry {
+                    Some(e) => (e.provider.clone(), e.id.clone()),
+                    None => match explicit {
+                        Some(p) => (p.to_string(), model.to_string()),
+                        None => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": format!("Unknown model '{model}'. Pass a provider to use it anyway."),
+                                })),
+                            )
+                        }
+                    },
+                }
+            }
+            Err(_) => (
+                explicit.unwrap_or_default().to_string(),
+                model.to_string(),
+            ),
+        }
+    };
+
+    let api_key_env = state.kernel.config.resolve_api_key_env(&provider);
+    let new_default = freeco_types::config::DefaultModelConfig {
+        provider: provider.clone(),
+        model: model.clone(),
+        api_key_env: api_key_env.clone(),
+        ..state.kernel.config.default_model.clone()
+    };
+
+    if let Ok(mut guard) = state.kernel.default_model_override.write() {
+        *guard = Some(new_default);
+    }
+
+    let config_path = freeco_kernel::config::freeco_ai_home().join("config.toml");
+    if let Err(e) = write_default_model_config(&config_path, &provider, &model, &api_key_env) {
+        // The running daemon already uses the new model; say the persistence
+        // failed rather than reporting a clean success for a change that will
+        // not survive a restart.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "applied",
+                "provider": provider,
+                "model": model,
+                "warning": format!("Active now, but could not be saved to config.toml: {e}"),
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "provider": provider,
+            "model": model,
+        })),
+    )
+}
+
+/// Rewrite the `[default_model]` provider/model/api_key_env in place.
+///
+/// Edits the three lines rather than re-serialising the file, so comments and
+/// every unrelated setting survive -- a config the product rewrites wholesale
+/// is one users stop hand-editing.
+fn write_default_model_config(
+    path: &std::path::Path,
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read config.toml: {e}"))?;
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut in_section = false;
+    let (mut wrote_provider, mut wrote_model, mut wrote_key) = (false, false, false);
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // Leaving the section: add anything it did not already contain.
+            if in_section {
+                if !wrote_provider {
+                    out.push_str(&format!("provider = \"{provider}\"\n"));
+                }
+                if !wrote_model {
+                    out.push_str(&format!("model = \"{model}\"\n"));
+                }
+                if !wrote_key {
+                    out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+                }
+            }
+            in_section = trimmed == "[default_model]";
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_section {
+            if trimmed.starts_with("provider") && trimmed.contains('=') {
+                out.push_str(&format!("provider = \"{provider}\"\n"));
+                wrote_provider = true;
+                continue;
+            }
+            if trimmed.starts_with("model") && trimmed.contains('=') {
+                out.push_str(&format!("model = \"{model}\"\n"));
+                wrote_model = true;
+                continue;
+            }
+            if trimmed.starts_with("api_key_env") && trimmed.contains('=') {
+                out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+                wrote_key = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // The section ran to end of file.
+    if in_section {
+        if !wrote_provider {
+            out.push_str(&format!("provider = \"{provider}\"\n"));
+        }
+        if !wrote_model {
+            out.push_str(&format!("model = \"{model}\"\n"));
+        }
+        if !wrote_key {
+            out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+        }
+    }
+
+    std::fs::write(path, out).map_err(|e| format!("write config.toml: {e}"))
+}
+
 /// GET /api/assistant — the agent the concierge widget talks to.
 ///
 /// The widget used to choose this itself, by looking for a name containing

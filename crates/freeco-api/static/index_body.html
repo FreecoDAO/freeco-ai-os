@@ -4058,14 +4058,28 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <!-- Docker prerequisite -->
               <div x-show="servicesLoaded && !dockerReady" class="card" style="border-color:var(--warning,#f59e0b);margin-bottom:14px">
-                <div style="font-size:13px">
-                  <strong>Docker isn't running yet.</strong>
-                  These services run in Docker. Install
-                  <a href="https://docker.com/products/docker-desktop" target="_blank" rel="noopener">Docker Desktop</a>
-                  (one installer), start it, then press Install — everything else is automatic.
+                <!-- Installed-but-stopped is the common case and has a one-line
+                     fix, so it gets its own message instead of a download link. -->
+                <div style="font-size:13px" x-show="runtimeStatus && runtimeStatus.state === 'stopped'">
+                  <strong>Podman is installed but not running.</strong>
+                  Start it with <code>podman machine start</code>, then press Install.
+                  Freeco also tries this automatically when it needs a container.
+                </div>
+                <div style="font-size:13px" x-show="!runtimeStatus || runtimeStatus.state !== 'stopped'">
+                  <strong>No container runtime is running yet.</strong>
+                  These services run in containers, and Freeco uses whichever runtime you
+                  have — you do not need both. If Podman is already installed, start it with
+                  <code>podman machine start</code>. Otherwise install either
+                  <a href="https://podman.io/docs/installation" target="_blank" rel="noopener">Podman</a>
+                  (free, no account, runs without admin rights) or
+                  <a href="https://docker.com/products/docker-desktop" target="_blank" rel="noopener">Docker Desktop</a>.
+                  Then press Install — everything else is automatic.
                 </div>
               </div>
 
+              <div x-show="servicesLoaded && dockerReady && containerRuntime" class="text-xs text-dim" style="margin-bottom:10px">
+                Using <strong x-text="containerRuntime"></strong> — detected automatically.
+              </div>
               <div x-show="!servicesLoaded" class="text-xs text-dim">Checking what's available…</div>
 
               <!-- Service cards -->
@@ -6253,10 +6267,50 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <div class="stat-label">Version</div>
                 <div class="stat-value" x-text="version"></div>
               </div>
+              <!-- The default decides what every agent created from here on
+                   runs, so it is changed here rather than by hand-editing
+                   config.toml and restarting. -->
               <div class="card stat-card">
                 <div class="stat-label">Default Model</div>
                 <div class="stat-value" style="font-size:13px" x-text="defaultModel"></div>
+                <button class="btn btn-ghost btn-sm" style="margin-top:8px"
+                        @click="openDefaultModelPicker()">Change</button>
+                <div x-show="defaultModelMsg" class="text-xs" style="margin-top:6px"
+                     :style="defaultModelMsgOk ? 'color:var(--success,#16a34a)' : 'color:var(--danger,#dc2626)'"
+                     x-text="defaultModelMsg"></div>
               </div>
+            </div>
+
+            <!-- Default model picker -->
+            <div class="card" style="margin-bottom:16px" x-show="showDefaultModelPicker" x-cloak>
+              <div class="card-header">Choose the default model</div>
+              <div class="text-xs text-dim" style="margin-bottom:8px">
+                New agents inherit this. Existing agents keep the model they already have.
+                Only models whose provider has a key, and which support tools, are listed —
+                an agent needs tools to do anything.
+              </div>
+              <input type="text" class="input" placeholder="Search models..."
+                     x-model="defaultModelQuery" style="margin-bottom:8px">
+              <div style="max-height:320px;overflow-y:auto">
+                <template x-for="m in filteredDefaultModels" :key="m.provider + '/' + m.id">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border,#2a2a2a)">
+                    <div>
+                      <div style="font-size:13px" x-text="m.display_name || m.id"></div>
+                      <div class="text-xs text-dim">
+                        <span x-text="m.provider"></span>
+                        <span x-show="m.is_free"> · free</span>
+                      </div>
+                    </div>
+                    <button class="btn btn-sm" @click="chooseDefaultModel(m)"
+                            :disabled="defaultModelSaving">Use</button>
+                  </div>
+                </template>
+                <div x-show="!filteredDefaultModels.length" class="text-xs text-dim" style="padding:8px 0">
+                  No matching model with a configured provider and tool support.
+                </div>
+              </div>
+              <button class="btn btn-ghost btn-sm" style="margin-top:8px"
+                      @click="showDefaultModelPicker = false">Cancel</button>
             </div>
 
             <div class="card" style="margin-bottom:16px">

@@ -1,0 +1,105 @@
+id = "crm"
+name = "Twenty CRM"
+description = "Where donors, grant givers, VCs and partners live: people, companies, notes and pipeline, on your own machine."
+category = "productivity"
+icon = "\U0001F4C7"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+]
+
+[container]
+# Twenty is four containers, not one: a database, Redis, the server, and a
+# worker that runs background jobs. A two-service version of this crash-looped
+# because the server exits without Redis, which reads as a broken image.
+#
+# Defined as native services rather than a compose file: `podman compose` has no
+# native implementation and shells out to Docker's docker-compose binary, so a
+# compose-defined stack breaks the day Docker Desktop is uninstalled while every
+# single-container hand keeps running.
+health_path = "/healthz"
+health_timeout_secs = 900
+restart = "unless-stopped"
+
+# Host port 3200, not 3000: the voice hand publishes 3000, and a user who
+# activates both would otherwise have the second one fail to bind. Read by
+# service_port() to build the health URL.
+[container.env]
+PORT = "3200"
+
+[[container.services]]
+name = "db"
+image = "docker.io/library/postgres:16"
+volumes = ["db-data:/var/lib/postgresql/data"]
+# The server crashes on first boot if it connects while Postgres is still
+# initialising its data directory, so dependents wait for this to pass.
+health_cmd = ["pg_isready", "-U", "postgres"]
+
+[container.services.env]
+POSTGRES_USER = "postgres"
+POSTGRES_PASSWORD = "secret:CRM_DB_PASSWORD"
+POSTGRES_DB = "default"
+
+[[container.services]]
+name = "redis"
+image = "docker.io/library/redis:7"
+health_cmd = ["redis-cli", "ping"]
+
+[[container.services]]
+name = "server"
+image = "docker.io/twentycrm/twenty:latest"
+depends_on = ["db", "redis"]
+ports = ["3200:3000"]
+volumes = ["server-local-data:/app/packages/twenty-server/.local-storage"]
+# Upstream's own check. The worker waits for it, because a worker that starts
+# before migrations have run fails every job it picks up.
+health_cmd = ["curl", "--fail", "http://localhost:3000/healthz"]
+
+[container.services.env]
+NODE_PORT = "3000"
+# `db` and `redis` resolve through the network aliases of the services above.
+PG_DATABASE_URL = "postgres://postgres:${CRM_DB_PASSWORD}@db:5432/default"
+REDIS_URL = "redis://redis:6379"
+SERVER_URL = "http://localhost:3200"
+STORAGE_TYPE = "local"
+APP_SECRET = "secret:CRM_APP_SECRET"
+
+[[container.services]]
+name = "worker"
+image = "docker.io/twentycrm/twenty:latest"
+depends_on = ["db", "server"]
+command = ["yarn", "worker:prod"]
+volumes = ["server-local-data:/app/packages/twenty-server/.local-storage"]
+
+[container.services.env]
+NODE_PORT = "3000"
+PG_DATABASE_URL = "postgres://postgres:${CRM_DB_PASSWORD}@db:5432/default"
+REDIS_URL = "redis://redis:6379"
+SERVER_URL = "http://localhost:3200"
+STORAGE_TYPE = "local"
+APP_SECRET = "secret:CRM_APP_SECRET"
+DISABLE_DB_MIGRATIONS = "true"
+DISABLE_CRON_JOBS_REGISTRATION = "true"
+
+[agent]
+name = "crm"
+description = "Looks after the CRM: who is in it, what state the pipeline is in, and whether the service is actually serving."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+You look after a Twenty CRM running on the user's own machine at \
+http://localhost:3200.
+
+The first activation needs one manual step you cannot do for them: they open \
+the CRM, create their workspace, then Settings -> API & Webhooks -> create an \
+API key. Say so plainly rather than reporting the hand as finished. Until that \
+key exists the service is up and the tools can read nothing from it, which \
+looks like a broken install and is not.
+
+Report what the CRM actually holds rather than what it should hold.
+"""

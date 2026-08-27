@@ -97,6 +97,30 @@ recorded as such.
 
 ## Unreleased
 
+### Next — container runtime watchdog
+
+- ⬜ **Notice when the runtime dies mid-run.** `runtime()` caches the runtime
+  name after a successful probe, so if the VM stops while the daemon is running
+  every container operation fails with podman's own error until something calls
+  `runtime_status()`. Recovery on the *cold* path is done (a failed probe now
+  triggers `podman machine start`), and the gap is the warm one.
+- ⬜ **Design, so this is added deliberately rather than bolted on:** a task on
+  a 60s tick calling `runtime_status()`, holding the result in shared state,
+  logging only on *transitions* (a warning every minute for a runtime the user
+  has deliberately stopped is noise that trains people to ignore the log).
+  Auto-start attempts must be rate-limited — the agent auto-recovery loop
+  performed 94 restarts in one run precisely because nothing limited it.
+- ⬜ **Re-activate service hands whose containers vanished.** A stopped VM
+  leaves every hand instance recorded as Active with nothing running, which is
+  exactly the "reports Active while serving nothing" failure the container
+  wiring was written to end. The watchdog should reconcile: for each active
+  service instance, if its container is gone, start it or mark the instance
+  degraded — never leave the record claiming something that is not true.
+
+**Why this matters:** the VM was down for four days here and the only symptom
+was LLM errors, because OmniRoute stopped answering. A container problem
+surfaced as a model problem, which is the most expensive kind of wrong signal.
+
 ### Next — session tools for agents
 
 The assistant confirmed from inside a live session that this is a tool-exposure

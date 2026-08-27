@@ -45,9 +45,25 @@ fn archive_key(home_dir: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
     let vault_path = home_dir.join("vault.enc");
     let mut vault = freeco_extensions::vault::CredentialVault::new(vault_path.clone());
     if vault_path.exists() {
-        vault
-            .unlock()
-            .map_err(|e| format!("unable to unlock vault: {e}"))?;
+        // A vault that cannot be unlocked stops every backup, and says so in
+        // terms that name the vault rather than the consequence. The master key
+        // lives in the OS keyring, so it goes missing when the keyring entry is
+        // cleared, the user profile changes, or -- as here -- the service name
+        // the entry was filed under changed between releases. The vault file
+        // survives all three, which makes it look like the data is fine.
+        //
+        // Deliberately not re-initialised automatically: that would discard
+        // whatever the vault holds, including the key that decrypts existing
+        // archives, and no backup is worth silently destroying old ones.
+        vault.unlock().map_err(|e| {
+            format!(
+                "unable to unlock vault: {e}. Backups are encrypted with a key kept in this \
+                 vault, so none can be written until it opens. Either set FREECO_AI_VAULT_KEY \
+                 to the existing key, or re-initialise the vault by moving \
+                 {} aside -- which permanently gives up decrypting archives made before now.",
+                vault_path.display()
+            )
+        })?;
     } else {
         vault
             .init()

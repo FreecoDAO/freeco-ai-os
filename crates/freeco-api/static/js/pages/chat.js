@@ -3,11 +3,7 @@
 
 function chatPage() {
   var msgId = 0;
-  // Permission requests are answered here too, not only in the floating
-  // assistant. Mixed in from one place so the two chat surfaces cannot drift
-  // apart again -- they already had, and a task blocked on an approval the user
-  // could not see was the result.
-  return Object.assign(window.FreecoInlineApprovals ? window.FreecoInlineApprovals() : {}, {
+  var page = {
     currentAgent: null,
     messages: [],
     inputText: '',
@@ -1453,5 +1449,24 @@ function chatPage() {
 
     renderMarkdown: renderMarkdown,
     escapeHtml: escapeHtml
+  };
+
+  // Permission requests are answered here too, not only in the floating
+  // assistant, mixed in from one place so the two chat surfaces cannot drift
+  // apart again.
+  //
+  // Copied onto the page object rather than the page object being copied onto
+  // the extras: `Object.assign` reads a getter and writes its *value*, so
+  // spreading this object would evaluate all ten of its computed properties
+  // once at creation and freeze them. `filteredSwitcherModels` and
+  // `filteredModelPicker` became empty arrays that never recomputed -- the
+  // model list read "No models found" and no conversation would open.
+  //
+  // Existing keys are never overwritten, so the page always wins over a shared
+  // default.
+  var extras = window.FreecoInlineApprovals ? window.FreecoInlineApprovals() : {};
+  Object.keys(extras).forEach(function (k) {
+    if (!(k in page)) page[k] = extras[k];
   });
+  return page;
 }

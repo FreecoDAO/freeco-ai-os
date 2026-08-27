@@ -1,0 +1,77 @@
+id = "accounting"
+name = "Akaunting"
+description = "Auditable books on your own machine: income and expense, invoices, and the reports grant funders ask for."
+category = "productivity"
+icon = "\U0001F4B0"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+]
+
+[container]
+health_path = "/"
+health_timeout_secs = 600
+restart = "unless-stopped"
+
+compose = """
+services:
+  akaunting-db:
+    image: mariadb:11
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: akaunting
+      MYSQL_USER: akaunting
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes: [akaunting-db-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      retries: 30
+  akaunting:
+    image: akaunting/akaunting:latest
+    depends_on:
+      akaunting-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: akaunting-db
+      DB_DATABASE: akaunting
+      DB_USERNAME: akaunting
+      DB_PASSWORD: ${DB_PASSWORD}
+      APP_URL: http://localhost:8080
+    ports: ["8080:80"]
+    volumes: [akaunting-data:/var/www/html]
+volumes:
+  akaunting-db-data:
+  akaunting-data:
+"""
+
+[container.env]
+PORT = "8080"
+DB_PASSWORD = "secret:ACCOUNTING_DB_PASSWORD"
+DB_ROOT_PASSWORD = "secret:ACCOUNTING_DB_ROOT_PASSWORD"
+
+
+[agent]
+name = "accounting"
+description = "Looks after the books: what has been recorded, what is outstanding, and whether the service is serving."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+You look after an Akaunting instance running on the user's own machine at \
+http://localhost:8080.
+
+The first activation needs one manual step you cannot do for them: they open it \
+and finish the first-run wizard (company plus admin user). Those credentials are \
+what the accounting tools use afterwards. Say so rather than reporting the hand \
+as finished.
+
+These are financial records. Never invent a figure, and never present a number \
+you have not read from the service. If you cannot reach it, say that instead of \
+estimating -- a plausible wrong number in someone's books is worse than no \
+number.
+"""
