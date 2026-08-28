@@ -430,6 +430,13 @@ function chatPage() {
         // Auto-clear stuck typing indicators
         self.messages = self.messages.filter(function(m) { return !m.thinking; });
         self.sending = false;
+        // Drain here too. Anything typed while a reply was in flight is sitting
+        // in the queue, and every other place that clears `sending` drains it
+        // -- these two did not. A message that lands in the queue at the wrong
+        // moment stays there silently: the user presses send, the box empties,
+        // and nothing ever happens. That is the worst possible failure for a
+        // chat, because it is indistinguishable from being ignored.
+        self._processQueue();
       }, 120000);
     },
 
@@ -475,8 +482,16 @@ function chatPage() {
             FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/stop', {}).then(function(res) {
               self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [] });
               self.sending = false;
+              self._processQueue();
               self.scrollToBottom();
-            }).catch(function(e) { FreecoToast.error('Stop failed: ' + e.message); });
+            }).catch(function(e) {
+              // Stopping failed, so the run may still be going -- but leaving
+              // `sending` true here strands every queued message behind a run
+              // the user already tried to cancel.
+              self.sending = false;
+              self._processQueue();
+              FreecoToast.error('Stop failed: ' + e.message);
+            });
           }
           break;
         case '/usage':
@@ -619,10 +634,140 @@ function chatPage() {
       }
     },
 
+    // --- Enter behaviour: one Enter is a newline, two in a row send ---
+    //
+    // A single Enter used to send, which makes a multi-line message impossible
+    // to write: every paragraph break fires the message half-written. Shift+Enter
+    // was the only way to get a newline, which is a convention people who write
+    // code know and people who write sentences do not.
+    //
+    // The rule now: Enter inserts a newline, and a second Enter immediately
+    // after sends. The window is deliberate -- a pause between them means the
+    // user is composing, not finishing.
+    _lastEnterAt: 0,
+
+    enterSends: function (ev) {
+      var now = Date.now();
+      var doubled = (now - this._lastEnterAt) < 1200;
+      this._lastEnterAt = now;
+      if (!doubled) return false;
+      // The first Enter already inserted a newline; drop it so the sent text
+      // does not end in a blank line.
+      this.inputText = (this.inputText || '').replace(/\n[ \t]*$/, '');
+      this._lastEnterAt = 0;
+      return true;
+    },
+
+    // --- Voice, matching the floating assistant ---
+    //
+    // The chat page markup already referenced `recording`, so the controls were
+    // designed for and never implemented here: dictation existed in the
+    // floating widget only, and the same product behaved differently depending
+    // on which window you happened to be in.
+    //
+    // Transcribed speech lands in the input for review rather than sending
+    // itself. Recognition mishears, and a misheard message sent automatically
+    // is one the user has to notice, retract and correct.
+    recording: false,
+    _recognition: null,
+
+    toggleVoice: function () {
+      var Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Rec) {
+        FreecoToast.error('This browser has no speech recognition.');
+        return;
+      }
+      if (this.recording) { this.stopVoice(); return; }
+
+      var self = this;
+      var rec = new Rec();
+      rec.lang = (navigator.language || 'en-US');
+      rec.interimResults = true;
+      rec.continuous = true;
+
+      var settled = '';
+      rec.onresult = function (ev) {
+        var interim = '';
+        for (var i = ev.resultIndex; i < ev.results.length; i++) {
+          var chunk = ev.results[i][0].transcript;
+          if (ev.results[i].isFinal) { settled += chunk; } else { interim += chunk; }
+        }
+        // Shown live so the user can see it being heard, and correct it before
+        // anything is sent.
+        self.inputText = (settled + interim).trim();
+      };
+      rec.onerror = function (e) {
+        self.recording = false;
+        if (e && e.error !== 'aborted') FreecoToast.error('Voice input failed: ' + (e.error || 'unknown'));
+      };
+      rec.onend = function () { self.recording = false; };
+
+      this._recognition = rec;
+      this.recording = true;
+      try { rec.start(); } catch (e) { this.recording = false; }
+    },
+
+    stopVoice: function () {
+      this.recording = false;
+      if (this._recognition) {
+        try { this._recognition.stop(); } catch (e) { /* already stopped */ }
+        this._recognition = null;
+      }
+    },
+
+    // Read a reply aloud, as the floating widget does.
+    speak: function (text) {
+      if (!window.speechSynthesis || !text) return;
+      try {
+        window.speechSynthesis.cancel();
+        var u = new SpeechSynthesisUtterance(String(text).slice(0, 4000));
+        u.lang = (navigator.language || 'en-US');
+        window.speechSynthesis.speak(u);
+      } catch (e) { /* speaking is optional, never fatal */ }
+    },
+
+    // Load what the agent still remembers, so the view matches the model's.
+    //
+    // The summary line is deliberate: once a conversation outgrows the replay
+    // window the older turns are compacted rather than kept verbatim, and
+    // saying so is the difference between "it forgot" and "it summarised".
+    async loadHistory(agentId) {
+      try {
+        var res = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/history');
+        if (!res) return;
+        var restored = [];
+        if (res.summary) {
+          restored.push({
+            id: ++msgId, role: 'system', ts: Date.now(),
+            html: '<em>Earlier in this conversation (summarised): ' +
+                  escapeHtml(String(res.summary)).slice(0, 2000) + '</em>'
+          });
+        }
+        (res.messages || []).forEach(function(m) {
+          restored.push({
+            id: ++msgId, role: m.role, ts: Date.now(),
+            html: renderMarkdown(String(m.content || ''))
+          });
+        });
+        // Only replace the view if nothing has been typed since the request
+        // went out, or a fast reply would be wiped by its own history.
+        if (!this.messages.length) this.messages = restored;
+      } catch (e) { /* an empty thread is better than a broken page */ }
+    },
+
     selectAgent(agent) {
       this.currentAgent = agent;
       this.messages = [];
       try { localStorage.setItem('of-active-agent', agent.id); } catch(e) { /* ignore */ }
+      // Put the conversation back.
+      //
+      // Clearing the view without reloading it is why messages "vanished"
+      // after switching agent or model: the backend still held every one of
+      // them, and `/api/agents/{id}/history` had existed all along with nothing
+      // calling it. The user saw an empty thread and reasonably concluded the
+      // history was gone, while the agent still had it -- the two disagreeing
+      // about what was said is worse than either being empty.
+      this.loadHistory(agent.id);
       this.connectWs(agent.id);
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
       // Show welcome tips on first use

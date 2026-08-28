@@ -387,6 +387,15 @@ pub struct AgentLoopResult {
     pub silent: bool,
     /// Reply directives extracted from the agent's response.
     pub directives: freeco_types::message::ReplyDirectives,
+    /// The model that actually produced this reply, as `provider/model`.
+    ///
+    /// Set only when it is *not* the configured one -- that is, when the
+    /// primary failed and a fallback answered instead. Substituting the model
+    /// silently is worse than failing: the user is told they are on the model
+    /// they picked, the answers change character, and there is nothing to point
+    /// at. Being rate-limited onto a weaker free model and not being told is
+    /// the case that prompted this.
+    pub served_by_fallback: Option<String>,
 }
 
 /// Build the user-turn message, combining text with any image content blocks.
@@ -722,12 +731,14 @@ pub async fn run_agent_loop(
 
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
+        let mut served_by_fallback: Option<String> = None;
         let mut response = call_with_retry(
             &*driver,
             request,
             Some(provider_name),
             None,
             &manifest.fallback_models,
+            &mut served_by_fallback,
         )
         .await?;
 
@@ -797,6 +808,7 @@ pub async fn run_agent_loop(
                         .await
                         .map_err(|e| FreecoError::Memory(e.to_string()))?;
                     return Ok(AgentLoopResult {
+                        served_by_fallback: None,
                         response: String::new(),
                         total_usage,
                         iterations: iteration + 1,
@@ -985,6 +997,7 @@ pub async fn run_agent_loop(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+        served_by_fallback: None,
                 });
             }
             StopReason::ToolUse => {
@@ -1283,6 +1296,7 @@ pub async fn run_agent_loop(
                         let _ = hook_reg.fire(&ctx);
                     }
                     return Ok(AgentLoopResult {
+                        served_by_fallback: None,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,
@@ -1393,6 +1407,10 @@ async fn call_with_retry(
     provider: Option<&str>,
     cooldown: Option<&ProviderCooldown>,
     fallback_models: &[FallbackModel],
+    // Set to `provider/model` when a fallback answered instead of the primary,
+    // so the caller can tell the user which model actually replied. Left
+    // untouched on the normal path.
+    served_by: &mut Option<String>,
 ) -> FreecoResult<crate::llm_driver::CompletionResponse> {
     // Check circuit breaker before calling
     if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
@@ -1540,6 +1558,7 @@ async fn call_with_retry(
                                     model = %fb.model,
                                     "Fallback model succeeded"
                                 );
+                                *served_by = Some(format!("{}/{}", fb.provider, fb.model));
                                 return Ok(response);
                             }
                             Err(fb_err) => {
@@ -2101,6 +2120,7 @@ pub async fn run_agent_loop_streaming(
                         .await
                         .map_err(|e| FreecoError::Memory(e.to_string()))?;
                     return Ok(AgentLoopResult {
+                        served_by_fallback: None,
                         response: String::new(),
                         total_usage,
                         iterations: iteration + 1,
@@ -2264,6 +2284,7 @@ pub async fn run_agent_loop_streaming(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+        served_by_fallback: None,
                 });
             }
             StopReason::ToolUse => {
@@ -2567,6 +2588,7 @@ pub async fn run_agent_loop_streaming(
                         let _ = hook_reg.fire(&ctx);
                     }
                     return Ok(AgentLoopResult {
+                        served_by_fallback: None,
                         response: text,
                         total_usage,
                         iterations: iteration + 1,

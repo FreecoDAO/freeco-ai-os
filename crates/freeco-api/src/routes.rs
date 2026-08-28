@@ -8769,6 +8769,63 @@ fn write_default_model_config(
     std::fs::write(path, out).map_err(|e| format!("write config.toml: {e}"))
 }
 
+/// GET /api/agents/{id}/history — the conversation the agent still remembers.
+///
+/// The route existed for DELETE only, so a chat surface could clear history and
+/// never read it back. Switching agent or model empties the view, and with
+/// nothing to reload from, the conversation looked deleted while the agent
+/// still had every message -- the user and the agent disagreeing about what was
+/// said, which is worse than either side simply being empty.
+///
+/// Returns the same window the agent itself is given, plus the compacted
+/// summary of everything older, so what the user sees matches what the model
+/// sees rather than being a second, prettier version of it.
+pub async fn get_agent_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Ok(agent_id) = id.parse::<AgentId>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid agent ID"})),
+        );
+    };
+
+    match state.kernel.memory.canonical_context(agent_id, None) {
+        Ok((summary, messages)) => {
+            let items: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": match m.role {
+                            freeco_types::message::Role::User => "user",
+                            freeco_types::message::Role::Assistant => "assistant",
+                            freeco_types::message::Role::System => "system",
+                        },
+                        "content": m.content.text_content(),
+                    })
+                })
+                .filter(|m| !m["content"].as_str().unwrap_or_default().trim().is_empty())
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "agent_id": id,
+                    // Present when the conversation outgrew the replay window.
+                    // Shown to the user because its absence is what makes an
+                    // agent look like it forgot -- it did not, it summarised.
+                    "summary": summary,
+                    "messages": items,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 /// GET /api/assistant — the agent the concierge widget talks to.
 ///
 /// The widget used to choose this itself, by looking for a name containing
@@ -13317,6 +13374,13 @@ pub async fn webhook_agent(
                 "status": "completed",
                 "agent_id": agent_id.to_string(),
                 "response": result.response,
+                // Present only when a fallback answered instead of the
+                // configured model. A silent substitution is worse than a
+                // failure: the interface keeps naming the model the user
+                // chose, the answers change character, and nothing points at
+                // why. Being rate-limited onto a weaker model unannounced is
+                // the case this exists for.
+                "served_by_fallback": result.served_by_fallback,
                 "usage": {
                     "input_tokens": result.total_usage.input_tokens,
                     "output_tokens": result.total_usage.output_tokens,
@@ -14157,6 +14221,13 @@ pub async fn comms_send(
             Json(serde_json::json!({
                 "ok": true,
                 "response": result.response,
+                // Present only when a fallback answered instead of the
+                // configured model. A silent substitution is worse than a
+                // failure: the interface keeps naming the model the user
+                // chose, the answers change character, and nothing points at
+                // why. Being rate-limited onto a weaker model unannounced is
+                // the case this exists for.
+                "served_by_fallback": result.served_by_fallback,
                 "input_tokens": result.total_usage.input_tokens,
                 "output_tokens": result.total_usage.output_tokens,
             })),

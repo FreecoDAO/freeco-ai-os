@@ -250,7 +250,8 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/history",
-            axum::routing::delete(routes::clear_agent_history),
+            axum::routing::get(routes::get_agent_history)
+                .delete(routes::clear_agent_history),
         )
         .route(
             "/api/agents/{id}/session/compact",

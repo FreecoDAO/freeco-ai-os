@@ -570,7 +570,20 @@ pub async fn start(
         }
     }
     for v in &spec.volumes {
-        cmd.arg("-v").arg(v);
+        // Namespaced per instance, as the stack path already does. Passed
+        // through raw, a named volume like `data:/app/data` claims the global
+        // name `data`, which any other hand declaring the same obvious name
+        // would then share -- two services silently reading each other's
+        // database. A host path (starting with / or a drive letter) is left
+        // alone: that one the author meant literally.
+        let looks_like_host_path =
+            v.starts_with('/') || v.starts_with('.') || v.chars().nth(1) == Some(':');
+        if looks_like_host_path {
+            cmd.arg("-v").arg(v);
+        } else {
+            cmd.arg("-v")
+                .arg(format!("{}-{v}", container_name(hand_id, instance_id)));
+        }
     }
     for (k, v) in &spec.env {
         // A value written as `secret:NAME` is looked up in the key store, so

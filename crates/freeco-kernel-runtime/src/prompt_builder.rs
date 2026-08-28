@@ -11,6 +11,15 @@ use crate::str_utils::safe_truncate_str;
 pub struct PromptContext {
     /// Agent name (from manifest).
     pub agent_name: String,
+    /// This agent's own id, so it can tell itself apart from the other agents
+    /// `agent_list` returns.
+    ///
+    /// Note for anyone adding fields here: whether a value changes between
+    /// turns decides *where* it belongs in the prompt, not just whether it is
+    /// included. Per-turn values go last -- see the note above `Current Date`.
+    pub agent_id: Option<String>,
+    /// The provider and model actually serving this agent, as `provider:model`.
+    pub agent_model: Option<String>,
     /// Agent description (from manifest).
     pub agent_description: String,
     /// Base system prompt authored in the agent manifest.
@@ -78,11 +87,6 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
 
     // Section 1 — Agent Identity (always present)
     sections.push(build_identity_section(ctx));
-
-    // Section 1.5 — Current Date/Time (always present when set)
-    if let Some(ref date) = ctx.current_date {
-        sections.push(format!("## Current Date\nToday is {date}."));
-    }
 
     // Section 2 — Tool Call Behavior (skip for subagents)
     if !ctx.is_subagent {
@@ -227,6 +231,23 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         }
     }
 
+    // Section 16 — the clock, deliberately last.
+    //
+    // Providers cache on a common *prefix*, so everything before the first
+    // byte that changes is reusable and everything after it is not. This string
+    // carries hours and minutes, so it differs on nearly every request -- and
+    // it used to sit second, immediately after the identity block. That put a
+    // per-minute value in front of the whole static prompt and the ~11.7k
+    // tokens of tool schemas behind it, so a cache hit was impossible and every
+    // turn paid full price for all of it. One short line in the wrong position
+    // cost more than everything it preceded.
+    //
+    // The rule for anything added here: static content first, per-turn content
+    // last. `Live Context` above is per-turn for the same reason.
+    if let Some(ref date) = ctx.current_date {
+        sections.push(format!("## Current Date\nToday is {date}."));
+    }
+
     sections.join("\n\n")
 }
 
@@ -235,14 +256,42 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
 // ---------------------------------------------------------------------------
 
 fn build_identity_section(ctx: &PromptContext) -> String {
-    if ctx.base_system_prompt.is_empty() {
+    let mut section = if ctx.base_system_prompt.is_empty() {
         format!(
             "You are {}, an AI agent running inside the Freeco Agent OS.\n{}",
             ctx.agent_name, ctx.agent_description
         )
     } else {
         ctx.base_system_prompt.clone()
+    };
+
+    // Who this agent is, always -- including when it has a custom prompt.
+    //
+    // This block used to run only for agents *without* one, which is nearly
+    // none of them, so a configured agent was never told its own name, id or
+    // model. Asked which model it was, the assistant answered honestly that it
+    // could not tell, then reached for `agent_list` and picked the wrong row:
+    // that tool lists every agent, and nothing in the prompt said which one was
+    // itself. It reported being a different agent on a different model, to the
+    // user who had just configured it.
+    //
+    // The id matters as much as the name. Names repeat and get renamed; the id
+    // is what `agent_list` keys on, so it is what makes self-identification a
+    // lookup rather than a guess.
+    let mut facts = format!("\n\n## Who You Are\n- Name: {}", ctx.agent_name);
+    if let Some(id) = &ctx.agent_id {
+        facts.push_str(&format!("\n- Agent id: {id}"));
     }
+    if let Some(model) = &ctx.agent_model {
+        facts.push_str(&format!("\n- Model serving you: {model}"));
+    }
+    facts.push_str(
+        "\n- When asked which model or agent you are, answer from these facts. \
+         Do not infer it from `agent_list`: that lists every agent, and picking \
+         the wrong row states someone else's model as your own.",
+    );
+    section.push_str(&facts);
+    section
 }
 
 /// Static tool-call behavior directives.
@@ -708,6 +757,34 @@ fn capitalize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clock must stay behind the static prompt.
+    ///
+    /// Providers cache on a common prefix, so a value that changes every minute
+    /// placed early makes the whole prompt uncacheable -- and the tool schemas
+    /// alone are roughly 11.7k tokens per turn. This is invisible in review:
+    /// the prompt reads fine either way, and only the bill and the latency
+    /// change. So it is pinned here.
+    #[test]
+    fn volatile_date_comes_after_static_sections() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Friday, August 28, 2026 (2026-08-28 14:03 CEST)".to_string());
+        let prompt = build_system_prompt(&ctx);
+
+        let date_at = prompt.find("## Current Date").expect("date section present");
+        let identity_at = prompt.find("## Who You Are").expect("identity present");
+        assert!(
+            date_at > identity_at,
+            "the per-minute date must not precede static content, or nothing caches"
+        );
+        // And it should be the last thing in the prompt.
+        let tail = &prompt[date_at..];
+        assert!(
+            !tail.contains("\n\n## "),
+            "nothing static may follow the date: {}",
+            &tail[..tail.len().min(120)]
+        );
+    }
 
     fn basic_ctx() -> PromptContext {
         PromptContext {

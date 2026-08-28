@@ -97,6 +97,26 @@ recorded as such.
 
 ## Unreleased
 
+### Next — settings that stay set
+
+- ⬜ **`agent.toml` on disk overrides the database at every boot.** Startup
+  compares the two and, when they differ, the disk file wins and is written back
+  over the stored manifest. `set_agent_model` does persist to disk, so the
+  common path holds -- but any change made through a path that does not, or any
+  hand-edited file, silently reverts the user's choice on the next restart. The
+  authority needs to be one place, stated, rather than whichever wrote last.
+- ⬜ **Two assistant directories exist:** `agents/assistant` (nvidia, last
+  touched 2026-08-23) and `agents/Freeco.AI assistant` (openai, live). The first
+  is a pre-rename leftover and is dormant, but boot auto-spawns agents from
+  `agents/*/agent.toml`, so a stale directory is a duplicate agent waiting to
+  happen. Left in place deliberately: nothing is deleted until the owner says.
+- ⬜ **A reply should name the model that actually served it.** When the primary
+  fails the chain silently substitutes another, while the UI keeps showing the
+  configured one -- so "the model shown is not the model answering" is true and
+  currently invisible. This was suspected from a dead `omniroute/auto` fallback
+  and could not be confirmed from logs, because the log had been truncated;
+  reporting the serving model would have made it self-evident.
+
 ### Next — container runtime watchdog
 
 - ⬜ **Notice when the runtime dies mid-run.** `runtime()` caches the runtime

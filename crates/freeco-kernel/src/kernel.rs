@@ -1993,6 +1993,7 @@ impl FreecoKernel {
             )
             .await
             .map(|out| freeco_kernel_runtime::agent_loop::AgentLoopResult {
+            served_by_fallback: None,
                 response: out.response,
                 total_usage: Default::default(),
                 iterations: 1,
@@ -2280,6 +2281,13 @@ impl FreecoKernel {
 
             let prompt_ctx = freeco_kernel_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
+                // Its own id and model, so "which model am I" is a lookup
+                // rather than a guess at which `agent_list` row is itself.
+                agent_id: Some(agent_id.to_string()),
+                agent_model: Some(format!(
+                    "{}:{}",
+                    manifest.model.provider, manifest.model.model
+                )),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
@@ -2635,6 +2643,7 @@ impl FreecoKernel {
         );
 
         Ok(AgentLoopResult {
+            served_by_fallback: None,
             response,
             total_usage: freeco_types::message::TokenUsage {
                 input_tokens: 0,
@@ -2695,6 +2704,7 @@ impl FreecoKernel {
         info!(agent = %entry.name, "Python agent execution complete");
 
         Ok(AgentLoopResult {
+            served_by_fallback: None,
             response: result.response,
             total_usage: freeco_types::message::TokenUsage {
                 input_tokens: 0,
@@ -2863,6 +2873,13 @@ impl FreecoKernel {
 
             let prompt_ctx = freeco_kernel_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
+                // Its own id and model, so "which model am I" is a lookup
+                // rather than a guess at which `agent_list` row is itself.
+                agent_id: Some(agent_id.to_string()),
+                agent_model: Some(format!(
+                    "{}:{}",
+                    manifest.model.provider, manifest.model.model
+                )),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),

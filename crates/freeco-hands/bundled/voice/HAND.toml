@@ -1,7 +1,7 @@
 id = "voice"
 name = "Dograh Voice"
-description = "Real-time voice AI: live calls with barge-in, telephony, and voice-campaign workflows for outreach."
-category = "communication"
+description = "Real-time voice AI on your own machine: live calls with barge-in, a visual workflow builder, and telephony for outreach."
+category = "productivity"
 icon = "\U0001F399"
 
 tools = [
@@ -10,57 +10,93 @@ tools = [
 ]
 
 [container]
+# Five of upstream's nine services. The other four -- nginx, coturn,
+# dograh-init and cloudflared -- sit behind compose profiles (`remote`,
+# `tunnel`, `local-turn`) that are not part of a local install: they terminate
+# TLS, relay WebRTC for callers outside this machine, and open a public tunnel.
+# A local hand needs none of that, and coturn alone would publish fifty UDP
+# ports.
+#
+# Native services rather than a compose file, because `podman compose` has no
+# native implementation and shells out to Docker's docker-compose binary -- so a
+# compose-defined stack breaks the day Docker Desktop is uninstalled while every
+# single-container hand keeps running.
 health_path = "/"
 health_timeout_secs = 900
 restart = "unless-stopped"
 
-compose = """
-services:
-  voice-db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: dograh
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: dograh
-    volumes: [voice-db-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dograh"]
-      interval: 5s
-      retries: 20
-  voice-redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
-    volumes: [voice-redis-data:/data]
-  voice-api:
-    image: ghcr.io/dograh/dograh-api:latest
-    depends_on:
-      voice-db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://dograh:${POSTGRES_PASSWORD}@voice-db:5432/dograh
-      REDIS_URL: redis://:${REDIS_PASSWORD}@voice-redis:6379/0
-    ports: ["8000:8000"]
-volumes:
-  voice-db-data:
-  voice-redis-data:
-"""
-# Dograh is MCP-native, so once it is up agents reach it over MCP with no
-# wrapper and no key. The server is mounted under the API prefix
-# (`app.mount(f"{API_PREFIX}/mcp", mcp_app)`), so it is /api/v1/mcp -- pointing
-# at a bare /mcp registers an endpoint that looks connected and is dead.
-#
-# Must stay above [container.env]: a key after a sub-table header belongs to
-# that table, which is how `compose` ended up as container.env.compose.
-mcp_url = "http://localhost:8000/api/v1/mcp"
-
+# The UI is the entry point, so that is what health checks and what the user
+# opens. Upstream publishes it on 3010; kept, because 3000 is taken.
 [container.env]
-PORT = "8000"
+PORT = "3010"
+
+[[container.services]]
+name = "postgres"
+# pgvector, not plain postgres: the api stores embeddings and fails its
+# migrations against a database without the extension.
+image = "docker.io/pgvector/pgvector:pg17"
+volumes = ["postgres-data:/var/lib/postgresql/data"]
+health_cmd = ["pg_isready", "-U", "postgres"]
+
+[container.services.env]
+POSTGRES_USER = "postgres"
 POSTGRES_PASSWORD = "secret:VOICE_DB_PASSWORD"
-REDIS_PASSWORD = "secret:VOICE_REDIS_PASSWORD"
+POSTGRES_DB = "postgres"
+
+[[container.services]]
+name = "redis"
+image = "docker.io/library/redis:7"
+volumes = ["redis-data:/data"]
+command = ["--requirepass", "${VOICE_REDIS_PASSWORD}"]
+health_cmd = ["redis-cli", "-a", "${VOICE_REDIS_PASSWORD}", "ping"]
+
+[[container.services]]
+name = "minio"
+image = "docker.io/minio/minio"
+command = ["server", "/data", "--console-address", ":9001"]
+volumes = ["minio-data:/data"]
+health_cmd = ["curl", "-f", "http://localhost:9000/minio/health/live"]
+
+[container.services.env]
+MINIO_ROOT_USER = "dograh"
+MINIO_ROOT_PASSWORD = "secret:VOICE_MINIO_PASSWORD"
+MINIO_API_CORS_ALLOW_ORIGIN = "*"
+
+[[container.services]]
+name = "api"
+image = "docker.io/dograhai/dograh-api:latest"
+depends_on = ["postgres", "redis", "minio"]
+ports = ["8000:8000"]
+# Upstream checks this with Python's urllib rather than curl, because the api
+# image ships no curl.
+health_cmd = ["python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+
+[container.services.env]
+# OSS_JWT_SECRET is required -- the api refuses to start without it.
+OSS_JWT_SECRET = "secret:VOICE_JWT_SECRET"
+DATABASE_URL = "postgresql://postgres:${VOICE_DB_PASSWORD}@postgres:5432/postgres"
+REDIS_URL = "redis://:${VOICE_REDIS_PASSWORD}@redis:6379"
+AWS_ACCESS_KEY_ID = "dograh"
+AWS_SECRET_ACCESS_KEY = "${VOICE_MINIO_PASSWORD}"
+AWS_ENDPOINT_URL = "http://minio:9000"
+AWS_REGION = "us-east-1"
+ENVIRONMENT = "oss"
+
+[[container.services]]
+name = "ui"
+image = "docker.io/dograhai/dograh-ui:latest"
+depends_on = ["api"]
+ports = ["3010:3010"]
+health_cmd = ["wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3010"]
+
+[container.services.env]
+HOSTNAME = "0.0.0.0"
+BACKEND_URL = "http://api:8000"
+NODE_ENV = "oss"
 
 [agent]
 name = "voice"
-description = "Looks after the voice gateway and reports what it is actually able to call."
+description = "Looks after the voice service: whether it is serving, which workflows exist, and what calls have run."
 module = "builtin:chat"
 provider = "default"
 model = "default"
@@ -68,15 +104,15 @@ max_tokens = 4096
 temperature = 0.3
 max_iterations = 20
 system_prompt = """
-You look after a Dograh voice gateway running on the user's own machine at \
-http://localhost:8000.
+You look after a Dograh voice service running on the user's own machine: the \
+interface at http://localhost:3010 and its API at http://localhost:8000.
 
-The gateway being up does not mean a call can be placed. Telephony needs a \
-provider and credentials the user supplies; without them the service answers \
-its health check and every outbound call fails. Report which of the two is true \
-rather than reporting "running".
+This install is local-only on purpose. Callers outside this machine need a TURN \
+relay and a public entry point, which are deliberately not part of the hand. If \
+the user wants to take real outside calls, say that plainly rather than \
+implying the local install already does it.
 
-Placing a call contacts a real person and may cost real money. Never start a \
-campaign or dial a number on your own initiative -- only when the user asked for \
-that specific action.
+Voice work costs money per minute through telephony and speech providers. State \
+what a run will cost before starting it, and never start a campaign without the \
+user saying so.
 """

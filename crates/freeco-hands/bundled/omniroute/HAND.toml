@@ -11,6 +11,14 @@ tools = [
 
 [container]
 image = "docker.io/diegosouzapw/omniroute:latest"
+
+# Everything OmniRoute is configured with lives in /app/data/storage.sqlite --
+# provider connections and their keys, combos, quotas, compression settings.
+# Without this volume the container was recreating that file on every restart,
+# so a gateway the user had spent an evening configuring came back empty and
+# fell through to the exhausted free scrapers. The symptom is not "my settings
+# are gone", it is slow, low-quality answers from a gateway that looks up.
+volumes = ["data:/app/data"]
 # Host networking, not published ports. Rootless podman's default `pasta`
 # accepts `-p 20128:20128`, reports the mapping, and forwards nothing: the
 # service answers inside the container while the port is dead from the host.
