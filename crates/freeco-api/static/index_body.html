@@ -765,6 +765,18 @@
               <!-- Message list -->
               <template x-if="currentAgent">
                 <div>
+                  <!-- Pick a recipient for "send to". Listed by name, and the
+                       current agent is excluded: forwarding an answer to the
+                       agent that just wrote it is never what was meant. -->
+                  <div x-show="sendToOpen" x-cloak class="card" style="margin-bottom:10px">
+                    <div class="card-header">Send this answer to</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+                      <template x-for="a in ($store.app.agents || []).filter(function(x){ return !currentAgent || x.id !== currentAgent.id })" :key="a.id">
+                        <button class="btn btn-sm" :disabled="sendToBusy" @click="confirmSendTo(a.id)" x-text="a.name"></button>
+                      </template>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" style="margin-top:8px" @click="sendToOpen = false">Cancel</button>
+                  </div>
                   <template x-for="(msg, $index) in filteredMessages" :key="msg.id">
                     <div class="message" :class="msg.role + (msg.thinking ? ' thinking' : '') + (msg.streaming ? ' streaming' : '') + (isGrouped($index) ? ' grouped' : '')">
                       <div class="message-avatar" x-show="msg.role === 'agent'">
@@ -776,6 +788,20 @@
                           <button class="message-action-btn" :class="{ copied: msg._copied }" @click="copyMessage(msg)" :title="msg._copied ? 'Copied!' : 'Copy message'">
                             <svg x-show="!msg._copied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                             <svg x-show="msg._copied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                          </button>
+                          <!-- Read aloud. Toggles, because a long answer has to
+                               be stoppable without waiting it out. -->
+                          <button class="message-action-btn" @click="speakMessage(msg)" title="Read aloud / stop">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 010 7"/><path d="M19 5a9 9 0 010 14"/></svg>
+                          </button>
+                          <!-- Save as Markdown, not rendered HTML: the source is
+                               what the user can edit and re-use. -->
+                          <button class="message-action-btn" @click="saveMessage(msg)" title="Save as .md">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                          </button>
+                          <!-- Hand this answer to another agent. -->
+                          <button class="message-action-btn" @click="sendMessageTo(msg)" title="Send to another agent">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                           </button>
                         </div>
                         <!-- Thinking indicator with animated dots -->

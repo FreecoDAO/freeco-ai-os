@@ -231,6 +231,28 @@ pub trait KernelHandle: Send + Sync {
         Err("Hands system not available".to_string())
     }
 
+    /// Rename the calling agent's current conversation.
+    async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
+        let _ = (agent_id, label);
+        Err("Session management not available".to_string())
+    }
+
+    /// Start a new named conversation for the calling agent.
+    ///
+    /// `carry_history` copies the current conversation into the new one and
+    /// deliberately does not remove it from the original: there is no
+    /// recoverable message delete yet, and losing a conversation to a tidying
+    /// operation is far worse than leaving a duplicate behind.
+    async fn session_fork(
+        &self,
+        agent_id: &str,
+        label: &str,
+        carry_history: bool,
+    ) -> Result<String, String> {
+        let _ = (agent_id, label, carry_history);
+        Err("Session management not available".to_string())
+    }
+
     /// List discovered external A2A agents as (name, url) pairs.
     fn list_a2a_agents(&self) -> Vec<(String, String)> {
         vec![]

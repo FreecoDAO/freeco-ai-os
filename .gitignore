@@ -53,3 +53,6 @@ scripts/deploy-remote.sh
 
 # Build/packaging output
 dist/
+
+# Windows reserved device name; a stray redirect creates it and git cannot index it
+NUL

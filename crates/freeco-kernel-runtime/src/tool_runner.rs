@@ -459,6 +459,34 @@ pub async fn execute_tool(
         "hand_status" => tool_hand_status(input, kernel).await,
         "hand_deactivate" => tool_hand_deactivate(input, kernel).await,
 
+        // Session tools. Both need to know which agent is calling, so they fail
+        // clearly rather than renaming whatever session happens to be handy.
+        "session_rename" => match (kernel, caller_agent_id) {
+            (Some(kh), Some(aid)) => {
+                match kh.session_rename(aid, input["label"].as_str().unwrap_or("")).await {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("Session management is not available to this agent".to_string()),
+        },
+        "session_fork" => match (kernel, caller_agent_id) {
+            (Some(kh), Some(aid)) => {
+                match kh
+                    .session_fork(
+                        aid,
+                        input["label"].as_str().unwrap_or(""),
+                        input["carry_history"].as_bool().unwrap_or(false),
+                    )
+                    .await
+                {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("Session management is not available to this agent".to_string()),
+        },
+
         // A2A outbound tools (cross-instance agent communication)
         "a2a_discover" => tool_a2a_discover(input).await,
         "a2a_send" => tool_a2a_send(input, kernel).await,
@@ -769,6 +797,47 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["command", "purpose"]
             }),
         },
+        // --- Session tools ---
+        //
+        // The backing operations existed in `freeco-memory` and stopped at the
+        // crate boundary, so an agent asked to tidy its own threads could only
+        // explain that it had no way to. Naming a conversation is the cheapest
+        // thing that makes a pile of them navigable.
+        ToolDefinition {
+            name: "session_rename".to_string(),
+            description: "Rename the current conversation. Use a short name describing the \
+                          task, so the thread can be found later among others."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "The new name, a few words" }
+                },
+                "required": ["label"]
+            }),
+        },
+        ToolDefinition {
+            name: "session_fork".to_string(),
+            description: "Start a new named conversation, optionally carrying this one's \
+                          history into it. Use when a request turns out to be a separate \
+                          task: forking keeps each thread about one thing instead of \
+                          interleaving them. The original is left untouched."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "Name for the new conversation" },
+                    "carry_history": {
+                        "type": "boolean",
+                        "description": "Copy the current conversation into the new one (default false). \
+                                        Copies rather than moves: nothing is removed from the original, \
+                                        because there is no recoverable message delete yet."
+                    }
+                },
+                "required": ["label"]
+            }),
+        },
+
         // --- Inter-agent tools ---
         ToolDefinition {
             name: "agent_send".to_string(),
@@ -869,7 +938,17 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shared memory tools ---
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "Store a value in shared memory accessible by all agents. Use for cross-agent coordination and data sharing.".to_string(),
+            description: "Remember something durably, beyond this conversation. \
+                          Use it for what you will still need next week: the user's \
+                          preferences and constraints, decisions and the reasons \
+                          behind them, corrections they have given you, and facts \
+                          about their setup that were expensive to establish. \
+                          Also readable by other agents, so it doubles as \
+                          coordination. Conversations are replayed only up to a \
+                          window and older turns are compacted into a summary -- \
+                          anything not stored here is eventually lost, so store it \
+                          when you learn it, not when you need it."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

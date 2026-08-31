@@ -97,14 +97,83 @@ recorded as such.
 
 ## Unreleased
 
+### Next — agents that refuse tools they hold
+
+Verified on 2026-08-31: `session_rename` and `session_fork` are in the
+assistant's request payload (`tool_count=70`, both named in `tool_names`), the
+agent lists them when asked what it has, and it then answers "I can't call
+`session_rename` because it isn't available in the callable tool interface".
+The plumbing is fine end to end; the agent is declining and composing a reason.
+
+This is the third instance of one behaviour, not three bugs:
+
+- `shell_exec` — quoted an error string this codebase never emits, after a
+  loop-guard block it had misread as a permissions failure.
+- its own model — said it could not know, then named a different agent's model.
+- `session_rename` — as above.
+
+The shape each time: something blocks or looks unfamiliar once, the agent
+converts that into a **standing claim about its own capabilities**, and repeats
+it from its own conversation history without retrying. Its history is the
+evidence it trusts most, and nothing contradicts it.
+
+- ⬜ **Tell agents what they hold, plainly.** The prompt lists tool names but
+  never says the list is authoritative and current. A line stating that the
+  tools in this request are the tools that exist, and that a past failure is not
+  evidence about the present, costs nothing.
+- ⬜ **Make refusals checkable.** An agent claiming it lacks a tool it was given
+  should be visible: log the claim against the payload, so "the agent is wrong"
+  and "the product is broken" stop looking identical from the outside. Hours
+  went into the second before finding it was the first.
+- ⬜ **Stop failures becoming beliefs.** A blocked call sits in history as a
+  bare failure. Recording *why* alongside it -- transient, guard, genuinely
+  absent -- gives the agent something to reason from other than "that did not
+  work, so I cannot".
+
+### Next — agents that accumulate understanding
+
+Context lives in three tiers, and only two of them exist here. Recent turns are
+replayed verbatim, older ones are compacted into a summary, and durable facts
+are supposed to live in memory — but nothing ever writes that third tier, so
+everything past the replay window degrades into a flattened summary and no
+conclusion is ever promoted out of a conversation. That is why an agent reads as
+a different person each time: it has a transcript, not knowledge.
+
+Done: `memory_store` was described as a coordination channel ("shared memory
+accessible by all agents"), which is not a description any model reads as "this
+is how you remember things". It now says what it is for, and the prompt tells
+agents to record durable facts when they learn them.
+
+- ⬜ **Extract on compaction.** The moment history is about to be summarised is
+  exactly when durable facts should be lifted into memory. Compacting without
+  extracting is pure loss, and it happens silently.
+- ⬜ **Summarise with a model, not string concatenation.** `compacted_summary`
+  is currently roles and text joined together, which degrades badly and gets
+  worse the longer a conversation runs — the case where the summary matters
+  most.
+- ⬜ **One canonical session per agent, not per task.** Storage is keyed by
+  `agent_id`, so every unrelated conversation with one agent shares a single
+  message list and competes for the same 50-message window. Separate tasks
+  should not evict each other.
+
+**Note for anything touching this:** context is keyed by agent, not by model, so
+it already survives a model change. When history appeared to vanish on a model
+switch the storage was intact — the UI had cleared its view and had no endpoint
+to reload from. Check the surface before suspecting the store.
+
 ### Next — settings that stay set
 
-- ⬜ **`agent.toml` on disk overrides the database at every boot.** Startup
-  compares the two and, when they differ, the disk file wins and is written back
-  over the stored manifest. `set_agent_model` does persist to disk, so the
-  common path holds -- but any change made through a path that does not, or any
-  hand-edited file, silently reverts the user's choice on the next restart. The
-  authority needs to be one place, stated, rather than whichever wrote last.
+- ✅ **`agent.toml` does not override the database** — this was recorded here as
+  a bug and the code says otherwise: the boot scan skips any directory whose
+  agent name is already in the registry, so a restored agent is never rebuilt
+  from disk. The disk file is a seed for agents the database does not know, and
+  `persist_manifest_to_disk` keeps it in step. Left as a corrected entry rather
+  than deleted, because the wrong version was acted on.
+- ⬜ **A model change was still observed reverting**, with the dashboard showing
+  `gpt-5.6-terra-pro` while the registry and `agent.toml` both held
+  `gpt-5.4-2026-03-05`. Since disk does not override the database, the
+  divergence is elsewhere — a write that never reached the registry, or a stale
+  view. Needs reproducing with the before/after state captured, not guessed at.
 - ⬜ **Two assistant directories exist:** `agents/assistant` (nvidia, last
   touched 2026-08-23) and `agents/Freeco.AI assistant` (openai, live). The first
   is a pre-rename leftover and is dormant, but boot auto-spawns agents from

@@ -634,6 +634,98 @@ function chatPage() {
       }
     },
 
+    // Render an agent reply exactly once.
+    //
+    // The same answer can arrive twice: the HTTP fallback renders a reply, and
+    // a WebSocket that reconnects mid-turn then delivers the completion for the
+    // same run. Both paths are individually correct, which is why this is
+    // deduplicated where they meet rather than in either of them.
+    //
+    // Matching is on the text: two different runs producing identical text in
+    // the same second are the same answer as far as a reader is concerned, and
+    // showing it twice is worse than dropping a genuine repeat.
+    _pushAgentReply: function (text, meta, tools, ts) {
+      var body = (text || '').trim();
+      for (var i = this.messages.length - 1; i >= 0 && i >= this.messages.length - 4; i--) {
+        var m = this.messages[i];
+        if (m.role !== 'agent' || m.thinking || m.streaming) continue;
+        if ((m.text || '').trim() === body && body !== '') {
+          // Keep the richer metadata if this copy has it.
+          if (!m.meta && meta) m.meta = meta;
+          if ((!m.tools || !m.tools.length) && tools && tools.length) m.tools = tools;
+          return m;
+        }
+        break;
+      }
+      var msg = {
+        id: ++msgId, role: 'agent', text: text, meta: meta || '',
+        tools: tools || [], ts: ts || Date.now()
+      };
+      this.messages.push(msg);
+      return msg;
+    },
+
+    // --- Per-message actions ---
+
+    // Read an answer aloud. Toggles, so a long reply can be stopped.
+    speakMessage: function (m) {
+      if (!window.speechSynthesis) { FreecoToast.error('This browser cannot speak.'); return; }
+      if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); return; }
+      this.speak(this.plainText(m));
+    },
+
+    copyMessage: function (m) {
+      var t = this.plainText(m);
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(t).then(function () { FreecoToast.success('Copied'); },
+                                              function () { FreecoToast.error('Copy failed'); });
+      }
+    },
+
+    // Save the answer as a file. Markdown, because that is what it is written
+    // in -- saving rendered HTML would lose the source the user can edit.
+    saveMessage: function (m) {
+      try {
+        var name = 'freeco-' + new Date(m.ts || Date.now()).toISOString().replace(/[:.]/g, '-') + '.md';
+        var blob = new Blob([this.plainText(m)], { type: 'text/markdown' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      } catch (e) { FreecoToast.error('Could not save the file.'); }
+    },
+
+    // Hand this answer to another agent, with a line saying where it came from
+    // -- an excerpt arriving with no provenance is a puzzle for the receiver.
+    sendMessageTo: function (m) {
+      this.sendToText = this.plainText(m);
+      this.sendToOpen = true;
+    },
+    sendToOpen: false,
+    sendToText: '',
+    sendToBusy: false,
+
+    confirmSendTo: async function (agentId) {
+      if (!agentId || this.sendToBusy) return;
+      this.sendToBusy = true;
+      try {
+        var from = (this.currentAgent && this.currentAgent.name) || 'another agent';
+        await FreecoAPI.post('/api/agents/' + encodeURIComponent(agentId) + '/message',
+                             { message: 'Forwarded from ' + from + ':\n\n' + this.sendToText });
+        FreecoToast.success('Sent');
+        this.sendToOpen = false;
+      } catch (e) {
+        FreecoToast.error('Could not send: ' + (e.message || 'unknown error'));
+      }
+      this.sendToBusy = false;
+    },
+
+    // The text as written, not as rendered.
+    plainText: function (m) {
+      return String((m && m.text) || '');
+    },
+
     // --- Enter behaviour: one Enter is a newline, two in a row send ---
     //
     // A single Enter used to send, which makes a multi-line message impossible
@@ -1122,7 +1214,7 @@ function chatPage() {
           if (!finalText.trim() && streamedTools.length) {
             finalText = '';
           }
-          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now() });
+          this._pushAgentReply(finalText, meta, streamedTools, Date.now());
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -1313,7 +1405,7 @@ function chatPage() {
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
-        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now() });
+        this._pushAgentReply(res.response, httpMeta, [], Date.now());
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + e.message, meta: '', tools: [], ts: Date.now() });

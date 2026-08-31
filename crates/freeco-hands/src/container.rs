@@ -53,6 +53,64 @@ pub async fn runtime() -> Option<&'static str> {
     None
 }
 
+/// The resolver file every container needs, and which nothing else recreates.
+///
+/// Podman bind-mounts the VM's `/etc/resolv.conf` into each container, so if it
+/// is missing *no container can start at all* -- the error names resolv.conf and
+/// says nothing about DNS, which makes it read like a broken image.
+///
+/// It goes missing because the VM is configured with `generateResolvConf =
+/// false`, which is deliberate: WSL otherwise writes a single nameserver
+/// pointing at its own NAT proxy, and when that proxy hiccups every image pull
+/// fails with "Temporary failure in name resolution". Three nameservers with a
+/// short timeout fixed that. The cost is that WSL no longer maintains the file,
+/// and it did not survive a VM restart.
+///
+/// So this repairs it. Checked and rewritten rather than assumed present,
+/// because the failure is total and the fix is four lines of text.
+const VM_RESOLV_CONF: &str =
+    "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\nnameserver 10.255.255.254\\noptions timeout:2 attempts:2\\n";
+
+/// Returns whether the file exists after this call.
+///
+/// A no-op on Linux and on Docker, where there is no VM to repair.
+pub async fn ensure_vm_resolver() -> bool {
+    if runtime().await != Some("podman") {
+        return true;
+    }
+    let present = tokio::time::timeout(
+        RUNTIME_TIMEOUT,
+        tokio::process::Command::new("podman")
+            .args(["machine", "ssh", "test -f /etc/resolv.conf"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+    if matches!(present, Ok(Ok(s)) if s.success()) {
+        return true;
+    }
+
+    tracing::warn!("the Podman VM has no /etc/resolv.conf — no container can start; restoring it");
+    let script = format!("sudo sh -c 'printf \"{VM_RESOLV_CONF}\" > /etc/resolv.conf'");
+    let repaired = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new("podman")
+            .args(["machine", "ssh", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+    let ok = matches!(repaired, Ok(Ok(s)) if s.success());
+    if ok {
+        tracing::info!("restored /etc/resolv.conf in the Podman VM");
+    } else {
+        tracing::warn!("could not restore /etc/resolv.conf; containers will fail to start");
+    }
+    ok
+}
+
 /// Try to bring a stopped runtime back, for callers that noticed it is down.
 ///
 /// Returns whether a runtime answers afterwards.
@@ -369,10 +427,24 @@ async fn start_native_stack(
             cmd.arg(part);
         }
 
-        let out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
+        let mut out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
             .await
             .map_err(|_| HandError::Config(format!("starting {name} timed out")))?
             .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+
+        // A missing resolver in the VM stops every container, and the message
+        // blames resolv.conf rather than DNS. Repair it and try once more, so a
+        // fixable environment problem does not surface as a broken hand.
+        if !out.status.success()
+            && String::from_utf8_lossy(&out.stderr).contains("resolv.conf")
+            && ensure_vm_resolver().await
+        {
+            out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
+                .await
+                .map_err(|_| HandError::Config(format!("starting {name} timed out")))?
+                .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+        }
+
         if !out.status.success() {
             return Err(HandError::Config(format!(
                 "{name} failed to start: {}",
@@ -596,10 +668,22 @@ pub async fn start(
     }
     cmd.arg(&spec.image);
 
-    let out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
+    let mut out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
         .await
         .map_err(|_| HandError::Config(format!("{rt} run timed out")))?
         .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+
+    // Same repair as the stack path: a VM missing /etc/resolv.conf stops every
+    // container, and the error names the file rather than the cause.
+    if !out.status.success()
+        && String::from_utf8_lossy(&out.stderr).contains("resolv.conf")
+        && ensure_vm_resolver().await
+    {
+        out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
+            .await
+            .map_err(|_| HandError::Config(format!("{rt} run timed out")))?
+            .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+    }
     if !out.status.success() {
         return Err(HandError::Config(format!(
             "{rt} run failed: {}",

@@ -58,7 +58,7 @@ pub async fn build_router(
         frozen_agents: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         security: Arc::new(crate::security::SecurityService::default()),
     });
-    start_runtime_watchdog();
+    start_runtime_watchdog(kernel.clone());
     start_backup_scheduler(
         kernel.config.home_dir.clone(),
         kernel.config.data_dir.clone(),
@@ -1012,7 +1012,7 @@ pub async fn build_router(
 /// auto-recovery loop performed 94 restarts in a single run precisely because
 /// nothing limited it, and starting a VM is far more expensive than restarting
 /// an agent.
-fn start_runtime_watchdog() {
+fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
     use freeco_hands::container::RuntimeStatus;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1036,6 +1036,74 @@ fn start_runtime_watchdog() {
                     ),
                 }
                 previous = Some(status.clone());
+            }
+
+            // While the runtime is up, make sure the VM can still start
+            // containers at all. A missing /etc/resolv.conf leaves the runtime
+            // answering normally while every `run` fails, so the probe above
+            // reports healthy and nothing works.
+            if matches!(status, RuntimeStatus::Running { .. }) {
+                freeco_hands::container::ensure_vm_resolver().await;
+
+                // Put back service hands whose containers are gone.
+                //
+                // `restart: unless-stopped` is a runtime policy, and it does not
+                // survive the VM itself stopping: the whole Podman machine comes
+                // back with every container exited. The instance records still
+                // say Active, so the product reports services that are not
+                // running -- exactly the "Active while serving nothing" failure
+                // the container wiring was written to end, arriving by a
+                // different route. The CRM was down for a day this way.
+                //
+                // Reconciling here rather than on next use means the user finds
+                // it already running instead of discovering it broken.
+                for inst in kernel.hand_registry.list_instances() {
+                    let is_service = kernel
+                        .hand_registry
+                        .get_definition(&inst.hand_id)
+                        .and_then(|d| d.container.clone());
+                    let Some(spec) = is_service else { continue };
+
+                    let iid = inst.instance_id.to_string();
+                    let alive = if spec.is_native_stack() {
+                        // A stack is up only if every one of its containers is.
+                        let mut all = true;
+                        for svc in &spec.services {
+                            let name = freeco_hands::container::service_container_name(
+                                &inst.hand_id,
+                                &iid,
+                                &svc.name,
+                            );
+                            if !freeco_hands::container::is_running(&name).await {
+                                all = false;
+                                break;
+                            }
+                        }
+                        all
+                    } else {
+                        let name = freeco_hands::container::container_name(&inst.hand_id, &iid);
+                        freeco_hands::container::is_running(&name).await
+                    };
+                    if alive {
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        hand = %inst.hand_id,
+                        "service hand is recorded active but its containers are gone — restarting"
+                    );
+                    match kernel.start_hand_service(&inst.hand_id, &inst.instance_id).await {
+                        Ok(_) => tracing::info!(hand = %inst.hand_id, "service hand restarted"),
+                        // Reported, not retried in a tight loop: the next tick is
+                        // a minute away, which is the right pace for something
+                        // that pulls images and waits on health checks.
+                        Err(e) => tracing::warn!(
+                            hand = %inst.hand_id,
+                            error = %e,
+                            "could not restart service hand"
+                        ),
+                    }
+                }
             }
 
             if status == RuntimeStatus::Stopped {

@@ -542,6 +542,13 @@ fn gethostname() -> Option<String> {
     }
 }
 
+/// Messages after which a session is summarised by the model.
+///
+/// Below the memory crate's own threshold (100), so the model-written summary
+/// happens first and the concatenating fallback stays the thing that never
+/// runs in practice.
+const AUTO_COMPACT_AT: usize = 80;
+
 impl FreecoKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
@@ -3091,6 +3098,35 @@ impl FreecoKernel {
             let new_messages = session.messages[messages_before..].to_vec();
             if let Err(e) = self.memory.append_canonical(agent_id, &new_messages, None) {
                 warn!("Failed to update canonical session: {e}");
+            }
+
+            // Compact with the model rather than with string concatenation.
+            //
+            // Two summarisers existed: `compact_agent_session`, which asks the
+            // model for a real summary, reachable only from a button nobody
+            // presses; and the automatic one inside `append_canonical`, which
+            // joins roles and text together and is what every long conversation
+            // actually got. The automatic path is the one that matters, because
+            // it is the one that runs -- and concatenation degrades worst
+            // exactly when a conversation is long enough to need summarising.
+            //
+            // Run in the background: the user's reply is already composed, and
+            // making them wait on a summarisation call would trade a visible
+            // delay for an invisible benefit.
+            let long_enough = self
+                .memory
+                .canonical_context(agent_id, Some(usize::MAX))
+                .map(|(_, msgs)| msgs.len() > AUTO_COMPACT_AT)
+                .unwrap_or(false);
+            if long_enough {
+                if let Some(me) = self.self_handle.get().and_then(|w| w.upgrade()) {
+                    tokio::spawn(async move {
+                        match me.compact_agent_session(agent_id).await {
+                            Ok(summary) => info!(%agent_id, "auto-compacted session: {summary}"),
+                            Err(e) => warn!(%agent_id, "auto-compaction failed: {e}"),
+                        }
+                    });
+                }
             }
         }
 
@@ -8135,6 +8171,59 @@ impl KernelHandle for FreecoKernel {
             "activated_at": instance.activated_at.to_rfc3339(),
             "updated_at": instance.updated_at.to_rfc3339(),
         }))
+    }
+
+    async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
+        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let label = label.trim();
+        if label.is_empty() {
+            return Err("A name is required".to_string());
+        }
+        let entry = self
+            .registry
+            .get(aid)
+            .ok_or_else(|| format!("Agent not found: {agent_id}"))?;
+        self.memory
+            .set_session_label(entry.session_id, Some(label))
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!("Renamed this conversation to \"{label}\""))
+    }
+
+    async fn session_fork(
+        &self,
+        agent_id: &str,
+        label: &str,
+        carry_history: bool,
+    ) -> Result<String, String> {
+        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let label = label.trim();
+        if label.is_empty() {
+            return Err("A name is required".to_string());
+        }
+        let session = self
+            .memory
+            .create_session_with_label(aid, Some(label))
+            .map_err(|e| format!("{e}"))?;
+
+        if carry_history {
+            // Copied, never moved. Removing the originals would need a
+            // recoverable delete, which does not exist -- and a tidying
+            // operation that can eat a conversation is not worth having.
+            let (_, messages) = self
+                .memory
+                .canonical_context(aid, None)
+                .map_err(|e| format!("{e}"))?;
+            if !messages.is_empty() {
+                self.memory
+                    .append_canonical(aid, &messages, None)
+                    .map_err(|e| format!("{e}"))?;
+            }
+        }
+        Ok(format!(
+            "Started a new conversation \"{}\" ({}). The current one is unchanged.",
+            label,
+            session.id
+        ))
     }
 
     async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
