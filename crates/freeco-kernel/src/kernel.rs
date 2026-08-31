@@ -8173,6 +8173,74 @@ impl KernelHandle for FreecoKernel {
         }))
     }
 
+    async fn org_overview(&self) -> Result<serde_json::Value, String> {
+        self.memory
+            .org()
+            .org_overview()
+            .map(serde_json::Value::from)
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn team_create(&self, name: &str, project_id: Option<&str>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("A team name is required".to_string());
+        }
+        let team = self
+            .memory
+            .org()
+            .create_team(name, project_id)
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!("Created team \"{}\" (id {})", team.name, team.id))
+    }
+
+    async fn team_add_member(
+        &self,
+        team_id: &str,
+        agent_id: &str,
+        role: Option<&str>,
+    ) -> Result<String, String> {
+        // Checked before writing: a membership row pointing at an agent that
+        // does not exist is worse than a refusal, because it reads as structure
+        // and delegates to nothing.
+        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let entry = self
+            .registry
+            .get(aid)
+            .ok_or_else(|| format!("No agent with id {agent_id}"))?;
+        self.memory
+            .org()
+            .add_team_member(team_id, agent_id, role)
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Added {} to team {}{}",
+            entry.name,
+            team_id,
+            role.map(|r| format!(" as \"{r}\"")).unwrap_or_default()
+        ))
+    }
+
+    async fn project_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        company_id: Option<&str>,
+    ) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("A project name is required".to_string());
+        }
+        let project = self
+            .memory
+            .org()
+            .create_project(name, description, company_id)
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Created project \"{}\" (id {})",
+            project.name, project.id
+        ))
+    }
+
     async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
         let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
         let label = label.trim();

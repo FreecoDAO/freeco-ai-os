@@ -97,25 +97,245 @@ recorded as such.
 
 ## Unreleased
 
-### Next — agents that refuse tools they hold
+### Org structure — principles taken from the Yanovsky material
 
-Verified on 2026-08-31: `session_rename` and `session_fork` are in the
-assistant's request payload (`tool_count=70`, both named in `tool_names`), the
-agent lists them when asked what it has, and it then answers "I can't call
-`session_rename` because it isn't available in the callable tool interface".
-The plumbing is fine end to end; the agent is declining and composing a reason.
+Seven structural principles, each with the mechanism it maps to here. Kept
+separate from the rhythm work below because these decide the *shape* of the
+organisation; the rhythm decides how it runs.
 
-This is the third instance of one behaviour, not three bugs:
+**1. A manager is defined by the quality of its choices, not its output.**
+"Специалист ждёт постановки задачи. Руководитель сам решает, какие направления
+дадут максимальный результат." Every agent here is currently the same shape: it
+waits for a message and answers it. There is no agent whose job is *selection* —
+deciding which two of ten things actually change the result. That is a distinct
+role and needs a distinct manifest, not a bigger tool list.
 
-- `shell_exec` — quoted an error string this codebase never emits, after a
-  loop-guard block it had misread as a permissions failure.
-- its own model — said it could not know, then named a different agent's model.
-- `session_rename` — as above.
+**2. Authority travels with accountability, or the role is fiction.**
+"Кто принимает решения — тот и руководитель." An agent named owner of an area
+that must escalate every decision is a relay. Maps to `team_add_member`'s role
+plus the approval gates: a team owner's manifest should state what it may decide
+alone, and that boundary should be visible to the agents around it.
 
-The shape each time: something blocks or looks unfamiliar once, the agent
-converts that into a **standing claim about its own capabilities**, and repeats
-it from its own conversation history without retrying. Its history is the
-evidence it trusts most, and nothing contradicts it.
+**3. Delegation is progressive, never one step.** Specialist work first, then
+team management, then daily control. For agents this is a maturity ladder: a new
+agent starts narrow, and authority widens as its record justifies it. Today
+every agent is hired at full authority immediately, which is why a broad tool
+list feels dangerous rather than useful.
+
+**4. Every unit answers five questions.** From the first article: what it is
+accountable for, how its work is measured, what counts as good, who decides,
+what it must do for growth. A team record holding a name and nothing else — as
+`Team` does now — cannot answer any of them. These are the fields a team is
+missing.
+
+**5. Structure changes when the metrics say so.** "Иногда приходится менять
+структуру отдела, перераспределять ответственность." The org chart is an
+instrument, not a monument. Teams and ownership must be cheap to change — which
+is an argument for keeping the org model small and editable rather than modelling
+a company in full.
+
+**6. Aiming and firing are different jobs.** Eight elements are the aim, the
+action is the shot. In agent terms: the agent that analyses need not be the
+agent that acts, and separating them is what stops "we discussed it and nothing
+changed" — the failure the source names directly.
+
+**7. Culture is set by the questions a manager asks.** The sharpest point for
+this product: "Если руководитель принимает формальные отчёты без вопросов,
+сотрудники быстро понимают, что можно ограничиться красивыми словами." Agents
+are *exactly* the thing that produces confident-sounding reports — this session
+alone produced backups "verified" that could not restore, hands reporting Active
+while serving nothing, and an agent stating another agent's model as its own. A
+manager agent that accepts a subordinate's report without asking for evidence
+will get pretty words every time, and it will be fast and wrong. **A reviewing
+agent must ask for the check, not the claim.**
+
+- ⬜ **Manager and specialist as distinct manifests**, differing in
+  responsibility and decision rights rather than tool count (1, 2).
+- ⬜ **Team gains the five fields** — accountability, measure, target, decision
+  rights, growth objective (4).
+- ⬜ **A review rule in the prompt**: when receiving a colleague's report, ask
+  what was verified and how, before passing it on. Report the check, not the
+  claim (7).
+- ⬜ **An authority ladder** — new agents start narrow; widening is a decision
+  the user makes (3).
+
+### Next — the management rhythm (Yanovsky), as a mechanism
+
+The owner supplied the actual source material. Unlike the marketing pages, it is
+structural, and it maps onto an agent system unusually well — because its whole
+argument is that management should be a *repeating mechanism* rather than a
+person's judgement, and a mechanism is the thing software can hold.
+
+Four ideas worth building, in order of value:
+
+**1. The ten-element cycle.** The core of it, and explicitly "cannot be
+implemented partially — it works only as a whole system":
+
+```
+1 improvement category   2 owner        3 target        4 current result
+5 what was done          6 analysis     7 decisions     8 agreements
+9 actions               10 follow-up
+```
+
+Every element supports the next: drop follow-up and agreements are forgotten;
+drop analysis and decisions become arbitrary; drop the owner and nobody is
+accountable. This is a data structure, not a philosophy — one record per
+improvement area, carried forward daily.
+
+**2. Daily, not weekly.** "За неделю можно практически ничего не изменить" —
+a week is long enough to write a convincing report about a week in which nothing
+changed. The question the system should force is "what got better today?", which
+cannot be answered in generalities. Agents run continuously and never tire of a
+daily cycle, which is the one place software beats the human version outright.
+
+**3. Every action names the metric it moves.** The prescribed management
+question is not "what will you do?" but "which indicator changes after this?".
+Directly implementable: an action recorded without a target metric is
+incomplete, and the tool should say so.
+
+**4. Whoever decides is the manager.** An agent given a responsibility but no
+authority is a relay, not an owner — it just escalates. Maps exactly onto our
+`team_add_member` role and the approval gates: a team owner should be able to
+act within its area without asking, and the boundary should be explicit.
+
+**Deliberately not adopted:** the framing that people are secondary to numbers.
+For a system that already reports confidently and wrongly, "manage the metrics"
+without "verify the metrics are real" would industrialise that failure. The
+existing rule stands: an accurate account beats a good-looking one.
+
+- ⬜ **`rhythm` store and tools** — record and read the ten elements per area;
+  `rhythm_record`, `rhythm_review`, `rhythm_open` (what was agreed and not yet
+  done). Backed by a table, like `OrgStore`.
+- ⬜ **A daily cycle the CEO agent runs** — pull results, compare to target,
+  analyse deviations, decide, record agreements, and *check yesterday's
+  agreements first*. Follow-up is the element most often dropped and the one
+  that makes the rest real.
+- ⬜ **Actions carry their metric.** Reject or flag an action recorded without
+  one.
+**Gradual adoption does not apply here.** The source prescribes it, and it is
+right — for people. It solves human adoption friction: resistance to new rules,
+forgetting to fill fields, confusion when everything changes at once. None of
+that is true of agents. They fill ten fields as readily as one, never tire of a
+daily cycle, and do not need a habit embedded before the next arrives. Shipping
+the structure whole is not only possible here, it is *required*: a half-built
+management system gives agents somewhere to record a number and nowhere to say
+what it should have been, which is worse than none.
+
+**The hands are the instruments.** An indicator a human types in is the
+*«кажется, продажи выросли»* problem with extra steps — it looks like
+measurement and carries the same guesswork. The service hands are what make the
+numbers real, and each maps to a part of the scorecard:
+
+| hand | indicators it can supply |
+| --- | --- |
+| CRM (Twenty) | contacts added, pipeline by stage, donors by status, follow-ups overdue |
+| Accounting (Akaunting) | revenue, cost, margin, invoices outstanding, runway |
+| Voice (Dograh) | calls placed and connected, talk time, outcomes per campaign |
+| Lead generation | leads by source, cost per lead, conversion to contact |
+| OmniRoute | tokens and spend per agent, provider mix, failure rate |
+
+Two consequences worth stating. First, the hands stop being optional extras and
+become a dependency of the management system — an agent asked "what got better
+today?" needs somewhere to read the answer from. Second, **lead generation has no
+hand at all**; it is the one instrument in that table with nothing behind it, and
+without it the funnel starts mid-way.
+
+Reading is enough to begin. A hand that can answer "how many contacts were added
+this week" already supplies an indicator; writing back into these systems is a
+later and much more careful question.
+
+**The six parts, built together, because each is useless without the others:**
+
+1. **Mission and vision**, on the company, injected into every agent's prompt.
+   Alignment is not a slogan — it is the tie-breaker an agent uses when two
+   actions are both defensible. Without it every agent optimises locally.
+2. **Structure** — teams carrying the five fields (accountability, measure,
+   target, decision rights, growth objective), so a team can answer what it is
+   for.
+3. **Benchmark** — what good looks like for each indicator. A number with no
+   target cannot be managed, only reported.
+4. **Indicators** — named, owned, with a unit and a current value. Owned by a
+   team or agent, never unassigned.
+5. **Heartbeat** — the daily cycle carrying the ten elements. Note the name
+   collision: `heartbeat` here already means agent liveness. The management one
+   needs a distinct name (`rhythm`) or the two will be confused in code.
+6. **Scorecard** — current against target across a team's indicators. This is
+   the artefact a manager agent actually reads before deciding.
+
+- ⬜ Build 1–6 as one model, then the tools, then the prompt that uses them.
+  The order matters only in that nothing should ship until an agent can read a
+  scorecard and record an action against an indicator — that round trip is the
+  smallest thing that is genuinely a management system rather than a schema.
+
+### Next — agents that get unstuck instead of reporting stuck
+
+Measured on 2026-08-31, across the whole system prompt:
+
+```
+                        restrictive   investigative
+TOOL_CALL_BEHAVIOR            4            0
+GLOBAL_GUIDELINES            20            3
+OPERATIONAL_GUIDELINES        4            1
+SAFETY_SECTION                2            0
+                             30            4
+```
+
+Thirty prohibitions to four invitations. And of the five behaviours that decide
+whether an agent is useful when something goes wrong, four are absent
+altogether: what to do when a tool fails, diagnose before reporting, propose
+alternatives when blocked, escalate only after trying. Nothing in the prompt
+tells an agent to do anything except stop and say so — so that is what it does.
+
+This is not a model-quality problem. On 2026-08-31 every gpt-5.6 agent had its
+tools stripped by a driver retry and answered "I have no tools", which was
+**correct**. The passivity that remains after that bug is a design property of
+the prompt, not of the model.
+
+- ⬜ **A "when you are blocked" section, carrying real weight.** Try the
+  obvious alternative first; diagnose with the tools you have before concluding
+  anything; say what you tried and what happened; propose the next step rather
+  than ending on the obstacle. "I can't" is only an acceptable last line when it
+  is followed by "here is what I tried and what I suggest instead".
+- ⬜ **Rebalance the ratio.** Every prohibition is there for a reason and none
+  should go, but a prompt that is only prohibitions produces an agent that only
+  refuses. Pair each restriction with the permitted path: not "never install on
+  the host", but "install in the sandbox — here is how".
+- ⬜ **Self-diagnosis before escalation.** An agent that cannot do something
+  should check *why* with the tools it has -- read its own config, check a
+  service's health, read the log -- and report the cause, not the symptom. This
+  is exactly what separated a useful diagnosis from "I have no tools" today.
+- ⬜ **Learn from what worked** (the Hermes idea worth taking). After a task
+  that took several attempts, record what finally worked so the next attempt
+  starts there. Needs the memory-extraction work below; without it every agent
+  solves the same problem from scratch forever.
+
+### Corrected — the agents were right, the driver was wrong
+
+An earlier version of this section claimed agents "refuse tools they hold and
+invent reasons", called it the session's most important finding, and listed
+three examples. **It was wrong, and it was written from a single test.**
+
+Asking the same agent to call `hand_list` — a tool watched working an hour
+earlier — produced an identical refusal. That is not an agent confabulating;
+that is tool calling being broken and the agent reporting it accurately. The
+phrase it used, "not available in the callable tool interface", was exactly
+right and was dismissed three times as a rationalisation.
+
+The cause: OpenAI rejects function tools combined with `reasoning_effort` on
+`/v1/chat/completions`, and nothing here ever set that field — the model applies
+its own default. On the resulting 400 the driver retried **without tools**,
+which is the wrong half to drop: a reasoning model with no tools cannot act, and
+the agent then truthfully says it has none. Every gpt-5.6 agent, every message.
+Fixed by setting `reasoning_effort: "none"` and keeping the tools, checked
+before the retry that strips them.
+
+**The lesson worth keeping:** a known-good case must be tested before concluding
+the witness is unreliable. "The agent is wrong" and "the product is broken" look
+identical from outside, and the cheap way to tell them apart is to ask the agent
+to do something already proven to work. A day went into the wrong one.
+
+- ⬜ **Make that distinction cheap.** Log a claim of missing capability against
+  the tools actually sent, so this is one query rather than a day.
 
 - ⬜ **Tell agents what they hold, plainly.** The prompt lists tool names but
   never says the list is authoritative and current. A line stating that the

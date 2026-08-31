@@ -459,6 +459,44 @@ pub async fn execute_tool(
         "hand_status" => tool_hand_status(input, kernel).await,
         "hand_deactivate" => tool_hand_deactivate(input, kernel).await,
 
+        // Organisation tools.
+        "org_overview" => match kernel {
+            Some(kh) => kh.org_overview().await.map(|v| v.to_string()),
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "team_create" => match kernel {
+            Some(kh) => {
+                kh.team_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["project_id"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "team_add_member" => match kernel {
+            Some(kh) => {
+                kh.team_add_member(
+                    input["team_id"].as_str().unwrap_or(""),
+                    input["agent_id"].as_str().unwrap_or(""),
+                    input["role"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "project_create" => match kernel {
+            Some(kh) => {
+                kh.project_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["description"].as_str().filter(|s| !s.is_empty()),
+                    input["company_id"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+
         // Session tools. Both need to know which agent is calling, so they fail
         // clearly rather than renaming whatever session happens to be handy.
         "session_rename" => match (kernel, caller_agent_id) {
@@ -797,6 +835,68 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["command", "purpose"]
             }),
         },
+        // --- Organisation tools ---
+        //
+        // `OrgStore` could already create companies, projects and teams, add
+        // members and assign work, and none of it was reachable by an agent.
+        // A coordinating agent could spawn workers and message them, but had no
+        // way to say who belongs to what -- so structure lived in the user's
+        // head and every delegation started by re-explaining it.
+        ToolDefinition {
+            name: "org_overview".to_string(),
+            description: "See the organisation: companies, projects, teams and who is in them. \
+                          Read this before organising anything, so you extend the existing \
+                          structure instead of duplicating it."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "team_create".to_string(),
+            description: "Create a team, optionally inside a project. A team is how related \
+                          agents are grouped so work can be given to the group rather than \
+                          to a name you happen to remember."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Team name" },
+                    "project_id": { "type": "string", "description": "Project it belongs to (optional)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "team_add_member".to_string(),
+            description: "Put an agent in a team, with the role it plays there. Use the role \
+                          to say what the agent is accountable for, not just what it is \
+                          called: \"keeps the books\" is useful, \"member\" is not."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "team_id": { "type": "string", "description": "Team id from org_overview" },
+                    "agent_id": { "type": "string", "description": "Agent id from agent_list" },
+                    "role": { "type": "string", "description": "What this agent is accountable for" }
+                },
+                "required": ["team_id", "agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "project_create".to_string(),
+            description: "Create a project — a body of work that teams and conversations can \
+                          be attached to, so related threads stay findable together."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Project name" },
+                    "description": { "type": "string", "description": "What it is for" },
+                    "company_id": { "type": "string", "description": "Owning company (optional)" }
+                },
+                "required": ["name"]
+            }),
+        },
+
         // --- Session tools ---
         //
         // The backing operations existed in `freeco-memory` and stopped at the
@@ -853,7 +953,21 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_spawn".to_string(),
-            description: "Spawn a new agent from a TOML manifest. Returns the new agent's ID and name.".to_string(),
+            description: "Hire a new agent from a TOML manifest. Returns its ID and name.\n\
+                          Check `agent_list` and `org_overview` first: if an agent already \
+                          owns this area, send it work instead. A second agent doing the \
+                          same job splits the knowledge and neither ends up holding it.\n\
+                          Write the manifest as you would a job description. `name` says \
+                          what it is; `description` says what it is accountable for, in \
+                          terms someone else could check. `system_prompt` says how it should \
+                          work and what it must never do -- be concrete about the domain, \
+                          because the general rules are supplied to every agent already.\n\
+                          Give it only the tools its job needs. Broad access is not \
+                          generosity: it widens what a mistake can reach, and an agent with \
+                          sixty tools chooses worse than one with six.\n\
+                          After hiring, put it in a team with `team_add_member` so the rest \
+                          of the organisation can find it."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

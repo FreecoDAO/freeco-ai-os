@@ -156,6 +156,16 @@ struct OaiRequest {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Sent only to switch reasoning off.
+    ///
+    /// Reasoning models apply their own default, and on
+    /// `/v1/chat/completions` that default is incompatible with function
+    /// tools: "Function tools with reasoning_effort are not supported for
+    /// gpt-5.6-luna ... set reasoning_effort to 'none'". Nothing here ever
+    /// asked for reasoning -- the conflict came from a default we never set,
+    /// which is why the field did not exist at all until it had to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OaiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -647,6 +657,9 @@ impl LlmDriver for OpenAIDriver {
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
+            // Left unset: only the 400 retry turns reasoning off, so
+            // models that combine it with tools keep doing so.
+            reasoning_effort: None,
             temperature: if self.needs_reasoning_content(&request.model) {
                 // Kimi with thinking disabled uses fixed 0.6 for multi-turn compatibility.
                 Some(0.6)
@@ -810,6 +823,29 @@ impl LlmDriver for OpenAIDriver {
                         "Model rejects an explicit temperature, retrying with its default"
                     );
                     oai_request.temperature = None;
+                    continue;
+                }
+
+                // Reasoning conflicts with tools on this endpoint — turn
+                // reasoning off, never the tools.
+                //
+                // Checked before the retry below, which "handles" this by
+                // clearing every tool the agent has. That trade is backwards: a
+                // reasoning model without tools cannot act, and the agent then
+                // tells the user it has no tools -- which is exactly what
+                // happened, across every agent on a gpt-5.6 model, and read as
+                // a permissions bug for a day.
+                if !oai_request.tools.is_empty()
+                    && oai_request.reasoning_effort.is_none()
+                    && attempt < max_retries
+                    && status == 400
+                    && body_lower.contains("reasoning_effort")
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Model cannot combine reasoning with tools here — disabling reasoning, keeping tools"
+                    );
+                    oai_request.reasoning_effort = Some("none".to_string());
                     continue;
                 }
 
@@ -1117,6 +1153,9 @@ impl LlmDriver for OpenAIDriver {
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
+            // Left unset: only the 400 retry turns reasoning off, so
+            // models that combine it with tools keep doing so.
+            reasoning_effort: None,
             temperature: if self.needs_reasoning_content(&request.model) {
                 Some(0.6)
             } else if temperature_must_be_one(&request.model) {

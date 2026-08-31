@@ -231,6 +231,39 @@ pub trait KernelHandle: Send + Sync {
         Err("Hands system not available".to_string())
     }
 
+    /// The organisation: companies, projects, teams and their members.
+    async fn org_overview(&self) -> Result<serde_json::Value, String> {
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a team, optionally within a project.
+    async fn team_create(&self, name: &str, project_id: Option<&str>) -> Result<String, String> {
+        let _ = (name, project_id);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Put an agent in a team with a stated accountability.
+    async fn team_add_member(
+        &self,
+        team_id: &str,
+        agent_id: &str,
+        role: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (team_id, agent_id, role);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a project that teams and conversations attach to.
+    async fn project_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        company_id: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (name, description, company_id);
+        Err("Organisation store not available".to_string())
+    }
+
     /// Rename the calling agent's current conversation.
     async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
         let _ = (agent_id, label);
