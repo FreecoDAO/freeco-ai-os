@@ -264,6 +264,12 @@ pub trait KernelHandle: Send + Sync {
         Err("Organisation store not available".to_string())
     }
 
+    /// Health of the installation, including what containers are running and
+    /// whether any are unaccounted for.
+    async fn system_audit(&self) -> Result<serde_json::Value, String> {
+        Err("System audit not available".to_string())
+    }
+
     /// Rename the calling agent's current conversation.
     async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
         let _ = (agent_id, label);

@@ -224,26 +224,42 @@ async fn probe(runtime: &str) -> bool {
     )
 }
 
-/// The container name for a hand instance.
+/// The container name for a hand's service.
 ///
-/// Includes the instance id so two instances of the same hand -- a CRM per
-/// tenant, say -- do not collide on a name.
-pub fn container_name(hand_id: &str, instance_id: &str) -> String {
-    let short: String = instance_id.chars().take(8).collect();
-    format!("freeco-{hand_id}-{short}")
+/// Keyed by hand and tenant, **never by instance**. An instance id is minted
+/// fresh on every daemon boot, so naming containers after it meant a restart
+/// could never recognise the container it had started last time: it created a
+/// new one beside the old, and the service the user had configured was replaced
+/// by an empty one. That is the whole reason "my CRM resets after a reboot"
+/// happened, and no amount of volume fixing addresses it -- a new container
+/// with the right volume still has to be set up again if the old one is still
+/// holding the port.
+///
+/// With a stable name, `start` finds the existing container running and reuses
+/// it. Restarting the daemon becomes a no-op for services, which is what a
+/// service is supposed to be.
+///
+/// Two tenants still get separate containers, because the tenant is in the
+/// name and it is durable in a way the instance is not.
+pub fn container_name(hand_id: &str, tenant: Option<&str>) -> String {
+    match tenant {
+        Some(t) => format!("freeco-{hand_id}-{t}"),
+        None => format!("freeco-{hand_id}"),
+    }
 }
 
 /// Where a stack's compose file and generated `.env` live.
 ///
-/// Per instance, not per hand, so two tenants running the same hand do not
-/// overwrite each other's configuration.
-pub fn stack_dir(hand_id: &str, instance_id: &str) -> std::path::PathBuf {
-    let short: String = instance_id.chars().take(8).collect();
+/// Per hand and tenant, matching the container and volume names. Keyed by
+/// instance it produced a new directory -- and so a newly generated `.env` with
+/// fresh database passwords -- on every restart, which is a second way the same
+/// service came back not itself.
+pub fn stack_dir(hand_id: &str, tenant: Option<&str>) -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".freeco-ai")
         .join("hands")
-        .join(format!("{hand_id}-{short}"))
+        .join(container_name(hand_id, tenant))
 }
 
 /// Resolve one environment value against the key store.
@@ -291,13 +307,34 @@ pub fn resolve_env_value(raw: &str, resolve_secret: &dyn Fn(&str) -> Option<Stri
 
 /// Network name for a stack instance. Per instance, so two tenants' databases
 /// are not on the same network.
-pub fn network_name(hand_id: &str, instance_id: &str) -> String {
-    project_name(hand_id, instance_id)
+pub fn network_name(hand_id: &str, tenant: Option<&str>) -> String {
+    project_name(hand_id, tenant)
+}
+
+/// The durable name of a volume for a hand's data.
+///
+/// Keyed by the **hand and its tenant, never the instance**. An instance is
+/// bookkeeping that is recreated on every daemon boot; the data is not. Keying
+/// volumes by instance meant each restart mounted a fresh empty volume and
+/// silently abandoned the previous one — a user who spent an evening
+/// configuring OmniRoute found it empty the next morning, six times over, with
+/// six orphaned volumes holding six configurations nobody could reach. Nothing
+/// was deleted, which is why it produced no error: the data was simply no
+/// longer attached to anything.
+///
+/// The tenant stays in the name because two tenants must not share a database.
+/// That was the reason instance ids were used originally, and it is satisfied
+/// by the tenant alone, which is durable.
+pub fn volume_name(hand_id: &str, tenant: Option<&str>, declared: &str) -> String {
+    match tenant {
+        Some(t) => format!("freeco-{hand_id}-{t}-{declared}"),
+        None => format!("freeco-{hand_id}-{declared}"),
+    }
 }
 
 /// Container name for one service within a stack.
-pub fn service_container_name(hand_id: &str, instance_id: &str, service: &str) -> String {
-    format!("{}-{service}", project_name(hand_id, instance_id))
+pub fn service_container_name(hand_id: &str, tenant: Option<&str>, service: &str) -> String {
+    format!("{}-{service}", project_name(hand_id, tenant))
 }
 
 /// Order services so nothing starts before what it depends on.
@@ -369,6 +406,7 @@ async fn start_native_stack(
     spec: &HandContainer,
     hand_id: &str,
     instance_id: &str,
+    tenant: Option<&str>,
     resolve_secret: &(impl Fn(&str) -> Option<String> + ?Sized),
 ) -> Result<String, HandError> {
     let rt = runtime().await.ok_or_else(|| {
@@ -378,8 +416,8 @@ async fn start_native_stack(
                 .into(),
         )
     })?;
-    let project = project_name(hand_id, instance_id);
-    let net = network_name(hand_id, instance_id);
+    let project = project_name(hand_id, tenant);
+    let net = network_name(hand_id, tenant);
 
     // Idempotent: an existing network from a previous start is fine.
     let _ = tokio::time::timeout(
@@ -394,7 +432,7 @@ async fn start_native_stack(
 
     for idx in startup_order(&spec.services)? {
         let svc = &spec.services[idx];
-        let name = service_container_name(hand_id, instance_id, &svc.name);
+        let name = service_container_name(hand_id, tenant, &svc.name);
 
         if is_running(&name).await {
             continue;
@@ -416,7 +454,7 @@ async fn start_native_stack(
         }
         for v in &svc.volumes {
             // Namespaced so two instances do not share one database volume.
-            cmd.arg("-v").arg(format!("{project}-{v}"));
+            cmd.arg("-v").arg(volume_name(hand_id, tenant, v));
         }
         for (k, v) in &svc.env {
             let resolved = resolve_env_value(v, &|key| resolve_secret(key));
@@ -487,6 +525,7 @@ async fn start_stack(
     spec: &HandContainer,
     hand_id: &str,
     instance_id: &str,
+    tenant: Option<&str>,
     resolve_secret: impl Fn(&str) -> Option<String>,
 ) -> Result<String, HandError> {
     let rt = runtime().await.ok_or_else(|| {
@@ -497,7 +536,7 @@ async fn start_stack(
         )
     })?;
     let compose = spec.compose.as_ref().expect("caller checked is_stack");
-    let dir = stack_dir(hand_id, instance_id);
+    let dir = stack_dir(hand_id, tenant);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("docker-compose.yml"), compose)?;
 
@@ -517,7 +556,7 @@ async fn start_stack(
         harden_file(&env_path);
     }
 
-    let project = project_name(hand_id, instance_id);
+    let project = project_name(hand_id, tenant);
     let out = tokio::time::timeout(
         Duration::from_secs(900), // first run pulls images; a CRM stack is gigabytes
         tokio::process::Command::new(rt)
@@ -554,10 +593,10 @@ async fn start_stack(
     Ok(project)
 }
 
-/// Compose project name for a hand instance.
-pub fn project_name(hand_id: &str, instance_id: &str) -> String {
-    let short: String = instance_id.chars().take(8).collect();
-    format!("freeco-{hand_id}-{short}")
+/// Project name for a hand's stack. Durable, for the same reason as
+/// `container_name`.
+pub fn project_name(hand_id: &str, tenant: Option<&str>) -> String {
+    container_name(hand_id, tenant)
 }
 
 /// Restrict a generated file to the current user.
@@ -599,16 +638,18 @@ pub async fn start(
     spec: &HandContainer,
     hand_id: &str,
     instance_id: &str,
+    // Scopes the data volumes. Durable, unlike the instance id.
+    tenant: Option<&str>,
     resolve_secret: impl Fn(&str) -> Option<String>,
 ) -> Result<String, HandError> {
     // A stack is a different lifecycle: compose owns the containers, so start,
     // stop and liveness all have to go through it rather than through names we
     // made up.
     if spec.is_native_stack() {
-        return start_native_stack(spec, hand_id, instance_id, &resolve_secret).await;
+        return start_native_stack(spec, hand_id, instance_id, tenant, &resolve_secret).await;
     }
     if spec.is_stack() {
-        return start_stack(spec, hand_id, instance_id, resolve_secret).await;
+        return start_stack(spec, hand_id, instance_id, tenant, resolve_secret).await;
     }
 
     let rt = runtime()
@@ -617,7 +658,9 @@ pub async fn start(
             "no container runtime found. Start Docker Desktop, or start Podman with `podman machine start`".into(),
         ))?;
 
-    let name = container_name(hand_id, instance_id);
+    let name = container_name(hand_id, tenant);
+    // One set of containers per hand. Restoring a hand mints a new instance id,
+    // so without this each daemon restart leaves the previous set running.
     if is_running(&name).await {
         return Ok(name);
     }
@@ -654,7 +697,7 @@ pub async fn start(
             cmd.arg("-v").arg(v);
         } else {
             cmd.arg("-v")
-                .arg(format!("{}-{v}", container_name(hand_id, instance_id)));
+                .arg(volume_name(hand_id, tenant, v));
         }
     }
     for (k, v) in &spec.env {
@@ -720,7 +763,7 @@ pub async fn start(
 pub async fn stop_native_stack(
     spec: &HandContainer,
     hand_id: &str,
-    instance_id: &str,
+    tenant: Option<&str>,
 ) -> Result<(), HandError> {
     let Some(rt) = runtime().await else {
         return Ok(());
@@ -730,7 +773,7 @@ pub async fn stop_native_stack(
     let mut order = startup_order(&spec.services)?;
     order.reverse();
     for idx in order {
-        let name = service_container_name(hand_id, instance_id, &spec.services[idx].name);
+        let name = service_container_name(hand_id, tenant, &spec.services[idx].name);
         let _ = tokio::time::timeout(
             Duration::from_secs(60),
             tokio::process::Command::new(rt).args(["stop", &name]).status(),
@@ -746,7 +789,7 @@ pub async fn stop_native_stack(
             .await;
     }
     let _ = tokio::process::Command::new(rt)
-        .args(["network", "rm", &network_name(hand_id, instance_id)])
+        .args(["network", "rm", &network_name(hand_id, tenant)])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -754,13 +797,13 @@ pub async fn stop_native_stack(
     Ok(())
 }
 
-pub async fn stop(hand_id: &str, instance_id: &str, is_stack: bool) -> Result<(), HandError> {
+pub async fn stop(hand_id: &str, tenant: Option<&str>, is_stack: bool) -> Result<(), HandError> {
     let Some(rt) = runtime().await else {
         return Ok(()); // nothing to stop if no runtime
     };
     if is_stack {
-        let project = project_name(hand_id, instance_id);
-        let dir = stack_dir(hand_id, instance_id);
+        let project = project_name(hand_id, tenant);
+        let dir = stack_dir(hand_id, tenant);
         let _ = tokio::time::timeout(
             Duration::from_secs(180),
             tokio::process::Command::new(rt)
@@ -771,7 +814,7 @@ pub async fn stop(hand_id: &str, instance_id: &str, is_stack: bool) -> Result<()
         .await;
         return Ok(());
     }
-    let name = container_name(hand_id, instance_id);
+    let name = container_name(hand_id, tenant);
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(rt).args(["stop", &name]).status(),
@@ -805,6 +848,10 @@ pub fn service_port(spec: &HandContainer) -> Option<String> {
 async fn wait_healthy(url: &str, budget_secs: u64) -> bool {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        // Redirects are the answer, not a step on the way to it: a service that
+        // sends one is already serving. Following it would test wherever it
+        // points, which for a first-run wizard is a different page entirely.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
@@ -812,10 +859,18 @@ async fn wait_healthy(url: &str, budget_secs: u64) -> bool {
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(r) = client.get(url).send().await {
-            if r.status().is_success() {
-                return true;
-            }
+        // Any HTTP response means something is listening and answering, which
+        // is what this checks. Requiring 2xx failed Akaunting, which redirects
+        // its root to a setup wizard until the first run is complete: the
+        // service was up, answering 302, and reported as never having started
+        // for ten minutes before being rolled back. A 401 or a 404 says the
+        // same thing -- the process is alive and handling requests. Only a
+        // connection failure means it is not.
+        //
+        // `services.rs` had this right and this file disagreed with it; the
+        // rule now matches in both places.
+        if client.get(url).send().await.is_ok() {
+            return true;
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -842,14 +897,25 @@ mod tests {
         }
     }
 
-    /// Two instances of one hand must not collide on a container name, or
-    /// starting a second tenant's CRM would adopt the first tenant's container.
+    /// A restart must reuse the same container, not create a rival.
+    ///
+    /// This test previously asserted the opposite -- that two instances get
+    /// distinct names -- which is exactly what made a service come back empty
+    /// after every reboot: the new instance could not see the container the old
+    /// one had left running, so it built a second one beside it.
     #[test]
-    fn instances_get_distinct_container_names() {
-        let a = container_name("crm", "11111111-aaaa-bbbb-cccc-dddddddddddd");
-        let b = container_name("crm", "22222222-aaaa-bbbb-cccc-dddddddddddd");
-        assert_ne!(a, b);
-        assert!(a.starts_with("freeco-crm-"));
+    fn a_hand_keeps_one_container_across_restarts() {
+        assert_eq!(container_name("crm", None), container_name("crm", None));
+        assert_eq!(container_name("crm", None), "freeco-crm");
+    }
+
+    /// Tenants still get their own, because the tenant is durable.
+    #[test]
+    fn tenants_get_separate_containers() {
+        assert_ne!(
+            container_name("crm", Some("acme")),
+            container_name("crm", Some("globex"))
+        );
     }
 
     #[test]
@@ -961,6 +1027,41 @@ mod tests {
         );
     }
 
+    /// Data must outlive the instance that happened to be running.
+    ///
+    /// Instances are recreated on every daemon boot. Keying volumes by instance
+    /// meant each restart mounted a fresh empty one and abandoned the previous
+    /// -- an evening of configuring OmniRoute was lost six times this way, with
+    /// six orphaned volumes and no error, because nothing was deleted: the data
+    /// was simply no longer attached to anything.
+    #[test]
+    fn volume_names_do_not_change_between_instances() {
+        let a = volume_name("omniroute", None, "data");
+        let b = volume_name("omniroute", None, "data");
+        assert_eq!(a, b, "the same hand must reuse the same volume");
+        assert!(!a.contains('-') || !a.matches('-').count() > 3);
+        assert_eq!(a, "freeco-omniroute-data");
+    }
+
+    /// Two tenants must not share one database. This is the reason instance ids
+    /// were used originally, and the tenant satisfies it while staying durable.
+    #[test]
+    fn tenants_get_separate_volumes() {
+        let acme = volume_name("crm", Some("acme"), "db-data");
+        let globex = volume_name("crm", Some("globex"), "db-data");
+        assert_ne!(acme, globex);
+        assert_eq!(acme, "freeco-crm-acme-db-data");
+    }
+
+    /// Different declared volumes within one hand stay distinct.
+    #[test]
+    fn declared_volumes_stay_distinct() {
+        assert_ne!(
+            volume_name("crm", None, "db-data"),
+            volume_name("crm", None, "server-local-data")
+        );
+    }
+
     /// A stack takes a different path through start/stop entirely, so the
     /// distinction has to be visible from the definition alone.
     #[test]
@@ -975,20 +1076,19 @@ mod tests {
     /// tear down each other's containers -- and for a CRM or a ledger that
     /// means someone else's database going away.
     #[test]
-    fn stack_projects_are_per_instance() {
-        let a = project_name("crm", "11111111-aaaa-bbbb-cccc-dddddddddddd");
-        let b = project_name("crm", "22222222-aaaa-bbbb-cccc-dddddddddddd");
-        assert_ne!(a, b);
-        assert!(a.starts_with("freeco-crm-"));
+    fn stack_projects_are_per_tenant_not_per_instance() {
+        assert_ne!(project_name("crm", Some("acme")), project_name("crm", Some("globex")));
+        // And stable for one tenant, so a restart adopts the running stack.
+        assert_eq!(project_name("crm", Some("acme")), project_name("crm", Some("acme")));
     }
 
-    /// The compose file and its generated `.env` must not be shared either:
-    /// the `.env` holds that instance's database password.
+    /// The compose file and its generated `.env` follow the same key. Keyed by
+    /// instance, every restart wrote a new `.env` with fresh database
+    /// passwords, so the stack came back unable to open its own database.
     #[test]
-    fn stack_dirs_are_per_instance() {
-        let a = stack_dir("crm", "11111111-aaaa-bbbb-cccc-dddddddddddd");
-        let b = stack_dir("crm", "22222222-aaaa-bbbb-cccc-dddddddddddd");
-        assert_ne!(a, b);
+    fn stack_dirs_are_stable_per_tenant() {
+        assert_eq!(stack_dir("crm", Some("acme")), stack_dir("crm", Some("acme")));
+        assert_ne!(stack_dir("crm", Some("acme")), stack_dir("crm", Some("globex")));
     }
 
     /// A tenant must not see another tenant's services.
@@ -1019,15 +1119,4 @@ mod tests {
         assert!(local.belongs_to(Some("acme")));
     }
 
-    /// Two tenants running the same hand get separate containers.
-    #[test]
-    fn same_hand_different_tenants_get_separate_containers() {
-        use crate::HandInstance;
-        use std::collections::HashMap;
-        let a = HandInstance::new("crm", "agent", HashMap::new(), None).for_tenant("acme");
-        let b = HandInstance::new("crm", "agent", HashMap::new(), None).for_tenant("globex");
-        let na = container_name(&a.hand_id, &a.instance_id.to_string());
-        let nb = container_name(&b.hand_id, &b.instance_id.to_string());
-        assert_ne!(na, nb, "one tenant would adopt the other's container");
-    }
 }

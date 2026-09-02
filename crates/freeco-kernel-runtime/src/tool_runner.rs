@@ -497,6 +497,14 @@ pub async fn execute_tool(
             None => Err("Organisation store is not available".to_string()),
         },
 
+        "system_audit" => match kernel {
+            Some(kh) => match kh.system_audit().await {
+                Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+                Err(e) => Err(e),
+            },
+            None => Err("System audit is not available to this agent".to_string()),
+        },
+
         // Session tools. Both need to know which agent is calling, so they fail
         // clearly rather than renaming whatever session happens to be handy.
         "session_rename" => match (kernel, caller_agent_id) {
@@ -895,6 +903,22 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 },
                 "required": ["name"]
             }),
+        },
+
+        ToolDefinition {
+            name: "system_audit".to_string(),
+            description: "Check the health of this installation and what is running on it. \
+                          Returns the container runtime state, every running container, and \
+                          three findings: containers the kernel did not start (`unexpected`), \
+                          services recorded active but not running (`missing`), and a one-line \
+                          `verdict`.\n\
+                          `unexpected` is the one to act on. Containers accumulate there when \
+                          something starts them outside the hand system, and it is where an \
+                          unwanted install would sit, because nothing else looks. Report what \
+                          you find rather than removing anything: this cannot tell a leftover \
+                          from something the user started deliberately."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
 
         // --- Session tools ---

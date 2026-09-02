@@ -4001,7 +4001,104 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "agent_count": state.kernel.registry.count(),
         "database": if db_ok { "connected" } else { "error" },
         "config_warnings": config_warnings,
+        // What is actually running, and whether anything is running that
+        // should not be. Twenty-two containers accumulated here unnoticed for
+        // four services, because nothing ever compared what the runtime holds
+        // against what the kernel believes it started.
+        "containers": container_audit(&state).await,
     }))
+}
+
+/// Compare the containers that exist against the ones the kernel believes in.
+///
+/// Three answers, and the interesting one is the third:
+///
+/// - `expected`: a running container matching an active hand instance.
+/// - `missing`: an instance the kernel thinks is Active with nothing running --
+///   the "reports Active while serving nothing" failure, arriving by way of a
+///   stopped VM or a crashed container.
+/// - `unexpected`: a `freeco-` container the kernel has no record of. These are
+///   what accumulate silently: each restart used to mint a new instance and
+///   leave the previous containers running, and nothing counted them. They are
+///   also where an unwanted install would hide, since nothing else looks.
+///
+/// Deliberately read-only. Reporting a surprise is safe; removing something the
+/// user started themselves is not, and this cannot tell the difference.
+async fn container_audit(state: &AppState) -> serde_json::Value {
+    let Some(rt) = freeco_hands::container::runtime().await else {
+        return serde_json::json!({
+            "runtime": null,
+            "detail": "no container runtime available",
+        });
+    };
+
+    let out = tokio::process::Command::new(rt)
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"])
+        .output()
+        .await;
+    let Ok(out) = out else {
+        return serde_json::json!({ "runtime": rt, "detail": "could not list containers" });
+    };
+    let listing = String::from_utf8_lossy(&out.stdout);
+
+    // Every container name the kernel can account for.
+    let mut known: Vec<String> = Vec::new();
+    let mut missing: Vec<serde_json::Value> = Vec::new();
+    for inst in state.kernel.hand_registry.list_instances() {
+        let Some(def) = state.kernel.hand_registry.get_definition(&inst.hand_id) else {
+            continue;
+        };
+        let Some(spec) = def.container.as_ref() else { continue };
+        let tenant = inst.tenant_id.clone();
+        let names: Vec<String> = if spec.is_native_stack() {
+            spec.services
+                .iter()
+                .map(|s| {
+                    freeco_hands::container::service_container_name(&inst.hand_id, tenant.as_deref(), &s.name)
+                })
+                .collect()
+        } else {
+            vec![freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref())]
+        };
+        for n in &names {
+            if !listing.lines().any(|l| l.split('\t').next() == Some(n.as_str())) {
+                missing.push(serde_json::json!({ "hand": inst.hand_id, "container": n }));
+            }
+        }
+        known.extend(names);
+    }
+
+    let mut running = Vec::new();
+    let mut unexpected = Vec::new();
+    for line in listing.lines() {
+        let mut f = line.split('\t');
+        let (Some(name), image, status) = (f.next(), f.next().unwrap_or(""), f.next().unwrap_or(""))
+        else {
+            continue;
+        };
+        let entry = serde_json::json!({ "name": name, "image": image, "status": status });
+        if name.starts_with("freeco-") && !known.iter().any(|k| k == name) {
+            unexpected.push(entry.clone());
+        }
+        running.push(entry);
+    }
+
+    serde_json::json!({
+        "runtime": rt,
+        "running": running.len(),
+        "expected": known.len(),
+        "unexpected": unexpected,
+        "missing": missing,
+        // One line a person or an agent can act on without reading the arrays.
+        "verdict": if !unexpected.is_empty() {
+            format!("{} container(s) running that the kernel did not start", unexpected.len())
+        } else if !missing.is_empty() {
+            format!("{} service(s) recorded active but not running", missing.len())
+        } else {
+            "every running container is accounted for".to_string()
+        },
+        "containers": running,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5358,6 +5455,17 @@ pub async fn activate_hand(
             {
                 Ok(name) => name,
                 Err(e) => {
+                    // Take the containers down too, not just the record.
+                    //
+                    // Rolling back only the instance leaves whatever did start
+                    // running with nothing tracking it -- which is precisely how
+                    // orphans accumulate, and a failed activation is the most
+                    // likely moment for it. Accounting failed its health check
+                    // and left a database and an application container behind.
+                    let _ = state
+                        .kernel
+                        .stop_hand_service(&hand_id, &instance.instance_id)
+                        .await;
                     let _ = state.kernel.deactivate_hand(instance.instance_id);
                     return (
                         StatusCode::BAD_GATEWAY,

@@ -1064,14 +1064,14 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                         .and_then(|d| d.container.clone());
                     let Some(spec) = is_service else { continue };
 
-                    let iid = inst.instance_id.to_string();
+                    let tenant = inst.tenant_id.clone();
                     let alive = if spec.is_native_stack() {
                         // A stack is up only if every one of its containers is.
                         let mut all = true;
                         for svc in &spec.services {
                             let name = freeco_hands::container::service_container_name(
                                 &inst.hand_id,
-                                &iid,
+                                tenant.as_deref(),
                                 &svc.name,
                             );
                             if !freeco_hands::container::is_running(&name).await {
@@ -1081,7 +1081,7 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                         }
                         all
                     } else {
-                        let name = freeco_hands::container::container_name(&inst.hand_id, &iid);
+                        let name = freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref());
                         freeco_hands::container::is_running(&name).await
                     };
                     if alive {

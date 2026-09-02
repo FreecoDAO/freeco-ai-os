@@ -4040,9 +4040,19 @@ impl FreecoKernel {
         // `secret:NAME` refs resolve from the process environment, which the
         // daemon populates from the secrets file at boot -- the same path the
         // provider `api_key_env` fields already use.
-        let name = freeco_hands::container::start(&spec, hand_id, &instance_id.to_string(), |k| {
-            std::env::var(k).ok()
-        })
+        // The tenant scopes the data volumes and is durable; the instance id
+        // is not, and using it meant every restart mounted an empty volume.
+        let tenant = self
+            .hand_registry
+            .get_instance(*instance_id)
+            .and_then(|i| i.tenant_id);
+        let name = freeco_hands::container::start(
+            &spec,
+            hand_id,
+            &instance_id.to_string(),
+            tenant.as_deref(),
+            |k| std::env::var(k).ok(),
+        )
         .await
         .map_err(|e| e.to_string())?;
         Ok(Some(name))
@@ -4128,15 +4138,23 @@ impl FreecoKernel {
             }
         };
         if spec.is_native_stack() {
+            let tenant = self
+                .hand_registry
+                .get_instance(*instance_id)
+                .and_then(|i| i.tenant_id);
             return freeco_hands::container::stop_native_stack(
                 &spec,
                 hand_id,
-                &instance_id.to_string(),
+                tenant.as_deref(),
             )
             .await
             .map_err(|e| e.to_string());
         }
-        freeco_hands::container::stop(hand_id, &instance_id.to_string(), spec.is_stack())
+        let tenant = self
+            .hand_registry
+            .get_instance(*instance_id)
+            .and_then(|i| i.tenant_id);
+        freeco_hands::container::stop(hand_id, tenant.as_deref(), spec.is_stack())
             .await
             .map_err(|e| e.to_string())
     }
@@ -8147,10 +8165,8 @@ impl KernelHandle for FreecoKernel {
         // is running. Those disagree exactly when it matters -- the container
         // exited, or something outside the hand system started or stopped it.
         let serving = if is_service {
-            let name = freeco_hands::container::container_name(
-                hand_id,
-                &instance.instance_id.to_string(),
-            );
+            let tenant = instance.tenant_id.clone();
+            let name = freeco_hands::container::container_name(hand_id, tenant.as_deref());
             Some(freeco_hands::container::is_running(&name).await)
         } else {
             None
@@ -8239,6 +8255,81 @@ impl KernelHandle for FreecoKernel {
             "Created project \"{}\" (id {})",
             project.name, project.id
         ))
+    }
+
+    async fn system_audit(&self) -> Result<serde_json::Value, String> {
+        let Some(rt) = freeco_hands::container::runtime().await else {
+            return Ok(serde_json::json!({
+                "runtime": null,
+                "verdict": "no container runtime is available; service hands cannot run",
+            }));
+        };
+
+        let out = tokio::process::Command::new(rt)
+            .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"])
+            .output()
+            .await
+            .map_err(|e| format!("could not list containers: {e}"))?;
+        let listing = String::from_utf8_lossy(&out.stdout);
+
+        // Names the kernel can account for, and instances with nothing running.
+        let mut known: Vec<String> = Vec::new();
+        let mut missing: Vec<serde_json::Value> = Vec::new();
+        for inst in self.hand_registry.list_instances() {
+            let Some(def) = self.hand_registry.get_definition(&inst.hand_id) else {
+                continue;
+            };
+            let Some(spec) = def.container.as_ref() else { continue };
+            let tenant = inst.tenant_id.clone();
+            let names: Vec<String> = if spec.is_native_stack() {
+                spec.services
+                    .iter()
+                    .map(|s| {
+                        freeco_hands::container::service_container_name(&inst.hand_id, tenant.as_deref(), &s.name)
+                    })
+                    .collect()
+            } else {
+                vec![freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref())]
+            };
+            for n in &names {
+                if !listing.lines().any(|l| l.split('\t').next() == Some(n.as_str())) {
+                    missing.push(serde_json::json!({ "hand": inst.hand_id, "container": n }));
+                }
+            }
+            known.extend(names);
+        }
+
+        let mut running = Vec::new();
+        let mut unexpected = Vec::new();
+        for line in listing.lines() {
+            let mut f = line.split('\t');
+            let (Some(name), image, status) =
+                (f.next(), f.next().unwrap_or(""), f.next().unwrap_or(""))
+            else {
+                continue;
+            };
+            let entry = serde_json::json!({ "name": name, "image": image, "status": status });
+            if name.starts_with("freeco-") && !known.iter().any(|k| k == name) {
+                unexpected.push(entry.clone());
+            }
+            running.push(entry);
+        }
+
+        Ok(serde_json::json!({
+            "runtime": rt,
+            "running": running.len(),
+            "expected": known.len(),
+            "unexpected": unexpected,
+            "missing": missing,
+            "verdict": if !unexpected.is_empty() {
+                format!("{} container(s) running that the kernel did not start", unexpected.len())
+            } else if !missing.is_empty() {
+                format!("{} service(s) recorded active but not running", missing.len())
+            } else {
+                "every running container is accounted for".to_string()
+            },
+            "containers": running,
+        }))
     }
 
     async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
