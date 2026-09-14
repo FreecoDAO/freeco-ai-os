@@ -303,7 +303,13 @@ function chatPage() {
       var self = this;
       this.modelSwitching = true;
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
-      FreecoAPI.put('/api/agents/' + this.currentAgent.id + '/model', { model: model.id }).then(function(resp) {
+      // Send the provider too. The server resolves a bare id through the whole
+      // catalog and prefers Custom-tier entries, so `gpt-5.6-sol` could land on
+      // the OpenRouter duplicate `openai/gpt-5.6-sol` and then look for
+      // OPENROUTER_API_KEY -- the agent reporting a local model needing no key.
+      // set_agent_model already takes an explicit provider for exactly this
+      // reason (#833); the picker had it in hand and dropped it.
+      FreecoAPI.put('/api/agents/' + this.currentAgent.id + '/model', { model: model.id, provider: model.provider }).then(function(resp) {
         // Use server-resolved model/provider to stay in sync (fixes #387/#466)
         self.currentAgent.model_name = (resp && resp.model) || model.id;
         self.currentAgent.model_provider = (resp && resp.provider) || model.provider;

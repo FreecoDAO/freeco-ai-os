@@ -199,6 +199,73 @@ pub async fn is_image_present(runtime: &str, image: &str) -> bool {
     }
 }
 
+/// Resolve a mutable image tag to the immutable digest it currently points at.
+///
+/// Reusable sandboxes require a digest, because a tag can be repointed under a
+/// long-lived container and nothing would notice. Requiring the *user* to write
+/// the digest is what made that rule unusable in practice: the configured image
+/// was a tag, so `docker_exec` refused every call on every tier, and agents
+/// could not run a command, install a tool, or touch a container at all.
+///
+/// Resolving it here keeps the guarantee — the container still runs a specific,
+/// content-addressed image — while removing the manual step. The digest is read
+/// at the moment of use, so repointing the tag takes effect on the next sandbox
+/// rather than silently mid-life.
+///
+/// Returns `None` when the image is absent or the runtime reports no digest, in
+/// which case the caller must refuse rather than fall back to the tag.
+pub async fn resolve_image_digest(runtime: &str, image: &str) -> Option<String> {
+    if is_immutable_image_reference(image) {
+        return Some(image.to_string());
+    }
+    // `RepoDigests` first -- that is the manifest digest the registry and the
+    // runtime both address the image by.
+    //
+    // Not `.Id`: that is the *config blob* digest, a different hash entirely.
+    // Pasting it after `repo@sha256:` produces a reference that looks right and
+    // resolves to nothing, so the sandbox reported the image as "not downloaded
+    // yet" for an image sitting in local storage. On this machine `.Id` is
+    // 73169df1... while the real repo digest is 3dc62ec6... -- no relation.
+    let inspect = |format: &str| {
+        let mut c = crate::quiet_command::quiet_async(runtime);
+        c.arg("image")
+            .arg("inspect")
+            .arg(image)
+            .arg("--format")
+            .arg(format)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        c
+    };
+
+    if let Ok(out) = inspect("{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}")
+        .output()
+        .await
+    {
+        if out.status.success() {
+            let reference = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if is_immutable_image_reference(&reference) {
+                return Some(reference);
+            }
+        }
+    }
+
+    // An image built locally and never pushed has no repo digest at all. Its
+    // id is still content-addressed and still immutable, and the runtime
+    // accepts it as a reference, so it satisfies the same guarantee -- the
+    // container cannot silently become a different image.
+    let out = inspect("{{.Id}}").output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bare = id.strip_prefix("sha256:").unwrap_or(&id);
+    if bare.len() != 64 || !bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("sha256:{bare}"))
+}
+
 /// Create and start a sandbox container for an agent.
 pub async fn create_sandbox(
     config: &DockerSandboxConfig,
@@ -652,10 +719,20 @@ fn sandbox_container_name(
 /// Mutable tags are acceptable for short-lived local sandboxes, but a reused
 /// container or writable workspace must be reproducible and auditable.
 pub fn is_immutable_image_reference(image: &str) -> bool {
-    let Some((_, digest)) = image.rsplit_once("@sha256:") else {
-        return false;
-    };
-    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    // `repo@sha256:<64 hex>` -- a registry image addressed by manifest digest.
+    if let Some((_, digest)) = image.rsplit_once("@sha256:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    // `sha256:<64 hex>` -- an image addressed by its own id, which is what a
+    // locally built image that was never pushed has instead of a repo digest.
+    // It is content-addressed in exactly the same sense: the reference names
+    // one specific image and cannot be repointed at another. Rejecting it
+    // meant a locally built sandbox could never satisfy the rule, so
+    // `docker_exec` refused every call on this machine.
+    if let Some(digest) = image.strip_prefix("sha256:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1155,21 @@ mod tests {
         assert!(!is_immutable_image_reference("python:3.12-slim"));
         assert!(!is_immutable_image_reference(
             "registry.example/freeco@sha256:not-a-digest"
+        ));
+    }
+
+    /// A locally built image has no repo digest, only its own id. That is
+    /// content-addressed too, and rejecting it meant `docker_exec` refused
+    /// every call on a machine whose sandbox image was built rather than
+    /// pulled.
+    #[test]
+    fn bare_image_id_counts_as_immutable() {
+        assert!(is_immutable_image_reference(
+            "sha256:73169df13d621e9be57cb0064ee40e5cf7d0b81005e758a50386fa87e8ab4d0a"
+        ));
+        assert!(!is_immutable_image_reference("sha256:short"));
+        assert!(!is_immutable_image_reference(
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         ));
     }
 

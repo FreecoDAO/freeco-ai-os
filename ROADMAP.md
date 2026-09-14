@@ -713,6 +713,57 @@ on Windows and takes every call that probes it down with it.
   and no dashboard tab. Nothing about this is reachable by a user. Building the
   schema first was reasonable; reporting it as a delivered feature was not.
 
+- ⚠️ **Three crates nothing links.** `freeco-learning` (569 lines, a replay /
+  scoring / promotion self-improvement loop), `freeco-runtime` (263) and
+  `freeco-budget-engine` (428, with tiers, a ledger and an enforcer) have no
+  dependents and are not binaries. They compile on every build and are reachable
+  from nothing. `agent-core/src/learning.rs` documents the self-improvement loop
+  in a comment, which reads as shipped. Decide per crate: adopt or remove.
+- ⚠️ **A complete OAuth PKCE flow, wired to nothing.**
+  `freeco-extensions/src/oauth.rs:128` — `run_pkce_flow()` with zeroizing token
+  accessors beside it. The only OAuth actually reachable is Copilot's device
+  flow. Social login is listed below as unbuilt; the hard part of it is already
+  written. 35 other public functions have no caller anywhere either.
+
+## Debt found by the 2026-09-12 scan — scheduled, not done
+
+Full ledger: eighteen findings over 172,694 lines. Fixed in this cycle:
+findings 1 (global spend cap unenforced) and 12 (stale CLAUDE.md figures).
+The rest, in priority order, with nothing here described as done:
+
+- **02 — `env::set_var` in live HTTP handlers.** `routes.rs:3154` and `:3238`,
+  both `unsafe`, both justified with "SAFETY: single-threaded config operation"
+  on axum handlers running on a multi-threaded Tokio runtime. `setenv` is not
+  thread-safe; a concurrent `getenv` anywhere — including libc's own during DNS
+  or timezone lookup — can read freed memory. Fix is an `AppState` secret
+  overlay consulted before `std::env::var`, then both `unsafe` blocks go. Two
+  days, and deliberately not bundled with unrelated work: a half-migrated
+  overlay is worse than the current state, because readers would disagree about
+  where the truth is.
+- **04 — 216 API handlers, test ratio 0.02.** `server.rs` has 214 route
+  registrations and zero tests. The eight-step manual checklist in CLAUDE.md
+  exists because it is genuinely needed, and it runs only when someone
+  remembers. An `axum_test` harness over the 30 handlers the dashboard calls on
+  load turns it into a CI check.
+- **03 — MSRV 1.75 declared, never verified.** Nothing pins or tests it, and
+  `unsafe { env::set_var }` needs 1.82, so the published floor appears wrong.
+- **05 — pull requests build Linux only.** Windows is the primary development
+  platform here and regressions in it are found after merge.
+- **06 — two reqwest and two tungstenite stacks linked.**
+  `freeco-kernel-runtime` pins `tokio-tungstenite = "0.24"` literally instead of
+  `workspace = true`, so it inherits default features in a tree that is
+  deliberately rustls-only.
+- **07 — vendored JS with no version or integrity record.** Five minified
+  libraries ship in the product and execute in the dashboard; nothing records
+  which versions they are and `cargo audit` does not cover them.
+- **15 — 24,159 frontend lines with no lint, test or build step.**
+- **14, 13, 16 — structural.** 48 channel adapters repeating one lifecycle by
+  hand; a 4,986-line `config.rs` in the crate 14 others depend on; `routes.rs`
+  and `kernel.rs` absorbing 276 commits a year between them. All are carve jobs
+  to attempt only after finding 04's harness exists.
+- **17 — `freeco-cli` untested (18,109 lines).** Deferred on purpose while the
+  interactive CLI is being rewritten.
+
 ## Known limits that shape the product
 
 - **OpenRouter's free tier is capped at roughly 50 requests per day** without

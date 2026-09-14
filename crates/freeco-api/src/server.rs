@@ -616,7 +616,8 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams",
-            axum::routing::post(crate::org_routes::create_team),
+            axum::routing::get(crate::org_routes::list_teams)
+                .post(crate::org_routes::create_team),
         )
         .route(
             "/api/org/projects/{id}/sessions",

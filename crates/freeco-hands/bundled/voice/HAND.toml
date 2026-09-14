@@ -69,12 +69,22 @@ depends_on = ["postgres", "redis", "minio"]
 ports = ["8000:8000"]
 # Upstream checks this with Python's urllib rather than curl, because the api
 # image ships no curl.
-health_cmd = ["python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+# The api serves under `API_PREFIX = "/api/v1"`; bare `/health` has never
+# existed and returns 404, which `urlopen` raises on -- so this check could only
+# ever fail, and the hand would report a working service as never ready.
+health_cmd = ["python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
 
 [container.services.env]
 # OSS_JWT_SECRET is required -- the api refuses to start without it.
 OSS_JWT_SECRET = "secret:VOICE_JWT_SECRET"
-DATABASE_URL = "postgresql://postgres:${VOICE_DB_PASSWORD}@postgres:5432/postgres"
+# The dialect has to be named. The api opens this with SQLAlchemy's
+# `create_async_engine`, and a bare `postgresql://` resolves to psycopg2 -- the
+# synchronous driver, which this image does not ship. The container then died
+# on `ModuleNotFoundError: No module named 'psycopg2'` at startup and was
+# restarted, 684 times, which read as "the voice hand does not work" rather
+# than as one wrong URL scheme. asyncpg 0.30.0 is installed and is what
+# `create_async_engine` actually wants.
+DATABASE_URL = "postgresql+asyncpg://postgres:${VOICE_DB_PASSWORD}@postgres:5432/postgres"
 REDIS_URL = "redis://:${VOICE_REDIS_PASSWORD}@redis:6379"
 AWS_ACCESS_KEY_ID = "dograh"
 AWS_SECRET_ACCESS_KEY = "${VOICE_MINIO_PASSWORD}"

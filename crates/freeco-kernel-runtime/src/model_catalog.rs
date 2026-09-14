@@ -4,7 +4,7 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use freeco_types::model_catalog::{
-    AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL,
+    AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL, NOVITA_BASE_URL,
     AZURE_OPENAI_BASE_URL, BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
     DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
     HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
@@ -22,6 +22,17 @@ pub struct ModelCatalog {
     models: Vec<ModelCatalogEntry>,
     aliases: HashMap<String, String>,
     providers: Vec<ProviderInfo>,
+    /// Model ids each provider actually serves for *this* key, keyed by
+    /// provider id, values lowercased.
+    ///
+    /// A configured key does not mean access to every model the provider
+    /// publishes. An OpenAI project can be entitled to one model out of the
+    /// 129 in this catalog, and offering the other 128 means the user picks a
+    /// model, gets `Project does not have access`, and sees an agent that
+    /// answers nothing. A provider absent from this map has never been probed,
+    /// and every model it lists stays offered — hiding a model that works is
+    /// worse than showing one that might not.
+    served: HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl ModelCatalog {
@@ -48,6 +59,7 @@ impl ModelCatalog {
             models,
             aliases,
             providers,
+            served: HashMap::new(),
         }
     }
 
@@ -497,6 +509,89 @@ impl ModelCatalog {
         }
     }
 
+    /// Record the exact set of model ids a provider serves for the current key.
+    ///
+    /// Called after listing a provider's `/v1/models`. Pass every id the
+    /// provider returned, including addressing variants — the caller's display
+    /// filtering must not narrow entitlement, or a model the user can really
+    /// use disappears from the picker.
+    pub fn set_served<I: IntoIterator<Item = String>>(&mut self, provider: &str, ids: I) {
+        let set: std::collections::HashSet<String> =
+            ids.into_iter().map(|s| s.to_lowercase()).collect();
+        // An empty answer is not evidence of no entitlement — it is far more
+        // likely a shape we failed to parse. Recording it would empty the
+        // picker for that provider, so drop it and stay in the "never probed"
+        // state instead.
+        if set.is_empty() {
+            return;
+        }
+        self.served.insert(provider.to_lowercase(), set);
+    }
+
+    /// Whether `model_id` is known to be served by `provider` for this key.
+    ///
+    /// `None` means the provider has never been probed, so the caller must
+    /// treat the model as usable rather than hide it.
+    pub fn is_served(&self, provider: &str, model_id: &str) -> Option<bool> {
+        let provider_key = provider.to_lowercase();
+        let set = self.served.get(&provider_key)?;
+        let id = model_id.to_lowercase();
+        if set.contains(&id) {
+            return Some(true);
+        }
+        // The catalog qualifies some ids with our own provider prefix
+        // (`openrouter/openai/gpt-4o`) while the provider answers to the bare
+        // vendor form (`openai/gpt-4o`). Compare both ways round so a working
+        // model is never hidden over a naming convention.
+        let unprefixed = id.strip_prefix(&format!("{provider_key}/")).map(str::to_string);
+        if let Some(u) = unprefixed {
+            if set.contains(&u) {
+                return Some(true);
+            }
+        }
+        if set.contains(&format!("{provider_key}/{id}")) {
+            return Some(true);
+        }
+        Some(false)
+    }
+
+    /// Providers that have been probed, with how many models each serves.
+    pub fn served_summary(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = self
+            .served
+            .iter()
+            .map(|(p, s)| (p.clone(), s.len()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Load recorded entitlement sets from a JSON file.
+    pub fn load_served(&mut self, path: &std::path::Path) {
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(map) = serde_json::from_str::<HashMap<String, Vec<String>>>(&data) else {
+            return;
+        };
+        for (provider, ids) in map {
+            self.set_served(&provider, ids);
+        }
+    }
+
+    /// Persist recorded entitlement sets so the picker is honest before the
+    /// first refresh of the next run, not after it.
+    pub fn save_served(&self, path: &std::path::Path) -> Result<(), String> {
+        let map: HashMap<&String, Vec<&String>> = self
+            .served
+            .iter()
+            .map(|(p, s)| (p, s.iter().collect()))
+            .collect();
+        let json = serde_json::to_string_pretty(&map)
+            .map_err(|e| format!("Failed to serialize served models: {e}"))?;
+        std::fs::write(path, json).map_err(|e| format!("Failed to write served models file: {e}"))
+    }
+
     /// Save all custom-tier models to a JSON file.
     pub fn save_custom_models(&self, path: &std::path::Path) -> Result<(), String> {
         let custom: Vec<&ModelCatalogEntry> = self
@@ -820,6 +915,23 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             display_name: "NVIDIA NIM".into(),
             api_key_env: "NVIDIA_API_KEY".into(),
             base_url: NVIDIA_NIM_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
+        // ── Novita ───────────────────────────────────────────────────
+        //
+        // The driver has supported novita all along (base URL and
+        // NOVITA_API_KEY in `drivers/mod.rs`), and the catalog did not know it
+        // existed -- so it never appeared in the provider list, had no models,
+        // and could not be picked, while `config.toml` already named it as the
+        // complex-model provider. Supported by the transport and invisible to
+        // the chooser is the same as unsupported.
+        ProviderInfo {
+            id: "novita".into(),
+            display_name: "Novita AI".into(),
+            api_key_env: "NOVITA_API_KEY".into(),
+            base_url: NOVITA_BASE_URL.into(),
             key_required: true,
             auth_status: AuthStatus::Missing,
             model_count: 0,
@@ -2637,6 +2749,54 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
         // Ultra's context is NVIDIA's published 1M for this endpoint. The
         // OpenRouter resale of the same model advertises 512K, so the two
         // disagree; this entry describes the NVIDIA endpoint it points at.
+        // ── Novita (GLM) ──────────────────────────────────────────────
+        //
+        // Ids are the ones novita itself answers to, confirmed against its
+        // /models endpoint. `/api/models/refresh` discovers the other ~110,
+        // but the ones actually in use are listed here so they work on a fresh
+        // install before anyone presses Refresh.
+        ModelCatalogEntry {
+            id: "zai-org/glm-5.3".into(),
+            display_name: "GLM 5.3 (Novita)".into(),
+            provider: "novita".into(),
+            tier: ModelTier::Frontier,
+            context_window: 200_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["glm-5.3".into()],
+        },
+        ModelCatalogEntry {
+            id: "zai-org/glm-5.3-flash".into(),
+            display_name: "GLM 5.3 Flash (Novita)".into(),
+            provider: "novita".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["glm-5.3-flash".into()],
+        },
+        ModelCatalogEntry {
+            id: "zai-org/glm-5.2".into(),
+            display_name: "GLM 5.2 (Novita)".into(),
+            provider: "novita".into(),
+            tier: ModelTier::Frontier,
+            context_window: 200_000,
+            max_output_tokens: 32_768,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["glm-5.2".into()],
+        },
         ModelCatalogEntry {
             id: "nvidia/nemotron-3-ultra-550b-a55b".into(),
             display_name: "Nemotron 3 Ultra 550B (free)".into(),
@@ -5158,5 +5318,69 @@ mod tests {
         } else {
             std::env::remove_var("OLLAMA_HOST");
         }
+    }
+
+    /// Every provider the drivers claim to support must exist in the catalog.
+    ///
+    /// `known_providers()` is what the transport layer says it can talk to;
+    /// the catalog is what the user and the model picker can see. When they
+    /// disagree, the provider is supported and invisible at the same time --
+    /// which is what happened to novita: the driver had its base URL and
+    /// `NOVITA_API_KEY`, `config.toml` already named it as the complex-model
+    /// provider, and it appeared in no provider list and had no models, so it
+    /// could not be chosen. A key, a provider and models must line up
+    /// everywhere or the capability does not exist in practice.
+    #[test]
+    fn every_supported_provider_is_in_the_catalog() {
+        let catalog = ModelCatalog::new();
+        let missing: Vec<&str> = crate::drivers::known_providers()
+            .iter()
+            .copied()
+            .filter(|id| catalog.get_provider(id).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "drivers support these providers but the catalog does not list them,              so they cannot be selected: {missing:?}"
+        );
+    }
+
+    /// A configured key is not access to every model the provider publishes.
+    /// An OpenAI project entitled to one model was still offered all 129, so
+    /// every other pick returned `Project does not have access`.
+    #[test]
+    fn unserved_models_are_reported_unavailable() {
+        let mut c = ModelCatalog::new();
+        c.set_served("openai", vec!["gpt-5.6-luna".to_string()]);
+        assert_eq!(c.is_served("openai", "gpt-5.6-luna"), Some(true));
+        assert_eq!(c.is_served("openai", "gpt-5.6-terra"), Some(false));
+    }
+
+    /// A provider nobody probed must keep every model offered. Hiding a model
+    /// that works is worse than showing one that might not.
+    #[test]
+    fn unprobed_provider_hides_nothing() {
+        let c = ModelCatalog::new();
+        assert_eq!(c.is_served("groq", "llama-3.3-70b-versatile"), None);
+    }
+
+    /// The catalog qualifies OpenRouter ids with our own prefix while
+    /// OpenRouter answers to the bare vendor form. Both must match, or 93
+    /// working models vanish from the picker over a naming convention.
+    #[test]
+    fn our_provider_prefix_still_matches_entitlement() {
+        let mut c = ModelCatalog::new();
+        c.set_served("openrouter", vec!["openai/gpt-4o".to_string()]);
+        assert_eq!(c.is_served("openrouter", "openrouter/openai/gpt-4o"), Some(true));
+        assert_eq!(c.is_served("openrouter", "openai/gpt-4o"), Some(true));
+    }
+
+    /// An empty response is a parse failure far more often than a real absence
+    /// of entitlement, and recording it would empty the picker for that
+    /// provider. Stay in the "never probed" state instead.
+    #[test]
+    fn empty_probe_is_not_treated_as_no_entitlement() {
+        let mut c = ModelCatalog::new();
+        c.set_served("openai", Vec::<String>::new());
+        assert_eq!(c.is_served("openai", "gpt-5.6-luna"), None);
     }
 }

@@ -857,6 +857,13 @@ impl FreecoKernel {
         let custom_models_path = config.home_dir.join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
 
+        // Load which models each provider actually serves for this key, so the
+        // picker offers only what can be called rather than everything the
+        // provider publishes. Written by /api/models/refresh; absent on a first
+        // run, in which case nothing is filtered.
+        let served_models_path = config.home_dir.join("served_models.json");
+        model_catalog.load_served(&served_models_path);
+
         // Fetch live Copilot models if authenticated
         if freeco_kernel_runtime::drivers::copilot::copilot_auth_available(&config.home_dir) {
             let copilot_dir = config.home_dir.clone();
@@ -2739,6 +2746,19 @@ impl FreecoKernel {
         // Check metering quota before starting
         self.metering
             .check_quota(agent_id, &entry.manifest.resources)
+            .map_err(KernelError::Freeco)?;
+
+        // Then the whole-installation ceiling. This existed, worked, and had no
+        // caller anywhere in the repository: the dashboard showed an hourly and
+        // a daily limit while nothing on any path could refuse a run for
+        // exceeding them. It was a speedometer presented as a cap, and the
+        // consequence is not hypothetical -- a single conversation spent $12
+        // against a provider while the recorded total for the month read $0.33.
+        //
+        // Per-agent quotas cannot substitute for it: they bound one agent, and
+        // the bill is the sum over all of them.
+        self.metering
+            .check_global_budget(&self.config.budget)
             .map_err(KernelError::Freeco)?;
 
         let mut session = self
@@ -8233,6 +8253,31 @@ impl KernelHandle for FreecoKernel {
             entry.name,
             team_id,
             role.map(|r| format!(" as \"{r}\"")).unwrap_or_default()
+        ))
+    }
+
+    async fn team_list(&self) -> Result<serde_json::Value, String> {
+        let teams = self
+            .memory
+            .org()
+            .list_teams(false)
+            .map_err(|e| format!("{e}"))?;
+        Ok(serde_json::json!({ "teams": teams }))
+    }
+
+    async fn company_create(&self, name: &str, description: Option<&str>) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("A company name is required".to_string());
+        }
+        let company = self
+            .memory
+            .org()
+            .create_company(name, description)
+            .map_err(|e| format!("{e}"))?;
+        Ok(format!(
+            "Created company \"{}\" (id {})",
+            company.name, company.id
         ))
     }
 

@@ -461,8 +461,15 @@ async fn start_native_stack(
             cmd.arg("-e").arg(format!("{k}={resolved}"));
         }
         cmd.arg(&svc.image);
+        // Command arguments carry `${VAR}` and `secret:NAME` references just as
+        // env values do, and only env was being resolved. Redis was started
+        // with `--requirepass ${VOICE_REDIS_PASSWORD}` *as a literal string*,
+        // so its password was the seven characters of the placeholder while
+        // every client was handed the real value. The service came up, looked
+        // healthy, and rejected every connection with "invalid username-password
+        // pair" -- a config bug that reads as a broken product.
         for part in &svc.command {
-            cmd.arg(part);
+            cmd.arg(resolve_env_value(part, &|key| resolve_secret(key)));
         }
 
         let mut out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
@@ -490,8 +497,16 @@ async fn start_native_stack(
             )));
         }
 
-        if !svc.health_cmd.is_empty()
-            && !wait_service_healthy(rt, &name, &svc.health_cmd, spec.health_timeout_secs).await
+        // The health command needs the same resolution: `redis-cli -a
+        // ${VOICE_REDIS_PASSWORD} ping` authenticates with the placeholder
+        // otherwise, so a healthy service is reported unhealthy.
+        let health_cmd: Vec<String> = svc
+            .health_cmd
+            .iter()
+            .map(|part| resolve_env_value(part, &|key| resolve_secret(key)))
+            .collect();
+        if !health_cmd.is_empty()
+            && !wait_service_healthy(rt, &name, &health_cmd, spec.health_timeout_secs).await
         {
             return Err(HandError::Config(format!(
                 "{name} started but never became ready. Check its logs: {rt} logs {name}"

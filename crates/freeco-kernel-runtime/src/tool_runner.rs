@@ -383,8 +383,8 @@ pub async fn execute_tool(
         "agent_activate" => tool_agent_activate(input, kernel),
 
         // Shared memory tools
-        "memory_store" => tool_memory_store(input, kernel),
-        "memory_recall" => tool_memory_recall(input, kernel),
+        "memory_store" => tool_memory_store(input, kernel, caller_agent_id),
+        "memory_recall" => tool_memory_recall(input, kernel, caller_agent_id),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, kernel),
@@ -485,6 +485,25 @@ pub async fn execute_tool(
             }
             None => Err("Organisation store is not available".to_string()),
         },
+        "team_list" => match kernel {
+            Some(kh) => match kh.team_list().await {
+                Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+                Err(e) => Err(e),
+            },
+            None => Err("Organisation store is not available".to_string()),
+        },
+
+        "company_create" => match kernel {
+            Some(kh) => {
+                kh.company_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["description"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+
         "project_create" => match kernel {
             Some(kh) => {
                 kh.project_create(
@@ -890,9 +909,40 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "team_list".to_string(),
+            description: "List every team, with the project it belongs to and who is in it. \
+                          Use it to find the team you are on, to see who else could take a \
+                          piece of work, and to get the team id that `memory_store` and \
+                          `memory_recall` need for `scope: \"team:<id>\"`."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+
+        ToolDefinition {
+            name: "company_create".to_string(),
+            description: "Create a company — the top of the organisation, which projects \
+                          belong to. Create this before passing a `company_id` to \
+                          `project_create`: that id must name a company that already exists, \
+                          and the insert is refused otherwise. Check `org_overview` first to \
+                          avoid creating a second company for the same organisation."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Company name" },
+                    "description": { "type": "string", "description": "What it does" }
+                },
+                "required": ["name"]
+            }),
+        },
+
+        ToolDefinition {
             name: "project_create".to_string(),
             description: "Create a project — a body of work that teams and conversations can \
-                          be attached to, so related threads stay findable together."
+                          be attached to, so related threads stay findable together. \
+                          `company_id`, if given, must be the id of an existing company from \
+                          `company_create` or `org_overview`; leave it out to create a project \
+                          that belongs to no company."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1091,18 +1141,28 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "The storage key" },
-                    "value": { "type": "string", "description": "The value to store (JSON-encode objects/arrays, or pass a plain string)" }
+                    "value": { "type": "string", "description": "The value to store (JSON-encode objects/arrays, or pass a plain string)" },
+                    "scope": {
+                        "type": "string",
+                        "description": "Who this is for. `global` (the default) is the whole installation. `company:<id>`, `project:<id>` or `team:<id>` keep it to that part of the organisation -- take the ids from `org_overview`. `agent` is private to you. Two teams both storing `priorities` globally overwrite each other; scoped, they do not."
+                    }
                 },
                 "required": ["key", "value"]
             }),
         },
         ToolDefinition {
             name: "memory_recall".to_string(),
-            description: "Recall a value from shared memory by key.".to_string(),
+            description: "Recall a value from shared memory by key. Pass the same `scope` it \
+                          was stored under -- a scoped value is not visible from `global`."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "The storage key to recall" }
+                    "key": { "type": "string", "description": "The storage key to recall" },
+                    "scope": {
+                        "type": "string",
+                        "description": "`global` (default), `company:<id>`, `project:<id>`, `team:<id>`, or `agent` for your own."
+                    }
                 },
                 "required": ["key"]
             }),
@@ -2309,26 +2369,57 @@ fn tool_agent_activate(
 // Shared memory tools
 // ---------------------------------------------------------------------------
 
+/// Compose the stored key for a memory scope.
+///
+/// Shared memory was one flat namespace: everything an agent stored was visible
+/// to every other agent, and two teams choosing the same obvious key
+/// (`"priorities"`) overwrote each other. Scopes give the organisation the same
+/// shape its structure already has -- a team's working notes, a project's
+/// decisions, a company's standards, an agent's own memory -- without a second
+/// store.
+///
+/// `global` composes to the bare key, so everything written before scopes
+/// existed is still readable at the same key and nothing has to be migrated.
+fn scoped_memory_key(scope: Option<&str>, key: &str, caller_agent_id: Option<&str>) -> String {
+    match scope.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("global") => key.to_string(),
+        Some("agent") => match caller_agent_id {
+            Some(id) => format!("agent:{id}/{key}"),
+            // No caller identity means a private scope cannot be private.
+            // Falling back to global would silently publish it, so it goes
+            // somewhere unreadable-by-accident instead.
+            None => format!("agent:unknown/{key}"),
+        },
+        Some(other) => format!("{}/{}", other.trim_end_matches('/'), key),
+    }
+}
+
 fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone())?;
-    Ok(format!("Stored value under key '{key}'."))
+    let scope = input["scope"].as_str();
+    let stored = scoped_memory_key(scope, key, caller_agent_id);
+    kh.memory_store(&stored, value.clone())?;
+    Ok(format!("Stored value under key '{stored}'."))
 }
 
 fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key)? {
+    let scope = input["scope"].as_str();
+    let stored = scoped_memory_key(scope, key, caller_agent_id);
+    match kh.memory_recall(&stored)? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
-        None => Ok(format!("No value found for key '{key}'.")),
+        None => Ok(format!("No value found for key '{stored}'.")),
     }
 }
 
@@ -3771,8 +3862,6 @@ async fn tool_docker_exec(
             }
         };
     }
-    let config = &config;
-
     if !config.enabled {
         return Err("Docker sandbox is disabled. Set docker.enabled=true in config.".into());
     }
@@ -3811,12 +3900,33 @@ async fn tool_docker_exec(
                 .into(),
         );
     }
+    // Reusable sandboxes must run a content-addressed image. Requiring the user
+    // to write the digest by hand is what made this unusable: the configured
+    // image is a tag, so every call on every tier was refused and agents could
+    // not run a command, install a tool, or use a container at all. Resolve the
+    // tag to the digest it points at now, which keeps the guarantee and drops
+    // the manual step. Refuse only when it cannot be resolved.
     if reusable && !crate::docker_sandbox::is_immutable_image_reference(&config.image) {
-        return Err(
-            "Reusable Docker sandboxes require docker.image pinned by immutable SHA-256 digest (for example registry.example/freeco@sha256:<64-hex-digits>). Mutable tags are allowed only for ephemeral session sandboxes."
-                .into(),
-        );
+        match crate::docker_sandbox::resolve_image_digest(&config.runtime, &config.image).await {
+            Some(pinned) => {
+                tracing::info!(
+                    image = %config.image,
+                    pinned = %pinned,
+                    "Resolved sandbox image tag to its current digest"
+                );
+                config.image = pinned;
+            }
+            None => {
+                return Err(format!(
+                    "Reusable Docker sandboxes run a digest-pinned image, and `{}` could not be \
+                     resolved to one -- the image is not present in {}. Pull or build it, or set \
+                     docker.image to a `repo@sha256:<64-hex-digits>` reference.",
+                    config.image, config.runtime
+                ));
+            }
+        }
     }
+    let config = &config;
 
     // Check Docker availability. Failing here is the correct outcome: the
     // sandbox is the safety boundary, so when it is unavailable the tool
@@ -5664,5 +5774,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("kernel"));
+    }
+
+    /// Everything stored before scopes existed lives at a bare key, so `global`
+    /// must compose to exactly that key or the whole store reads as empty.
+    #[test]
+    fn global_scope_is_the_bare_key() {
+        assert_eq!(scoped_memory_key(None, "priorities", None), "priorities");
+        assert_eq!(scoped_memory_key(Some("global"), "priorities", None), "priorities");
+        assert_eq!(scoped_memory_key(Some("  "), "priorities", None), "priorities");
+    }
+
+    /// The point of scopes: two teams can both store the obvious key without
+    /// overwriting one another.
+    #[test]
+    fn org_scopes_do_not_collide() {
+        let a = scoped_memory_key(Some("team:alpha"), "priorities", None);
+        let b = scoped_memory_key(Some("team:beta"), "priorities", None);
+        assert_eq!(a, "team:alpha/priorities");
+        assert_eq!(b, "team:beta/priorities");
+        assert_ne!(a, b);
+        assert_eq!(
+            scoped_memory_key(Some("project:p1"), "decisions", None),
+            "project:p1/decisions"
+        );
+        assert_eq!(
+            scoped_memory_key(Some("company:c1"), "standards", None),
+            "company:c1/standards"
+        );
+    }
+
+    /// A private scope with no caller identity must not fall back to global --
+    /// that would publish the thing the agent asked to keep to itself.
+    #[test]
+    fn agent_scope_never_falls_back_to_global() {
+        let known = scoped_memory_key(Some("agent"), "notes", Some("a1"));
+        assert_eq!(known, "agent:a1/notes");
+        let unknown = scoped_memory_key(Some("agent"), "notes", None);
+        assert_ne!(unknown, "notes");
+        assert!(unknown.starts_with("agent:"));
     }
 }

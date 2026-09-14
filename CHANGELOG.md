@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The global spend cap actually stops spending. `check_global_budget` existed,
+  read the configured hourly and daily ceilings, and returned `QuotaExceeded` --
+  and had no caller anywhere in the repository, so the dashboard displayed a
+  limit that nothing could enforce. It is now checked on every agent run
+  alongside the per-agent quota, which cannot substitute for it because the bill
+  is the sum over all agents. A single conversation had spent $12 against a
+  provider while the recorded month-to-date total read $0.33.
+
+- A transient provider fault no longer takes an agent's tools away. Any `500`,
+  or the words "internal error" anywhere in a response body, used to clear every
+  tool from the request and retry without them; the agent then had no way to act
+  and narrated instead -- "I am checking that now" -- returning having done
+  nothing, which reads as a model that will not work. Server errors are now
+  retried unchanged, and tools are dropped only when the provider states
+  explicitly that it does not support them. The reasoning-conflict message
+  ("Function tools with reasoning_effort are not supported for ...") contains
+  both "tool" and "not supported" and was matching that rule as well, so a
+  gpt-5.6 agent lost its tools on the retry after the one that switched
+  reasoning off.
+
+- Switching model in the chat keeps the provider. The picker sent only the model
+  id, so the server resolved it across the whole catalogue and preferred
+  Custom-tier entries -- `gpt-5.6-sol` could land on the OpenRouter duplicate and
+  then look for `OPENROUTER_API_KEY`, reported to the user as a local model that
+  needs no key. The provider-aware path already existed and was being bypassed.
+
+- Services keep their containers and their data across restarts. Container and
+  volume names were keyed by the activation instance, and a new instance id was
+  minted on every boot, so each restart built a fresh container on an empty
+  volume and the CRM set up the day before came back blank. Names are now keyed
+  by hand and tenant, which survives a restart, and containers left behind by a
+  superseded instance are removed instead of accumulating.
+
+- Tool calling works on reasoning models. On `/v1/chat/completions` the OpenAI
+  reasoning default is rejected alongside function tools, and the driver
+  responded by stripping every tool from the request -- so agents held tools
+  they could not call and explained, plausibly, that they had none. Reasoning is
+  now switched off for that endpoint instead, keeping the tools. This is a
+  workaround, not a cure: the models reason less well as a result, and the real
+  fix is to route them through the Responses API.
+
+- The gateway keeps its configuration across a restart, and replies say which
+  model actually answered rather than which model was requested -- the two
+  differ whenever a fallback fires, which made an outage look like a quality
+  regression.
+
 - Approval requests say what the agent is trying to achieve. Every one of them
   read "Agent \<uuid\> requests to execute shell_exec", because the per-tool
   fallback text was documented as covering "requests that arrive without
@@ -45,6 +91,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing rows on read.
 
 ### Added
+
+- `company_create`, so an agent can create the organisation it belongs to. The
+  store method and the HTTP route both existed and the tool did not, so an agent
+  made CEO had no way to create a company -- and `project_create` takes a
+  `company_id` that had to name an existing row, which meant any id an agent
+  supplied failed on the foreign key with nothing it could do about it.
+
+- Memory scopes. `memory_store` and `memory_recall` take an optional `scope`:
+  `global` (the default and the previous behaviour), `company:<id>`,
+  `project:<id>`, `team:<id>`, or `agent` for the caller's own. Shared memory was
+  one flat namespace, so two teams both storing the obvious key overwrote each
+  other and nothing could be kept to the group it concerned. `global` composes to
+  the bare key, so everything already stored is still readable where it was and
+  nothing needs migrating.
+
+- Session tools, so an agent can name, fork and reset its own conversations.
+  The operations existed in `freeco-memory` and stopped at the crate boundary,
+  so an agent asked to tidy its threads could only explain that it had no way
+  to.
+
+- Organisation tools, so agents can see and build the structure they work in:
+  `org_overview`, `team_create`, `team_add_member` and `project_create`. Note
+  that `create_company` remains reachable only over HTTP -- there is no
+  company-creating tool, so an agent cannot create the company it belongs to.
 
 - A model picker in the assistant chat, listing only models whose provider is
   configured and which support tools, labelled with provider and price, free

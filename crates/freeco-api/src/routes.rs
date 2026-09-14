@@ -7460,15 +7460,29 @@ pub async fn list_models(
                         return false;
                     }
                 }
+                if catalog.is_served(&m.provider, &m.id) == Some(false) {
+                    return false;
+                }
             }
             true
         })
         .map(|m| {
-            // Custom models from unknown providers are assumed available
-            let available = catalog
+            // Availability is two questions, not one. "Is there a key?" was the
+            // only one asked, so every model of a configured provider was
+            // offered -- including the 128 an OpenAI project is not entitled
+            // to. Picking one returned `Project does not have access` and the
+            // agent produced no reply at all. The second question is "does this
+            // key have access to this model?", answered from what the provider
+            // itself listed at /v1/models.
+            //
+            // A provider that has never been probed answers None, and its
+            // models stay available: hiding a model that works is worse than
+            // showing one that might not.
+            let has_key = catalog
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
                 .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
+            let available = has_key && catalog.is_served(&m.provider, &m.id) != Some(false);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -7699,6 +7713,14 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
             "https://api.openai.com/v1/models".to_string(),
             false,
         ),
+        // Novita ids are vendor-prefixed the way OpenRouter's are
+        // (`zai-org/glm-5.3`), and it serves ~117 models that were invisible
+        // because the provider was never registered in the catalog.
+        (
+            "novita",
+            "https://api.novita.ai/v3/openai/models".to_string(),
+            true,
+        ),
     ];
 
     let client = reqwest::Client::builder()
@@ -7745,6 +7767,25 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         };
         let list = body["data"].as_array().cloned().unwrap_or_default();
         checked.push(format!("{provider}: {} served", list.len()));
+
+        // Record entitlement before any display filtering below narrows the
+        // list. A configured key is not access to every model the provider
+        // publishes: an OpenAI project entitled to one model was still being
+        // offered all 129, so every other pick returned `Project does not have
+        // access` and the agent answered nothing. This is what makes the
+        // picker show only what the key can really call.
+        {
+            let served: Vec<String> = list
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            let mut catalog = state
+                .kernel
+                .model_catalog
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            catalog.set_served(provider, served);
+        }
 
         for m in list {
             let Some(raw_id) = m["id"].as_str() else { continue };
@@ -7818,6 +7859,12 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         let path = state.kernel.config.home_dir.join("custom_models.json");
         if let Err(e) = catalog.save_custom_models(&path) {
             tracing::warn!("Failed to persist refreshed models: {e}");
+        }
+        // Persist entitlement too, so the picker is honest from the next boot
+        // rather than only after someone remembers to press Refresh.
+        let served_path = state.kernel.config.home_dir.join("served_models.json");
+        if let Err(e) = catalog.save_served(&served_path) {
+            tracing::warn!("Failed to persist served models: {e}");
         }
     }
 

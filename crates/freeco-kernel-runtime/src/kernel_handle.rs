@@ -253,6 +253,27 @@ pub trait KernelHandle: Send + Sync {
         Err("Organisation store not available".to_string())
     }
 
+    /// Every team, with its project and its members.
+    ///
+    /// Teams could be created and never read back, so an agent could be put in
+    /// one and had no way to find out, and no way to learn the id its team
+    /// memory is keyed by.
+    async fn team_list(&self) -> Result<serde_json::Value, String> {
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a company — the top of the organisation, which projects belong to.
+    ///
+    /// The store and the HTTP route for this both existed; the tool did not, so
+    /// an agent could be made CEO of an organisation and still had no way to
+    /// create the company it was CEO of. Worse, `project_create` takes a
+    /// `company_id` and the companies table was empty, so any id an agent
+    /// supplied failed on the foreign key with nothing it could do about it.
+    async fn company_create(&self, name: &str, description: Option<&str>) -> Result<String, String> {
+        let _ = (name, description);
+        Err("Organisation store not available".to_string())
+    }
+
     /// Create a project that teams and conversations attach to.
     async fn project_create(
         &self,
