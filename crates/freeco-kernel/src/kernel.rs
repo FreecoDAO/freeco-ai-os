@@ -4069,7 +4069,6 @@ impl FreecoKernel {
         let name = freeco_hands::container::start(
             &spec,
             hand_id,
-            &instance_id.to_string(),
             tenant.as_deref(),
             |k| std::env::var(k).ok(),
         )
@@ -7632,7 +7631,7 @@ impl FreecoKernel {
                 let known = |id: &str| {
                     c.find_model_for_provider(id, provider).is_some() || c.find_model(id).is_some()
                 };
-                let stripped = strip_provider_prefix_known(model, provider, &known);
+                let stripped = strip_provider_prefix_known(model, provider, known);
 
                 // Restore a prefix that was wrongly removed.
                 //
@@ -10011,6 +10010,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home_dir = tmp.path().join("freeco-1031-referenced");
         std::fs::create_dir_all(&home_dir).unwrap();
+        // Give Groq a key the kernel finds in this test's own home. Without one
+        // the primary driver fails to start, and boot then auto-detects any
+        // provider key in the *process* environment and makes it the default:
+        // on a machine with NOVITA_API_KEY set, groq vanished from the set and
+        // this failed. <home>/.env is read before the environment and touches
+        // nothing outside the test.
+        std::fs::write(home_dir.join(".env"), "GROQ_API_KEY=test-key-not-real\n").unwrap();
 
         // Operator uses Groq as the default and Ollama as a single fallback.
         // The catalog contains many other local providers (vllm, lmstudio,
@@ -10095,7 +10101,15 @@ mod tests {
                 provider: "default".to_string(),
                 model: "opus".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
-                base_url: None,
+                // "default" is not a provider create_driver knows, so with no
+                // base_url the primary driver fails to start and boot replaces
+                // the default model with whatever provider key the process
+                // environment holds -- novita, on a machine with NOVITA_API_KEY
+                // set -- dropping the alias this test checks. A base_url makes
+                // it an OpenAI-compatible driver that starts without a network
+                // call, so the configured model survives. referenced_providers
+                // never reads base_url, so what is under test is unchanged.
+                base_url: Some("http://127.0.0.1:9/v1".to_string()),
                 subprocess_timeout_secs: None,
             },
             ..KernelConfig::default()

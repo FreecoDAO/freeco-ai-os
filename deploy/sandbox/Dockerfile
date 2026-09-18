@@ -81,12 +81,27 @@ RUN cargo search --limit 1 serde >/dev/null 2>&1 || true
 
 # Agents run as a non-root user. Nothing here needs root, and a container that
 # grants it teaches habits that are wrong outside the container.
+#
+# The user is created here but only switched to at the very end. `USER agent`
+# used to sit on this line, which made every later `apt-get install` and
+# `chmod` run unprivileged -- so the browser layers below never built, and the
+# image in use predated them entirely. Everything that needs root now runs
+# before the switch.
 RUN useradd --create-home --shell /bin/bash agent
-USER agent
-WORKDIR /workspace
 
-# Stated so `docker run freeco-sandbox` without a command is self-explaining
-# rather than silently exiting.
+# Windows cross-compilation, so an agent can ship a Windows build from here.
+#
+# Proven before being added: a binary built in this image with this linker
+# printed `std::env::consts::OS` as "windows" when run on a Windows host. The
+# linker is Debian's mingw-w64; the target is the matching Rust std.
+#
+# iOS is deliberately absent. Apple's SDK is licensed for Apple hardware only
+# and signing needs Apple's tooling, so iOS builds belong on the macOS CI
+# runners the release workflow already uses, not in a Linux container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-pc-windows-gnu
 
 # Brave, and a screen to watch it on.
 #
@@ -127,4 +142,10 @@ RUN curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-arch
 COPY freeco-screen /usr/local/bin/freeco-screen
 RUN chmod +x /usr/local/bin/freeco-screen
 
-CMD ["bash", "-lc", "echo 'FreEco.ai sandbox: rust, cargo, clippy, node 22, pnpm, yarn, gh, git, python3, jq, rg, socat, brave. Run freeco-screen and open port 6080 to watch it. Mount your work at /workspace.'; bash"]
+# Drop privileges last, after every step above that needed root.
+USER agent
+WORKDIR /workspace
+
+# Stated so `docker run freeco-sandbox` without a command is self-explaining
+# rather than silently exiting.
+CMD ["bash", "-lc", "echo 'FreEco.ai sandbox: rust (linux + windows-gnu), cargo, clippy, node 22, pnpm, yarn, gh, git, python3, jq, rg, socat, brave. Run freeco-screen and open port 6080 to watch it. Mount your work at /workspace.'; bash"]

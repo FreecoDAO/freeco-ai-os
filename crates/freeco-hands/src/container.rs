@@ -65,18 +65,88 @@ pub async fn runtime() -> Option<&'static str> {
 /// fails with "Temporary failure in name resolution". Three nameservers with a
 /// short timeout fixed that. The cost is that WSL no longer maintains the file,
 /// and it did not survive a VM restart.
-///
-/// So this repairs it. Checked and rewritten rather than assumed present,
-/// because the failure is total and the fix is four lines of text.
 const VM_RESOLV_CONF: &str =
     "nameserver 1.1.1.1\\nnameserver 8.8.8.8\\nnameserver 10.255.255.254\\noptions timeout:2 attempts:2\\n";
 
-/// Returns whether the file exists after this call.
+/// Id of the missing-resolver issue.
+pub const VM_ISSUE_RESOLVER: &str = "resolver";
+/// Id of the disabled-restart-service issue.
+pub const VM_ISSUE_RESTART_SERVICE: &str = "restart_service";
+
+/// A problem in the Podman VM whose fix needs `sudo` inside the VM.
 ///
-/// A no-op on Linux and on Docker, where there is no VM to repair.
-pub async fn ensure_vm_resolver() -> bool {
+/// Both known problems used to be repaired silently: the watchdog and the
+/// container start paths ran `sudo` in the VM whenever they noticed one.
+/// Gaining root in the VM is the user's decision, not the daemon's, so the
+/// daemon now only finds and reports them, and the fix runs from an explicit
+/// click through `repair_vm_issue`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmIssue {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub problem: &'static str,
+    pub what_fixing_changes: &'static str,
+    /// The literal command the fix runs, shown to the user before they approve.
+    pub command: String,
+}
+
+impl VmIssue {
+    pub fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "title": self.title,
+            "problem": self.problem,
+            "what_fixing_changes": self.what_fixing_changes,
+            "command": self.command,
+        })
+    }
+}
+
+/// The one command each fix runs, and nothing else.
+///
+/// Unknown ids get `None`, so no request can choose what runs -- the id picks
+/// between two fixed commands, it is never interpolated into one. `sudo -n` so
+/// a VM without passwordless sudo fails at once instead of hanging on a prompt
+/// nobody can see.
+pub fn vm_fix_command(id: &str) -> Option<String> {
+    match id {
+        VM_ISSUE_RESOLVER => Some(format!(
+            "sudo -n sh -c 'printf \"{VM_RESOLV_CONF}\" > /etc/resolv.conf'"
+        )),
+        VM_ISSUE_RESTART_SERVICE => {
+            Some("sudo -n systemctl --global enable podman-restart.service".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Run a script in the Podman VM and return its stdout, or `None` if it could
+/// not run, failed, or timed out.
+async fn vm_ssh(script: &str, timeout: Duration) -> Option<String> {
+    let out = tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new("podman")
+            .args(["machine", "ssh", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Report a missing `/etc/resolv.conf` in the Podman VM. Read-only.
+///
+/// `None` when the file is present, when the runtime is not Podman, and when
+/// the check itself could not run -- a failed check is not evidence of a
+/// problem, and reporting one would put a false warning in front of the user.
+pub async fn check_vm_resolver() -> Option<VmIssue> {
     if runtime().await != Some("podman") {
-        return true;
+        return None;
     }
     let present = tokio::time::timeout(
         RUNTIME_TIMEOUT,
@@ -87,28 +157,117 @@ pub async fn ensure_vm_resolver() -> bool {
             .status(),
     )
     .await;
-    if matches!(present, Ok(Ok(s)) if s.success()) {
-        return true;
+    match present {
+        // `test -f` exits 1 when the file is missing; any other result is
+        // either present or a check that did not run.
+        Ok(Ok(s)) if s.code() == Some(1) => Some(VmIssue {
+            id: VM_ISSUE_RESOLVER,
+            title: "Podman VM has no DNS resolver",
+            problem: "The Podman VM is missing /etc/resolv.conf, so no container can start: \
+                      every start fails with an error naming resolv.conf.",
+            what_fixing_changes: "Writes /etc/resolv.conf inside the Podman VM with three \
+                                  nameservers (1.1.1.1, 8.8.8.8 and the WSL gateway), using \
+                                  sudo in the VM. Nothing on Windows changes.",
+            command: vm_fix_command(VM_ISSUE_RESOLVER).unwrap_or_default(),
+        }),
+        _ => None,
     }
+}
 
-    tracing::warn!("the Podman VM has no /etc/resolv.conf — no container can start; restoring it");
-    let script = format!("sudo sh -c 'printf \"{VM_RESOLV_CONF}\" > /etc/resolv.conf'");
-    let repaired = tokio::time::timeout(
-        Duration::from_secs(60),
-        tokio::process::Command::new("podman")
-            .args(["machine", "ssh", &script])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await;
-    let ok = matches!(repaired, Ok(Ok(s)) if s.success());
-    if ok {
-        tracing::info!("restored /etc/resolv.conf in the Podman VM");
-    } else {
-        tracing::warn!("could not restore /etc/resolv.conf; containers will fail to start");
+/// Report that the Podman VM will not bring service containers back after it
+/// restarts. Read-only.
+///
+/// Service hands run their containers with `restart: unless-stopped`, and on
+/// rootless Podman that policy is only honoured at boot by
+/// `podman-restart.service` -- which ships disabled. So every time the VM
+/// stopped (host reboot, sleep, `podman machine stop`) each service came back
+/// exited and stayed down until someone started it by hand. That, not the
+/// volumes, is why a configured CRM kept failing to survive a reboot. Verified
+/// on this machine: once enabled, all ten service containers returned on their
+/// own about ninety seconds after a VM restart.
+///
+/// The fix enables it globally for user sessions rather than with `systemctl
+/// --user`: in this VM `~/.config/systemd` is owned by root, which refuses the
+/// per-user enable and even the symlink it would create.
+pub async fn check_vm_restart_service() -> Option<VmIssue> {
+    if runtime().await != Some("podman") {
+        return None;
     }
-    ok
+    // `|| true` because is-enabled exits non-zero for "disabled", and that is
+    // exactly the answer this needs to read.
+    let state = vm_ssh(
+        "systemctl --global is-enabled podman-restart.service || true",
+        RUNTIME_TIMEOUT,
+    )
+    .await?;
+    // Only a definite answer is reported. An empty or unexpected reply is a
+    // check that did not work, not a disabled service.
+    match state.trim() {
+        "disabled" | "masked" => Some(VmIssue {
+            id: VM_ISSUE_RESTART_SERVICE,
+            title: "Services will not restart after a reboot",
+            problem: "podman-restart.service is disabled in the Podman VM, so CRM, voice and \
+                      other service containers stay stopped after the VM or the computer \
+                      restarts.",
+            what_fixing_changes: "Enables podman-restart.service for all user sessions inside \
+                                  the Podman VM, using sudo in the VM, so containers set to \
+                                  restart come back on their own. Nothing on Windows changes.",
+            command: vm_fix_command(VM_ISSUE_RESTART_SERVICE).unwrap_or_default(),
+        }),
+        _ => None,
+    }
+}
+
+/// Every known Podman VM problem, for the dashboard and the watchdog.
+pub async fn vm_issues() -> Vec<VmIssue> {
+    let mut issues = Vec::new();
+    if let Some(issue) = check_vm_resolver().await {
+        issues.push(issue);
+    }
+    if let Some(issue) = check_vm_restart_service().await {
+        issues.push(issue);
+    }
+    issues
+}
+
+/// Run the fix for one issue. Only ever called from an explicit user action.
+///
+/// The command comes from `vm_fix_command`, never from the caller, and the
+/// issue is checked again afterwards so "fixed" means the problem is gone, not
+/// merely that a command exited zero.
+pub async fn repair_vm_issue(id: &str) -> Result<String, String> {
+    let command = vm_fix_command(id).ok_or_else(|| format!("unknown VM issue '{id}'"))?;
+    if runtime().await != Some("podman") {
+        return Err("the container runtime is not Podman, so there is no VM to fix".into());
+    }
+    tracing::warn!(issue = id, "running user-approved Podman VM fix: {command}");
+    if vm_ssh(&command, Duration::from_secs(60)).await.is_none() {
+        return Err(format!(
+            "the fix did not succeed: `{command}` failed inside the Podman VM"
+        ));
+    }
+    let remaining = if id == VM_ISSUE_RESOLVER {
+        check_vm_resolver().await
+    } else {
+        check_vm_restart_service().await
+    };
+    match remaining {
+        None => Ok(format!("Fixed. Ran `{command}` in the Podman VM.")),
+        Some(_) => Err(format!("`{command}` ran, but the problem is still there")),
+    }
+}
+
+/// What a container start says when the VM has no resolver.
+///
+/// Shown to whoever started it -- the dashboard or an agent calling
+/// `hand_activate` -- so it names the cause and the fix instead of a bare
+/// container error.
+fn resolver_missing_message() -> String {
+    "a container could not start because the Podman VM has no /etc/resolv.conf, so nothing \
+     inside it can resolve DNS. Nothing was changed. To restore it, open Settings > Services \
+     and press Fix on \"Podman VM has no DNS resolver\" (it rewrites /etc/resolv.conf inside \
+     the Podman VM using sudo), then start this again."
+        .to_string()
 }
 
 /// Try to bring a stopped runtime back, for callers that noticed it is down.
@@ -136,20 +295,60 @@ async fn start_podman_machine() -> bool {
         return false;
     }
     tracing::info!("container runtime unreachable; starting the Podman machine");
-    // Starting a stopped VM takes tens of seconds; an already-running one
-    // returns immediately with an error we can ignore.
-    matches!(
-        tokio::time::timeout(
-            Duration::from_secs(300),
-            tokio::process::Command::new("podman")
-                .args(["machine", "start"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status(),
-        )
-        .await,
-        Ok(Ok(s)) if s.success()
+    // Starting a stopped VM takes tens of seconds.
+    let (started, stderr) = podman_machine(&["start"], 300).await;
+    if started {
+        return true;
+    }
+
+    // "Already running" is not proof the runtime is usable, and treating it as
+    // a harmless error is what kept this machine's runtime dead for two weeks.
+    // The state seen here: the WSL VM was up, but the SSH port forward the CLI
+    // connects through had died and its port had been taken by another
+    // process, so every podman command was refused while `machine start`
+    // answered "already running". The watchdog retried that every ten minutes
+    // and could never succeed.
+    if !stderr.to_lowercase().contains("already running") {
+        return false;
+    }
+    if probe("podman").await {
+        return true;
+    }
+
+    // Cycling the VM re-establishes the forward, and `start` reassigns a
+    // conflicting port. It stops every container, but only after the runtime
+    // has already stopped answering, so nothing reachable is lost:
+    // `podman-restart.service` brings back containers with a restart policy
+    // when the VM starts, and the watchdog restarts active service hands
+    // within a minute.
+    tracing::warn!(
+        "Podman reports its VM running but its API does not answer; the port \
+         forward is dead. Restarting the VM to re-establish it."
+    );
+    let _ = podman_machine(&["stop"], 120).await;
+    podman_machine(&["start"], 300).await.0
+}
+
+/// Run `podman machine <args>`, returning whether it succeeded and its stderr.
+async fn podman_machine(args: &[&str], timeout_secs: u64) -> (bool, String) {
+    let run = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("podman")
+            .arg("machine")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output(),
     )
+    .await;
+    match run {
+        Ok(Ok(out)) => (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ),
+        Ok(Err(e)) => (false, e.to_string()),
+        Err(_) => (false, "timed out".to_string()),
+    }
 }
 
 /// What the product can say about the container runtime right now.
@@ -405,7 +604,6 @@ async fn wait_service_healthy(rt: &str, name: &str, cmd: &[String], budget_secs:
 async fn start_native_stack(
     spec: &HandContainer,
     hand_id: &str,
-    instance_id: &str,
     tenant: Option<&str>,
     resolve_secret: &(impl Fn(&str) -> Option<String> + ?Sized),
 ) -> Result<String, HandError> {
@@ -472,22 +670,17 @@ async fn start_native_stack(
             cmd.arg(resolve_env_value(part, &|key| resolve_secret(key)));
         }
 
-        let mut out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
+        let out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
             .await
             .map_err(|_| HandError::Config(format!("starting {name} timed out")))?
             .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
 
-        // A missing resolver in the VM stops every container, and the message
-        // blames resolv.conf rather than DNS. Repair it and try once more, so a
-        // fixable environment problem does not surface as a broken hand.
-        if !out.status.success()
-            && String::from_utf8_lossy(&out.stderr).contains("resolv.conf")
-            && ensure_vm_resolver().await
-        {
-            out = tokio::time::timeout(Duration::from_secs(900), cmd.output())
-                .await
-                .map_err(|_| HandError::Config(format!("starting {name} timed out")))?
-                .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+        // A missing resolver in the VM stops every container, and the error
+        // names resolv.conf rather than DNS. It is not repaired here: the fix
+        // runs sudo inside the Podman VM, which is the user's decision, so this
+        // fails with the cause and the dashboard fix instead.
+        if !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("resolv.conf") {
+            return Err(HandError::Config(resolver_missing_message()));
         }
 
         if !out.status.success() {
@@ -533,13 +726,13 @@ async fn start_native_stack(
 
 /// Bring up a compose stack and wait for it to serve.
 ///
-/// The project name carries the instance id for the same reason container
-/// names do: `compose down` targets a project, so two instances sharing one
-/// would tear down each other's databases.
+/// The project name is keyed by hand and tenant, not by instance id. `compose
+/// down` targets a project, so two tenants sharing one would tear down each
+/// other's databases -- but an instance id is minted afresh on every restore,
+/// and keying on it gave each daemon restart a new project on empty volumes.
 async fn start_stack(
     spec: &HandContainer,
     hand_id: &str,
-    instance_id: &str,
     tenant: Option<&str>,
     resolve_secret: impl Fn(&str) -> Option<String>,
 ) -> Result<String, HandError> {
@@ -652,8 +845,8 @@ pub async fn is_running(name: &str) -> bool {
 pub async fn start(
     spec: &HandContainer,
     hand_id: &str,
-    instance_id: &str,
-    // Scopes the data volumes. Durable, unlike the instance id.
+    // Scopes the data volumes and every name. Durable, unlike an instance id,
+    // which is why no instance id is taken here at all.
     tenant: Option<&str>,
     resolve_secret: impl Fn(&str) -> Option<String>,
 ) -> Result<String, HandError> {
@@ -661,10 +854,10 @@ pub async fn start(
     // stop and liveness all have to go through it rather than through names we
     // made up.
     if spec.is_native_stack() {
-        return start_native_stack(spec, hand_id, instance_id, tenant, &resolve_secret).await;
+        return start_native_stack(spec, hand_id, tenant, &resolve_secret).await;
     }
     if spec.is_stack() {
-        return start_stack(spec, hand_id, instance_id, tenant, resolve_secret).await;
+        return start_stack(spec, hand_id, tenant, resolve_secret).await;
     }
 
     let rt = runtime()
@@ -726,21 +919,15 @@ pub async fn start(
     }
     cmd.arg(&spec.image);
 
-    let mut out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
+    let out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
         .await
         .map_err(|_| HandError::Config(format!("{rt} run timed out")))?
         .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
 
-    // Same repair as the stack path: a VM missing /etc/resolv.conf stops every
-    // container, and the error names the file rather than the cause.
-    if !out.status.success()
-        && String::from_utf8_lossy(&out.stderr).contains("resolv.conf")
-        && ensure_vm_resolver().await
-    {
-        out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
-            .await
-            .map_err(|_| HandError::Config(format!("{rt} run timed out")))?
-            .map_err(|e| HandError::Config(format!("could not run {rt}: {e}")))?;
+    // Same as the stack path: a VM missing /etc/resolv.conf stops every
+    // container. Reported with the dashboard fix rather than repaired here.
+    if !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("resolv.conf") {
+        return Err(HandError::Config(resolver_missing_message()));
     }
     if !out.status.success() {
         return Err(HandError::Config(format!(
@@ -1132,6 +1319,32 @@ mod tests {
         assert_eq!(local.tenant_id, None);
         assert!(local.belongs_to(None));
         assert!(local.belongs_to(Some("acme")));
+    }
+
+    /// The fix endpoint passes a request's id straight here, so this is the
+    /// whole guarantee that no request can choose what runs with sudo.
+    #[test]
+    fn vm_fix_command_knows_only_its_two_fixed_commands() {
+        for id in ["", "RESOLVER", "resolver ", "resolver; rm -rf /", "../resolver", "rm -rf /"] {
+            assert_eq!(vm_fix_command(id), None, "id {id:?} must not map to a command");
+        }
+        assert_eq!(
+            vm_fix_command(VM_ISSUE_RESTART_SERVICE).as_deref(),
+            Some("sudo -n systemctl --global enable podman-restart.service")
+        );
+        let resolver = vm_fix_command(VM_ISSUE_RESOLVER).expect("resolver fix");
+        assert!(resolver.starts_with("sudo -n "), "must not wait on a password prompt");
+        assert!(resolver.ends_with("> /etc/resolv.conf'"), "must write only resolv.conf");
+    }
+
+    /// Whatever starts a hand -- the dashboard or an agent -- is told the cause
+    /// and where the fix is, not handed a bare container error.
+    #[test]
+    fn resolver_failure_names_the_cause_and_the_dashboard_fix() {
+        let msg = resolver_missing_message();
+        assert!(msg.contains("/etc/resolv.conf"));
+        assert!(msg.contains("Settings > Services"));
+        assert!(msg.contains("Nothing was changed"));
     }
 
 }

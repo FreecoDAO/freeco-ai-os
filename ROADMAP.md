@@ -591,7 +591,18 @@ Blocked work, reported by the assistant as not executed:
 - [ ] **Wire the data gateway into the LLM path.** Still called by nothing, so
   prompts are not scanned for keys. Must land before social login.
 - [ ] **`users` and `tenants` tables.** No row can say who owns it.
-- [ ] Build the T1 image with `podman build` and make it the default.
+- 🟨 **Build the sandbox image and make it the default — built, not yet the
+  default.** `localhost/freeco-sandbox:t1` (2026-08-22) predated the browser
+  commit, so Brave, Xvfb, x11vnc and `freeco-screen` were never in it, and
+  `deploy/sandbox/Dockerfile` could not build: `USER agent` came before the
+  root-only `apt-get` and `chmod` steps. Fixed, with the Windows linker
+  (`gcc-mingw-w64-x86-64`) and the `x86_64-pc-windows-gnu` Rust target added.
+  `:t2` is built and its contents are verified as `agent`. Still open: build a
+  `.exe` inside `:t2` as `agent` and run it on Windows (the throwaway proof on
+  `:t1` printed "windows"), then point `[docker] image` at the `:t2` digest.
+  iOS is deliberately not in the image: Apple's SDK is licensed for Apple
+  hardware and signing needs Apple's tooling, so it belongs on the macOS CI
+  runners.
 - [ ] Rebuild the desktop app from this repo. The installed one is from
       2026-08-12, still named `openfang-desktop`, and seizes port 50051 with
       code that predates every fix in this session.
@@ -724,6 +735,41 @@ on Windows and takes every call that probes it down with it.
   accessors beside it. The only OAuth actually reachable is Copilot's device
   flow. Social login is listed below as unbuilt; the hard part of it is already
   written. 35 other public functions have no caller anywhere either.
+
+## Found 2026-09-14/15 — scheduled, not done
+
+- **Cross-site requests reach the API.** With no `api_key` and dashboard auth
+  off, `middleware::auth` (`middleware.rs:141-143`) admits every loopback
+  request, and nothing in `freeco-api` checks `Origin`. A page open in the
+  user's browser is loopback, so a cross-site `<form method=post>` reaches the
+  35 POST handlers that take no JSON body, with no preflight. Among them are
+  `/api/shutdown`, `/api/auth/disable`, `/api/system/unfreeze`,
+  `/api/services/{id}/install`, `/api/hands/{id}/install-deps`,
+  `/api/sandbox/pull` and agent stop/restart/session-reset. Fix: one middleware
+  that rejects state-changing requests whose `Origin` is present and foreign,
+  plus a JSON content-type requirement on body-less POSTs. The new
+  `/api/services/vm-fix/{id}` is built with that guard from the start. Until
+  then, setting an `api_key` or enabling dashboard login closes it.
+- **No privileged self-repair without the user.** Decided 2026-09-15 (option B):
+  the daemon detects a disabled `podman-restart.service` or a missing VM
+  `resolv.conf`, reports it in Settings, and runs the one fixed repair only when
+  the user clicks. Previously `ensure_vm_resolver` ran `sudo` in the VM
+  silently, and the restart-service fix was written to do the same.
+- **Agents cannot coordinate shared work.** `agent_send`, `task_post` /
+  `task_claim` / `task_complete` and `event_publish` exist, but there are no
+  claims on shared resources (the build directory, the Podman VM, a set of
+  files), no notification when a claimed task finishes, and nothing stops one
+  agent treating another's message as approval. `agent_send` also timed out
+  after 600 s on a real call. Planned: the CEO Assistant owns the task board
+  and resource claims, and escalates approvals to the user instead of granting
+  them.
+- **`docker_exec` is named for the wrong runtime.** It runs whatever
+  `[docker] runtime` says, which on this machine is Podman. To be renamed
+  `sandbox_exec`, with `docker_exec` kept as an alias. `capabilities.tools` is
+  matched exactly (`kernel.rs:6639`) and existing manifests list the old name.
+- **`cargo fmt --check` was already failing at `d30e66d`.** CI runs it. The
+  formatting goes in its own commit, separate from functional changes, so the
+  real diff stays reviewable.
 
 ## Debt found by the 2026-09-12 scan — scheduled, not done
 

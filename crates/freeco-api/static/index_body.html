@@ -4140,6 +4140,27 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </div>
               </div>
 
+              <!-- Podman VM problems. Each fix runs sudo inside the VM, so it is
+                   offered as a button beside its exact command and never run by
+                   the daemon on its own. -->
+              <template x-for="issue in vmIssues" :key="issue.id">
+                <div class="card" style="border-color:var(--warning,#f59e0b);margin-bottom:14px">
+                  <div style="font-size:13px">
+                    <strong x-text="issue.title"></strong>
+                    <p style="margin:4px 0" x-text="issue.problem"></p>
+                    <p style="margin:4px 0;color:var(--text-dim)">
+                      <strong>Fixing it:</strong> <span x-text="issue.what_fixing_changes"></span>
+                    </p>
+                    <p style="margin:4px 0;color:var(--text-dim)">
+                      Runs inside the Podman VM: <code style="word-break:break-all" x-text="issue.command"></code>
+                    </p>
+                    <button class="btn btn-primary btn-sm" style="margin-top:6px"
+                            @click="fixVmIssue(issue)" :disabled="!!vmFixing"
+                            x-text="vmFixing === issue.id ? 'Fixing…' : 'Fix'"></button>
+                  </div>
+                </div>
+              </template>
+
               <div x-show="servicesLoaded && dockerReady && containerRuntime" class="text-xs text-dim" style="margin-bottom:10px">
                 Using <strong x-text="containerRuntime"></strong> — detected automatically.
               </div>

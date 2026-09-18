@@ -293,9 +293,61 @@ pub async fn create_sandbox(
     }
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
+    let runtime_bin = container_runtime().await.unwrap_or("docker");
 
-    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
+    // What this sandbox is: the pool's config hash, plus the tier and whether
+    // the workspace is writable, which change the container's limits and mounts
+    // without necessarily changing that hash.
+    let fingerprint = format!(
+        "{:016x}-{:?}-{}",
+        config_hash(config),
+        config.tier,
+        if writable_workspace { "rw" } else { "ro" }
+    );
+
+    // Pick up the sandbox an earlier process left behind instead of colliding
+    // with it. See `SANDBOX_FINGERPRINT_LABEL` for why this has to exist.
+    if let Some(existing) = inspect_existing_sandbox(runtime_bin, &container_name).await {
+        let same = existing.fingerprint.as_deref() == Some(fingerprint.as_str());
+        if same && (existing.running || start_existing_sandbox(runtime_bin, &container_name).await)
+        {
+            debug!(container = %container_name, "Reusing existing sandbox");
+            return Ok(SandboxContainer {
+                container_id: existing.id,
+                agent_id: agent_id.to_string(),
+                created_at: chrono::Utc::now(),
+                is_service: config.service,
+                tier: config.tier,
+                runtime: config.runtime.clone(),
+            });
+        }
+        // A different sandbox under this name -- made from another image or
+        // config, unlabelled from before labels existed -- or one that will not
+        // start. The workspace is a bind mount, so removing the container loses
+        // nothing that was meant to persist.
+        remove_sandbox_by_name(runtime_bin, &container_name).await?;
+    }
+
+    let mut cmd = crate::quiet_command::quiet_async(runtime_bin);
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
+    cmd.arg("--label")
+        .arg(format!("{SANDBOX_FINGERPRINT_LABEL}={fingerprint}"));
+
+    // Package-manager caches somewhere writable. The root filesystem is
+    // read-only and so is `$HOME`, so `npm install` failed outright (exit 1)
+    // trying to write `~/.npm`, and pip ran with its cache silently disabled.
+    // A writable workspace keeps the cache on disk, where it survives the
+    // container and a real front-end install fits; otherwise it goes to the
+    // tmpfs, which is small and lost on stop but is all that sandbox has.
+    let cache_root = if writable_workspace {
+        format!("{}/.cache", config.workdir)
+    } else {
+        "/tmp/.cache".to_string()
+    };
+    cmd.arg("-e").arg(format!("XDG_CACHE_HOME={cache_root}"));
+    cmd.arg("-e")
+        .arg(format!("npm_config_cache={cache_root}/npm"));
+    cmd.arg("-e").arg(format!("PIP_CACHE_DIR={cache_root}/pip"));
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
     }
@@ -480,6 +532,105 @@ pub async fn hibernate_sandbox(container: &SandboxContainer) -> Result<(), Strin
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to hibernate container: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Label recording what a sandbox container was created as.
+///
+/// A sandbox's name is fixed per agent and workspace, and the container outlives
+/// the process that made it: a daemon restart, a rebuild, and the idle
+/// hibernation above all leave it in place while the in-memory pool forgets it.
+/// The next call then ran `run --name <same name>` and failed with "name is
+/// already in use", so every agent lost its sandbox after each restart and after
+/// thirty idle minutes. The label is how a later call tells "the same sandbox,
+/// pick it up" from "same name, different sandbox, replace it" without trusting
+/// the name alone.
+const SANDBOX_FINGERPRINT_LABEL: &str = "freeco.sandbox.fingerprint";
+
+/// A container already holding a sandbox's name.
+struct ExistingSandbox {
+    id: String,
+    running: bool,
+    fingerprint: Option<String>,
+}
+
+/// Look up a container by name. `None` when no such container exists.
+///
+/// Reads the JSON form rather than a `--format` template, so nothing depends on
+/// how quotes inside a template survive being passed as an argument on Windows.
+async fn inspect_existing_sandbox(runtime: &str, name: &str) -> Option<ExistingSandbox> {
+    let output = crate::quiet_command::quiet_async(runtime)
+        .arg("container")
+        .arg("inspect")
+        .arg(name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_existing_sandbox(&output.stdout)
+}
+
+/// Read a container's id, run state and sandbox fingerprint from `container
+/// inspect` JSON.
+///
+/// Kept apart from the command so the parsing -- which decides between reusing a
+/// sandbox and deleting it -- can be tested without a container runtime.
+fn parse_existing_sandbox(inspect_json: &[u8]) -> Option<ExistingSandbox> {
+    let parsed: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
+    let container = parsed.get(0)?;
+    let id = container.get("Id")?.as_str()?.to_string();
+    let running = container
+        .pointer("/State/Running")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let fingerprint = container
+        .pointer("/Config/Labels")
+        .and_then(|labels| labels.get(SANDBOX_FINGERPRINT_LABEL))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(ExistingSandbox {
+        id,
+        running,
+        fingerprint,
+    })
+}
+
+/// Start a stopped sandbox, such as one the idle cleanup hibernated.
+async fn start_existing_sandbox(runtime: &str, name: &str) -> bool {
+    matches!(
+        crate::quiet_command::quiet_async(runtime)
+            .arg("start")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await,
+        Ok(status) if status.success()
+    )
+}
+
+/// Remove a container by name, for when the name is held by a sandbox that
+/// cannot be reused.
+async fn remove_sandbox_by_name(runtime: &str, name: &str) -> Result<(), String> {
+    let output = crate::quiet_command::quiet_async(runtime)
+        .arg("rm")
+        .arg("-f")
+        .arg(name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to remove stale sandbox {name}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to remove stale sandbox {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -1171,6 +1322,34 @@ mod tests {
         assert!(!is_immutable_image_reference(
             "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         ));
+    }
+
+    /// A sandbox this code created: labelled and running, so it is reused.
+    #[test]
+    fn reads_a_labelled_running_sandbox() {
+        let json = br#"[{"Id":"abc123","State":{"Running":true},"Config":{"Labels":{"freeco.sandbox.fingerprint":"00ff-Workspace-rw"}}}]"#;
+        let found = parse_existing_sandbox(json).expect("parsed");
+        assert_eq!(found.id, "abc123");
+        assert!(found.running);
+        assert_eq!(found.fingerprint.as_deref(), Some("00ff-Workspace-rw"));
+    }
+
+    /// A sandbox from before labels existed, stopped by the idle cleanup. With
+    /// no fingerprint it can never match, so it is replaced rather than adopted.
+    #[test]
+    fn unlabelled_stopped_sandbox_has_no_fingerprint() {
+        let json = br#"[{"Id":"old","State":{"Running":false},"Config":{"Labels":null}}]"#;
+        let found = parse_existing_sandbox(json).expect("parsed");
+        assert!(!found.running);
+        assert_eq!(found.fingerprint, None);
+    }
+
+    /// No container, or output that is not inspect JSON, means nothing is there.
+    /// It must never read as a container to delete.
+    #[test]
+    fn absent_or_garbage_inspect_output_is_none() {
+        assert!(parse_existing_sandbox(b"[]").is_none());
+        assert!(parse_existing_sandbox(b"Error: no such container").is_none());
     }
 
     // ── Bind Mount Validation tests ──────────────────────────────────

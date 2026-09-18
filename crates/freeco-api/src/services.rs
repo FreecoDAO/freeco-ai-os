@@ -14,7 +14,7 @@
 
 use crate::routes::AppState;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
@@ -296,12 +296,121 @@ pub async fn list_services(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // both with "install Docker Desktop" sent someone to a download page while
     // a working runtime sat there stopped.
     let runtime_status = freeco_hands::container::runtime_status().await;
+    // Podman VM problems whose fix needs sudo in the VM. Reported here so the
+    // page can offer each fix as a button; the daemon never runs one on its own.
+    let vm_issues: Vec<serde_json::Value> = freeco_hands::container::vm_issues()
+        .await
+        .iter()
+        .map(|issue| issue.as_json())
+        .collect();
     Json(serde_json::json!({
         "docker_ready": docker,
         "runtime": runtime,
         "runtime_status": runtime_status.as_json(),
+        "vm_issues": vm_issues,
         "services": items,
     }))
+}
+
+/// Reject a state-changing request that a web page could have forged.
+///
+/// With dashboard auth off, every loopback request is trusted, and a page open
+/// in the user's browser reaches 127.0.0.1 as loopback. A cross-site "simple"
+/// POST -- a form, or a fetch with no custom headers -- is sent without a CORS
+/// preflight, so the CORS allowlist never sees it: CORS stops the page reading
+/// the response, not the request arriving. Three checks close that:
+///
+/// 1. `Content-Type: application/json`. A browser only sends that cross-site
+///    after a preflight, and the preflight is refused.
+/// 2. `Host` names a loopback address. Without this, DNS rebinding defeats the
+///    origin check: a page on evil.com rebinds its name to 127.0.0.1 and sends
+///    Origin and Host both as `evil.com:port`, which agree with each other.
+/// 3. If `Origin` is present it must be exactly `http://<Host>`. Browsers send
+///    it on POSTs; curl and agents usually do not, and they are not the threat
+///    this guards against.
+pub fn same_origin_json(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_json = content_type
+        .split(';')
+        .next()
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"));
+    if !is_json {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "this endpoint accepts only Content-Type: application/json",
+        ));
+    }
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !is_loopback_authority(host) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "the request is not addressed to this machine's loopback interface",
+        ));
+    }
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        if origin.to_str().ok() != Some(format!("http://{host}").as_str()) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "the request came from a different origin",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a `Host` value (`host` or `host:port`) names this machine.
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, _)) => inner,
+            None => return false,
+        }
+    } else {
+        authority
+            .rsplit_once(':')
+            .map_or(authority, |(name, _)| name)
+    };
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    )
+}
+
+/// POST /api/services/vm-fix/{id} — run the fix for one reported Podman VM
+/// problem, because the user pressed its Fix button.
+///
+/// The only place a fix runs. The id selects one of two fixed commands and is
+/// never part of one, and the request must pass `same_origin_json` so a web
+/// page cannot press the button on the user's behalf.
+pub async fn vm_fix(
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Err((status, reason)) = same_origin_json(&headers) {
+        return (status, Json(serde_json::json!({ "ok": false, "error": reason })));
+    }
+    if freeco_hands::container::vm_fix_command(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "error": format!("unknown VM issue '{id}'") })),
+        );
+    }
+    match freeco_hands::container::repair_vm_issue(&id).await {
+        Ok(message) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "message": message })),
+        ),
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        ),
+    }
 }
 
 /// GET /api/services/status — progress of the running install.
@@ -587,5 +696,152 @@ mod tests {
         ensure_env_file(dir.path()).unwrap();
         let again = std::fs::read_to_string(dir.path().join(".env")).unwrap();
         assert_eq!(again, "USER_TUNED=1\n");
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (name, value) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_static(name),
+                value.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    fn rejected_with(pairs: &[(&'static str, &str)]) -> Option<axum::http::StatusCode> {
+        super::same_origin_json(&headers(pairs)).err().map(|(status, _)| status)
+    }
+
+    #[test]
+    fn vm_fix_guard_rejects_a_form_post_content_type() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/x-www-form-urlencoded"),
+                ("host", "127.0.0.1:50051"),
+            ]),
+            Some(axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        );
+    }
+
+    #[test]
+    fn vm_fix_guard_rejects_a_missing_content_type() {
+        assert_eq!(
+            rejected_with(&[("host", "127.0.0.1:50051")]),
+            Some(axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+        );
+    }
+
+    /// DNS rebinding: evil.com resolves to 127.0.0.1, and the browser sends
+    /// Origin and Host both as evil.com. They agree with each other, so only
+    /// the loopback-Host rule stops this.
+    #[test]
+    fn vm_fix_guard_rejects_dns_rebinding() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json"),
+                ("host", "evil.com:50051"),
+                ("origin", "http://evil.com:50051"),
+            ]),
+            Some(axum::http::StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn vm_fix_guard_rejects_a_foreign_origin_on_the_loopback_host() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json"),
+                ("host", "127.0.0.1:50051"),
+                ("origin", "https://evil.com"),
+            ]),
+            Some(axum::http::StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn vm_fix_guard_rejects_a_loopback_origin_on_another_port() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json"),
+                ("host", "127.0.0.1:50051"),
+                ("origin", "http://127.0.0.1:4200"),
+            ]),
+            Some(axum::http::StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn vm_fix_guard_accepts_the_dashboard_on_127_0_0_1() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json"),
+                ("host", "127.0.0.1:50051"),
+                ("origin", "http://127.0.0.1:50051"),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn vm_fix_guard_accepts_the_dashboard_on_localhost() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json; charset=utf-8"),
+                ("host", "localhost:50051"),
+                ("origin", "http://localhost:50051"),
+            ]),
+            None
+        );
+    }
+
+    /// curl and agents send no Origin; the loopback Host and JSON body are
+    /// still required of them.
+    #[test]
+    fn vm_fix_guard_accepts_a_loopback_request_without_origin() {
+        assert_eq!(
+            rejected_with(&[
+                ("content-type", "application/json"),
+                ("host", "[::1]:50051"),
+            ]),
+            None
+        );
+    }
+
+    /// `server.rs` registers `/api/services/{id}/install` and then
+    /// `/api/services/vm-fix/{id}`: the same shape, a parameter against a
+    /// static segment. axum panics when a route is inserted, so a conflict
+    /// would abort daemon start-up while every other test passes -- no test
+    /// builds the full router. This registers the pair in the same order and
+    /// checks each request reaches its own handler, so a fix request can never
+    /// fall through to the install endpoint.
+    #[tokio::test]
+    async fn vm_fix_route_coexists_with_and_wins_over_the_install_route() {
+        use tower::ServiceExt;
+        let router: axum::Router<()> = axum::Router::new()
+            .route(
+                "/api/services/{id}/install",
+                axum::routing::post(|| async { axum::http::StatusCode::ACCEPTED }),
+            )
+            .route(
+                "/api/services/vm-fix/{id}",
+                axum::routing::post(|| async { axum::http::StatusCode::IM_A_TEAPOT }),
+            );
+        for (path, expected) in [
+            ("/api/services/vm-fix/resolver", axum::http::StatusCode::IM_A_TEAPOT),
+            ("/api/services/dograh/install", axum::http::StatusCode::ACCEPTED),
+        ] {
+            let status = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::post(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, expected, "{path} reached the wrong handler");
+        }
     }
 }

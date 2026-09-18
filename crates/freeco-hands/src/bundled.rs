@@ -294,7 +294,7 @@ mod tests {
                  -- check that `compose` sits before [container.env]"
             );
             assert!(
-                !(!c.image.is_empty() && c.is_stack()),
+                c.image.is_empty() || !c.is_stack(),
                 "service hand '{id}' declares both an image and a stack"
             );
             if c.health_path.is_some() {

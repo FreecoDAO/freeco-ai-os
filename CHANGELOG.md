@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An agent keeps its sandbox across a daemon restart. The container name is
+  fixed per agent and workspace, but the pool that remembers containers lives
+  in memory, so after any restart, rebuild, or idle hibernation the next
+  `docker_exec` ran `run --name <same name>` and failed with "name is already
+  in use". The agent had lost its sandbox until someone deleted the container
+  by hand. Sandboxes now carry a fingerprint label. A container with a matching
+  fingerprint is picked up again (and started if it was stopped). One with a
+  different or missing fingerprint is replaced, which is safe because
+  `/workspace` is a bind mount.
+
+- `npm install` works inside the sandbox. The root filesystem and `$HOME` are
+  read-only, so npm exited 1 trying to write `~/.npm`, and pip ran with its
+  cache silently disabled. The caches now point at the writable workspace, or
+  at `/tmp` for a read-only sandbox.
+
+- Service containers come back by themselves after the Podman VM restarts.
+  Their `unless-stopped` policy is only honoured at boot by
+  `podman-restart.service`, which ships disabled, so every reboot left CRM,
+  voice and OmniRoute exited until someone started them by hand. The daemon now
+  detects when the unit is off and reports it on Settings > Services, with the
+  exact command and a Fix button. It runs sudo inside the VM only when you
+  press Fix, and a missing /etc/resolv.conf is handled the same way instead of
+  being repaired silently. Verified: after a VM restart, all ten service
+  containers returned on their own within about ninety seconds.
+
+- A Podman VM that reports "already running" while its API refuses every
+  command is now recovered. The VM stayed up but its SSH port forward had died,
+  and another process had taken the port. The runtime watchdog treated "already
+  running" as success and retried every ten minutes, forever. This is how the
+  container runtime stayed dead for two weeks. It now checks the API, and when
+  the API is dead it cycles the VM, which re-establishes the forward.
+
 - The global spend cap actually stops spending. `check_global_budget` existed,
   read the configured hourly and daily ceilings, and returned `QuotaExceeded` --
   and had no caller anywhere in the repository, so the dashboard displayed a

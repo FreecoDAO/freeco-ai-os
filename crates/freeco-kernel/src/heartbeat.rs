@@ -449,12 +449,19 @@ mod tests {
         let registry = crate::registry::AgentRegistry::new();
         let ten_min_ago = Utc::now() - Duration::seconds(600);
         let five_min_ago = Utc::now() - Duration::seconds(300);
-        let active_agent = make_entry(
+        let mut active_agent = make_entry(
             "active-agent",
             AgentState::Running,
             ten_min_ago,
             five_min_ago,
         );
+        // Liveness is only checked for agents that run on their own: a reactive
+        // agent is idle until messaged, so check_agents skips it by design. This
+        // test predates that skip and built a default -- reactive -- agent, so
+        // check_agents returned nothing and the test failed on len().
+        active_agent.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 60,
+        };
         registry.register(active_agent).unwrap();
 
         let config = HeartbeatConfig::default(); // timeout = 180s, inactive = ~300s
@@ -473,7 +480,13 @@ mod tests {
         let registry = crate::registry::AgentRegistry::new();
         let ten_min_ago = Utc::now() - Duration::seconds(600);
         let just_now = Utc::now() - Duration::seconds(10);
-        let healthy_agent = make_entry("healthy-agent", AgentState::Running, ten_min_ago, just_now);
+        let mut healthy_agent =
+            make_entry("healthy-agent", AgentState::Running, ten_min_ago, just_now);
+        // A self-running agent, for the same reason as the test above: a
+        // reactive one is skipped and never reaches the timeout check.
+        healthy_agent.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 60,
+        };
         registry.register(healthy_agent).unwrap();
 
         let config = HeartbeatConfig::default(); // timeout = 180s

@@ -682,6 +682,10 @@ pub async fn build_router(
             axum::routing::post(crate::services::install_service),
         )
         .route(
+            "/api/services/vm-fix/{id}",
+            axum::routing::post(crate::services::vm_fix),
+        )
+        .route(
             "/api/system/freeze",
             axum::routing::get(routes::get_freeze)
                 .post(routes::freeze_system)
@@ -1019,6 +1023,9 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut previous: Option<RuntimeStatus> = None;
         let mut last_start_attempt: Option<tokio::time::Instant> = None;
+        // Podman VM problems seen on the last tick, so each is logged once when
+        // it appears and once when it clears rather than every minute.
+        let mut previous_vm_issues: Vec<&'static str> = Vec::new();
         loop {
             interval.tick().await;
             let status = freeco_hands::container::runtime_status().await;
@@ -1039,12 +1046,34 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                 previous = Some(status.clone());
             }
 
-            // While the runtime is up, make sure the VM can still start
-            // containers at all. A missing /etc/resolv.conf leaves the runtime
-            // answering normally while every `run` fails, so the probe above
-            // reports healthy and nothing works.
+            // While the runtime is up, look for VM problems that stop services
+            // working: a missing /etc/resolv.conf (every `run` fails while the
+            // probe above still reports healthy) and a disabled
+            // podman-restart.service (services stay down after every reboot).
+            // Both fixes need sudo inside the VM, which is the user's decision,
+            // so the watchdog only reports them -- in the log when one appears
+            // or clears, and on Settings > Services, which offers the fix as a
+            // button.
             if matches!(status, RuntimeStatus::Running { .. }) {
-                freeco_hands::container::ensure_vm_resolver().await;
+                let issues = freeco_hands::container::vm_issues().await;
+                let ids: Vec<&'static str> = issues.iter().map(|issue| issue.id).collect();
+                if ids != previous_vm_issues {
+                    for issue in issues
+                        .iter()
+                        .filter(|issue| !previous_vm_issues.contains(&issue.id))
+                    {
+                        tracing::warn!(
+                            issue = issue.id,
+                            "{} -- {} Fix it from Settings > Services.",
+                            issue.title,
+                            issue.problem
+                        );
+                    }
+                    for gone in previous_vm_issues.iter().filter(|id| !ids.contains(*id)) {
+                        info!(issue = %gone, "Podman VM issue resolved");
+                    }
+                    previous_vm_issues = ids;
+                }
 
                 // Put back service hands whose containers are gone.
                 //
