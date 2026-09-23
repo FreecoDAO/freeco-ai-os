@@ -3461,6 +3461,57 @@ impl FreecoKernel {
         );
     }
 
+    /// Rename an agent and carry its on-disk folder with it.
+    ///
+    /// The manifest is mirrored to `agents/<name>/agent.toml`, and boot spawns
+    /// every folder there whose name no agent has. A rename used to change
+    /// only the registry, so the next manifest write started a fresh folder
+    /// under the new name and left the old one behind -- and on the following
+    /// restart that old folder no longer matched anyone, so it was spawned as a
+    /// second copy of the same agent, sharing its workspace. That is how the
+    /// assistant came to exist twice.
+    pub fn rename_agent(&self, agent_id: AgentId, new_name: &str) -> KernelResult<()> {
+        let old_name = self.registry.get(agent_id).map(|e| e.name.clone());
+        self.registry.update_name(agent_id, new_name.to_string())?;
+        if let Some(old) = old_name.filter(|old| old != new_name) {
+            self.move_agent_dir(&old, new_name);
+        }
+        Ok(())
+    }
+
+    /// Move `agents/<old>` to `agents/<new>`. If `agents/<new>` already exists,
+    /// the old folder goes to `archive/renamed-agents/` instead: never left
+    /// where boot would spawn it, and never deleted.
+    fn move_agent_dir(&self, old: &str, new: &str) {
+        let plain = |n: &str| {
+            !n.is_empty() && n != "." && n != ".." && !n.contains(['/', '\\'])
+        };
+        if !plain(old) || !plain(new) {
+            warn!(old, new, "agent name is not a plain folder name; not moving its folder");
+            return;
+        }
+        let agents = self.config.home_dir.join("agents");
+        let from = agents.join(old);
+        if !from.is_dir() {
+            return;
+        }
+        let to = agents.join(new);
+        let dest = if to.exists() {
+            let archive = self.config.home_dir.join("archive").join("renamed-agents");
+            if let Err(e) = std::fs::create_dir_all(&archive) {
+                warn!(error = %e, "cannot create archive for renamed agent folder");
+                return;
+            }
+            archive.join(format!("{old}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S")))
+        } else {
+            to
+        };
+        match std::fs::rename(&from, &dest) {
+            Ok(()) => info!(from = %from.display(), to = %dest.display(), "moved agent folder after rename"),
+            Err(e) => warn!(error = %e, from = %from.display(), "could not move agent folder after rename"),
+        }
+    }
+
     /// Persist an agent's manifest to its `agent.toml` on disk so that
     /// dashboard-driven config changes (model, provider, fallback, etc.)
     /// survive a restart.  The on-disk file lives at

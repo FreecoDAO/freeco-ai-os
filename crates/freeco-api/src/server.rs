@@ -70,6 +70,30 @@ pub async fn build_router(
             .unwrap_or_else(|| kernel.config.data_dir.join("freeco.db")),
     );
 
+    // Learn what each key is actually entitled to, in the background.
+    //
+    // Model availability is two questions -- is there a key, and does that key
+    // reach this model -- and only the first was ever asked at boot. The probe
+    // that answers the second existed but a button in Settings was its only
+    // caller, so on a machine where nobody pressed it `served_models.json`
+    // never appeared and every model of a keyed provider was offered. Doing it
+    // here makes the picker honest from the first page load instead.
+    //
+    // Detached and never awaited: the control plane must come up whether or
+    // not a provider answers, so a slow or unreachable one costs nothing.
+    {
+        let probe_state = state.clone();
+        tokio::spawn(async move {
+            let summary = crate::routes::probe_and_register_models(&probe_state).await;
+            info!(
+                probed = ?summary.checked,
+                skipped = ?summary.skipped,
+                added = summary.added.len(),
+                "model entitlement probe complete"
+            );
+        });
+    }
+
     // Start WS cron broadcaster — subscribes to kernel event bus and pushes
     // cron job results to all connected WebSocket clients in real-time.
     ws::start_ws_cron_broadcaster(kernel.clone());
@@ -176,6 +200,7 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        .route("/fonts/{name}", axum::routing::get(webchat::font_file))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/manifest.json", axum::routing::get(webchat::manifest_json))
@@ -1026,8 +1051,30 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
         // Podman VM problems seen on the last tick, so each is logged once when
         // it appears and once when it clears rather than every minute.
         let mut previous_vm_issues: Vec<&'static str> = Vec::new();
+        let mut last_tick_wall = std::time::SystemTime::now();
         loop {
             interval.tick().await;
+
+            // Waking from sleep shows up as a jump in wall-clock time between
+            // two one-minute ticks. The Podman VM rarely survives sleep intact,
+            // and a start attempt made in the seconds before the PC dozed off
+            // again would otherwise hold the next one back for ten minutes --
+            // on a laptop that sleeps several times a day, long enough for the
+            // owner to find every service down.
+            let now_wall = std::time::SystemTime::now();
+            let gap = now_wall
+                .duration_since(last_tick_wall)
+                .unwrap_or_default();
+            last_tick_wall = now_wall;
+            if gap > std::time::Duration::from_secs(180) {
+                info!(
+                    asleep_secs = gap.as_secs(),
+                    "resumed from sleep; rechecking the container runtime now"
+                );
+                last_start_attempt = None;
+                previous = None;
+            }
+
             let status = freeco_hands::container::runtime_status().await;
 
             if previous.as_ref() != Some(&status) {

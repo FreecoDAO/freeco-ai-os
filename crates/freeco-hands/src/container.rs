@@ -18,6 +18,75 @@ use std::time::Duration;
 /// than failing, and every caller inherits that hang. A probe that cannot fail
 /// is worse than one that returns false.
 const RUNTIME_TIMEOUT: Duration = Duration::from_secs(20);
+// Every runtime command below is spawned with `kill_on_drop(true)`. A timeout
+// drops the future but not the process it started: without this, a `podman`
+// call that hung after the PC slept kept running in the background, holding
+// Podman's lock, so every later call -- the watchdog's included -- queued
+// behind it and the daemon reported the runtime down while it was up.
+
+/// When the daemon last restarted WSL, in seconds since the Unix epoch.
+static LAST_WSL_RESTART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Minimum spacing between two WSL restarts.
+const WSL_RESTART_SPACING_SECS: u64 = 600;
+
+/// Last resort when the Podman VM will not come back: restart WSL itself.
+///
+/// After Windows wakes from Modern Standby the VM can be left in a state no
+/// `podman machine` command clears: the VM runs and sshd listens inside it,
+/// but WSL's localhost forwarding is gone, so `machine start` fails with
+/// "machine is not listening on ssh port" and `stop`/`start` repeats the
+/// failure. Restarting WSL is the one step that has cleared it every time it
+/// was observed. It also stops any other WSL distribution, which the owner
+/// accepted for this. Services come back on their own: podman-restart.service
+/// restarts containers with a restart policy, and the watchdog restarts
+/// service hands within a minute.
+///
+/// Rate-limited so a VM that is broken for some other reason cannot make the
+/// daemon restart WSL in a loop.
+#[cfg(windows)]
+async fn restart_wsl_then_start() -> bool {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_WSL_RESTART.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < WSL_RESTART_SPACING_SECS {
+        tracing::warn!(
+            "Podman VM still unreachable; WSL was restarted {}s ago, not restarting it again yet",
+            now.saturating_sub(last)
+        );
+        return false;
+    }
+    LAST_WSL_RESTART.store(now, Ordering::Relaxed);
+    tracing::warn!(
+        "Podman VM unreachable after starting and restarting it; restarting WSL to clear \
+         its port forwarding (typical after the PC wakes from sleep)"
+    );
+    let _ = tokio::time::timeout(
+        Duration::from_secs(90),
+        tokio::process::Command::new("wsl")
+            .kill_on_drop(true)
+            .arg("--shutdown")
+            .status(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let (started, stderr) = podman_machine(&["start"], 300).await;
+    let ok = started && probe("podman").await;
+    if ok {
+        tracing::info!("Podman VM recovered after restarting WSL");
+    } else {
+        tracing::warn!(error = %stderr.trim(), "Podman VM still unreachable after restarting WSL");
+    }
+    ok
+}
+
+#[cfg(not(windows))]
+async fn restart_wsl_then_start() -> bool {
+    false
+}
 
 /// Which runtime to use: docker when its daemon answers, else podman.
 ///
@@ -125,7 +194,7 @@ pub fn vm_fix_command(id: &str) -> Option<String> {
 async fn vm_ssh(script: &str, timeout: Duration) -> Option<String> {
     let out = tokio::time::timeout(
         timeout,
-        tokio::process::Command::new("podman")
+        tokio::process::Command::new("podman").kill_on_drop(true)
             .args(["machine", "ssh", script])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -150,7 +219,7 @@ pub async fn check_vm_resolver() -> Option<VmIssue> {
     }
     let present = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman")
+        tokio::process::Command::new("podman").kill_on_drop(true)
             .args(["machine", "ssh", "test -f /etc/resolv.conf"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -284,7 +353,7 @@ pub async fn try_start_runtime() -> bool {
 async fn start_podman_machine() -> bool {
     let listed = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman")
+        tokio::process::Command::new("podman").kill_on_drop(true)
             .args(["machine", "list", "--format", "{{.Name}}"])
             .output(),
     )
@@ -309,7 +378,11 @@ async fn start_podman_machine() -> bool {
     // answered "already running". The watchdog retried that every ten minutes
     // and could never succeed.
     if !stderr.to_lowercase().contains("already running") {
-        return false;
+        // A start that fails outright is what the post-sleep state looks
+        // like: "machine did not transition into running state: ssh error:
+        // machine is not listening on ssh port".
+        tracing::warn!(error = %stderr.trim(), "podman machine start failed");
+        return restart_wsl_then_start().await;
     }
     if probe("podman").await {
         return true;
@@ -326,14 +399,17 @@ async fn start_podman_machine() -> bool {
          forward is dead. Restarting the VM to re-establish it."
     );
     let _ = podman_machine(&["stop"], 120).await;
-    podman_machine(&["start"], 300).await.0
+    if podman_machine(&["start"], 300).await.0 && probe("podman").await {
+        return true;
+    }
+    restart_wsl_then_start().await
 }
 
 /// Run `podman machine <args>`, returning whether it succeeded and its stderr.
 async fn podman_machine(args: &[&str], timeout_secs: u64) -> (bool, String) {
     let run = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("podman")
+        tokio::process::Command::new("podman").kill_on_drop(true)
             .arg("machine")
             .args(args)
             .stdout(std::process::Stdio::null())
@@ -363,7 +439,7 @@ pub async fn runtime_status() -> RuntimeStatus {
     }
     let listed = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman")
+        tokio::process::Command::new("podman").kill_on_drop(true)
             .args(["machine", "list", "--format", "{{.Name}}"])
             .output(),
     )
@@ -410,7 +486,7 @@ impl RuntimeStatus {
 }
 
 async fn probe(runtime: &str) -> bool {
-    let cmd = tokio::process::Command::new(runtime)
+    let cmd = tokio::process::Command::new(runtime).kill_on_drop(true)
         .arg("version")
         .arg("--format")
         .arg("{{.Server.Version}}")
@@ -583,6 +659,7 @@ async fn wait_service_healthy(rt: &str, name: &str, cmd: &[String], budget_secs:
     let deadline = tokio::time::Instant::now() + Duration::from_secs(budget_secs);
     while tokio::time::Instant::now() < deadline {
         let mut c = tokio::process::Command::new(rt);
+        c.kill_on_drop(true);
         c.arg("exec").arg(name);
         for part in cmd {
             c.arg(part);
@@ -620,7 +697,7 @@ async fn start_native_stack(
     // Idempotent: an existing network from a previous start is fine.
     let _ = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new(rt)
+        tokio::process::Command::new(rt).kill_on_drop(true)
             .args(["network", "create", &net])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -635,7 +712,7 @@ async fn start_native_stack(
         if is_running(&name).await {
             continue;
         }
-        let _ = tokio::process::Command::new(rt)
+        let _ = tokio::process::Command::new(rt).kill_on_drop(true)
             .args(["rm", "-f", &name])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -643,6 +720,7 @@ async fn start_native_stack(
             .await;
 
         let mut cmd = tokio::process::Command::new(rt);
+        cmd.kill_on_drop(true);
         cmd.args(["run", "-d", "--name", &name, "--restart", &spec.restart]);
         // The alias is what makes `postgres://user@db:5432` resolve inside the
         // application container.
@@ -767,7 +845,7 @@ async fn start_stack(
     let project = project_name(hand_id, tenant);
     let out = tokio::time::timeout(
         Duration::from_secs(900), // first run pulls images; a CRM stack is gigabytes
-        tokio::process::Command::new(rt)
+        tokio::process::Command::new(rt).kill_on_drop(true)
             .args(["compose", "-p", &project, "up", "-d"])
             .current_dir(&dir)
             .output(),
@@ -828,7 +906,7 @@ pub async fn is_running(name: &str) -> bool {
     let Some(rt) = runtime().await else {
         return false;
     };
-    let out = tokio::process::Command::new(rt)
+    let out = tokio::process::Command::new(rt).kill_on_drop(true)
         .args(["ps", "--filter", &format!("name={name}"), "--format", "{{.Names}}"])
         .output();
     match tokio::time::timeout(RUNTIME_TIMEOUT, out).await {
@@ -875,7 +953,7 @@ pub async fn start(
 
     // Remove any stopped container of the same name, or `run` fails on the
     // leftover rather than starting.
-    let _ = tokio::process::Command::new(rt)
+    let _ = tokio::process::Command::new(rt).kill_on_drop(true)
         .args(["rm", "-f", &name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -883,6 +961,7 @@ pub async fn start(
         .await;
 
     let mut cmd = tokio::process::Command::new(rt);
+    cmd.kill_on_drop(true);
     cmd.args(["run", "-d", "--name", &name, "--restart", &spec.restart]);
 
     if spec.host_network {
@@ -978,19 +1057,19 @@ pub async fn stop_native_stack(
         let name = service_container_name(hand_id, tenant, &spec.services[idx].name);
         let _ = tokio::time::timeout(
             Duration::from_secs(60),
-            tokio::process::Command::new(rt).args(["stop", &name]).status(),
+            tokio::process::Command::new(rt).kill_on_drop(true).args(["stop", &name]).status(),
         )
         .await;
         // Removed, not just stopped: the container is recreated on next start,
         // while the named volumes -- the actual data -- are left untouched.
-        let _ = tokio::process::Command::new(rt)
+        let _ = tokio::process::Command::new(rt).kill_on_drop(true)
             .args(["rm", "-f", &name])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await;
     }
-    let _ = tokio::process::Command::new(rt)
+    let _ = tokio::process::Command::new(rt).kill_on_drop(true)
         .args(["network", "rm", &network_name(hand_id, tenant)])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1008,7 +1087,7 @@ pub async fn stop(hand_id: &str, tenant: Option<&str>, is_stack: bool) -> Result
         let dir = stack_dir(hand_id, tenant);
         let _ = tokio::time::timeout(
             Duration::from_secs(180),
-            tokio::process::Command::new(rt)
+            tokio::process::Command::new(rt).kill_on_drop(true)
                 .args(["compose", "-p", &project, "down"])
                 .current_dir(&dir)
                 .status(),
@@ -1019,7 +1098,7 @@ pub async fn stop(hand_id: &str, tenant: Option<&str>, is_stack: bool) -> Result
     let name = container_name(hand_id, tenant);
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
-        tokio::process::Command::new(rt).args(["stop", &name]).status(),
+        tokio::process::Command::new(rt).kill_on_drop(true).args(["stop", &name]).status(),
     )
     .await;
     Ok(())

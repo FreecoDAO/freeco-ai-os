@@ -744,6 +744,16 @@ impl SessionStore {
         Ok((canonical.compacted_summary.clone(), recent))
     }
 
+    /// How many messages this agent's conversation actually holds.
+    ///
+    /// `canonical_context` returns a trailing window, so a caller that shows
+    /// its result has no way to tell a short conversation from a long one it
+    /// is only seeing the end of. A reader that cannot say "there is more"
+    /// looks exactly like one that lost the rest.
+    pub fn canonical_len(&self, agent_id: AgentId) -> FreecoResult<usize> {
+        Ok(self.load_canonical(agent_id)?.messages.len())
+    }
+
     /// Persist a canonical session to SQLite.
     fn save_canonical(&self, canonical: &CanonicalSession) -> FreecoResult<()> {
         let conn = self

@@ -258,6 +258,7 @@ function freecoAssistant() {
     showModels: false,
     models: [],
     currentModel: '',
+    currentProvider: '',
 
     // Only models that can actually answer here, labelled with who serves them
     // and what they cost.
@@ -275,8 +276,24 @@ function freecoAssistant() {
     // first message.
     async loadModels() {
       try {
-        var status = await FreecoAPI.get('/api/status').catch(function () { return {}; });
-        this.currentModel = (status && status.default_model) || this.currentModel || '';
+        // The assistant's own model, not the system default.
+        //
+        // This read `status.default_model`, which is the model new agents are
+        // created with -- so the widget showed one model while the assistant
+        // it talks to was running another, and the same assistant appeared to
+        // be two different agents depending on which surface you looked at.
+        // The agent is the authority on what the agent is using.
+        var agentId = this.agent && this.agent.id;
+        var agent = agentId
+          ? await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId)).catch(function () { return null; })
+          : null;
+        if (agent && agent.model_name) {
+          this.currentModel = agent.model_name;
+          this.currentProvider = agent.model_provider || '';
+        } else {
+          var status = await FreecoAPI.get('/api/status').catch(function () { return {}; });
+          this.currentModel = (status && status.default_model) || this.currentModel || '';
+        }
         var data = await FreecoAPI.get('/api/models').catch(function () { return null; });
         var list = (data && (data.models || data)) || [];
         if (!Array.isArray(list)) list = [];
@@ -332,6 +349,7 @@ function freecoAssistant() {
         await FreecoAPI.put('/api/agents/' + this.agent.id + '/model',
           { provider: m.provider || undefined, model: m.id });
         this.currentModel = m.id;
+        this.currentProvider = m.provider || '';
         this.modelNote = 'Now using ' + (m.label || m.id);
         FreecoToast.success('Now using ' + (m.label || m.id) + '.');
       } catch (e) {

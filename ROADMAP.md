@@ -97,6 +97,42 @@ recorded as such.
 
 ## Unreleased
 
+### Chat, attachments and runtime recovery — verified 2026-09-23
+
+Checked against the running daemon on this machine, not against the commits.
+
+- 🟨 Attachments of any supported type reach the agent. Verified: a `.docx`
+  uploaded (HTTP 201, a type the old allow-list refused), staged to
+  `workspaces/Developer/uploads/`, and read by the agent with `docx2txt` inside
+  its sandbox — no host shell involved.
+- 🟨 Sandbox image `freeco-sandbox:t3` reads documents: `pdftotext`, `tesseract`
+  (en/fr/de/ru), `docx2txt`, `pypdf`, `python-docx`, `openpyxl`. Verified by
+  extracting text from a real PDF in a container with `--network none`.
+- 🟨 Model entitlement is probed at boot and persisted to `served_models.json`.
+  Verified: NVIDIA shows 70 of 95 models available rather than all 95; Novita
+  went from 3 visible models to 54.
+- 🟨 Conversation history pages instead of silently stopping at 50. Verified on
+  an agent holding 284 messages: `total` and `has_more` returned, earlier
+  messages loadable. The prompt sent to the model is unchanged.
+- 🟨 Renaming an agent moves its folder. Verified by renaming twice: one folder
+  at each step, no orphan left. This is what had produced a second assistant.
+- 🟨 The container runtime recovers unattended. Verified by stopping the Podman
+  VM: all 12 containers were back **50 seconds** later with no human action.
+- 🟨 Fonts are served from the binary; the dashboard makes no request to Google,
+  which is also removed from its Content-Security-Policy.
+
+Not yet verified, and recorded as such:
+
+- ⚠️ Recovery from a real sleep/wake cycle, and the `wsl --shutdown` escalation
+  it depends on. The code is in place; the state that triggers it has not been
+  reproduced deliberately.
+- ⚠️ A live fallback failover. Each part is verified separately — the repaired
+  model id answers 200, the chain-error reporting has tests — but no real
+  failover has been observed end to end.
+- ⚠️ `ReloadBrowserConfig` is queued by the config watcher and handled nowhere,
+  so browser settings apply only after a restart.
+
+
 ### Org structure — principles taken from the Yanovsky material
 
 Seven structural principles, each with the mechanism it maps to here. Kept

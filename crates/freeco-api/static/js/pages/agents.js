@@ -116,6 +116,15 @@ function agentsPage() {
         });
       });
       out.sort(function (a, b) { return a.label.localeCompare(b.label); });
+      // Whatever the agent is actually set to always has an option, even if
+      // the catalog has not loaded or no longer lists that provider. A select
+      // whose bound value is missing silently rewrites that value to the first
+      // option, so an absent entry here does not merely hide the setting -- it
+      // destroys it on render.
+      var cur = this.configForm && this.configForm.api_key_env;
+      if (cur && !seen[cur]) {
+        out.unshift({ env: cur, label: cur + '  (current)' });
+      }
       return out;
     },
 
@@ -286,6 +295,64 @@ function agentsPage() {
         this.catalogModels = [];
       }
       this.catalogLoading = false;
+    },
+
+    // Models that a configured key can actually call, for every place in the
+    // UI that asks someone to name a model.
+    //
+    // Typing the id by hand is how the fallbacks got set to "nemotron" and
+    // "nemotron-3-ultra-550b-a55b" -- neither is a real id, both answer 404,
+    // and the failure only shows up when the primary provider is already down
+    // and the backup is the last thing left. Nobody should have to know that
+    // NVIDIA's ids begin with "nvidia/" to configure a backup.
+    workingModels: [],
+    workingModelsLoading: false,
+
+    async loadWorkingModels() {
+      if (this.workingModels.length || this.workingModelsLoading) return;
+      this.workingModelsLoading = true;
+      try {
+        var d = await FreecoAPI.get('/api/models?available=true');
+        var all = (d && d.models) || [];
+        this.workingModels = all.filter(function (m) {
+          return m.available !== false && m.supports_tools !== false;
+        });
+        this.workingModels.sort(function (a, b) {
+          if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
+          return String(a.id).localeCompare(String(b.id));
+        });
+      } catch (e) {
+        this.workingModels = [];
+      }
+      this.workingModelsLoading = false;
+    },
+
+    // Choosing a model settles its provider and its key in the same action.
+    // Leaving them as three independent fields is what let an agent end up
+    // naming one provider while holding another's key.
+    onConfigModelChange() {
+      var id = this.configForm && this.configForm.model;
+      var m = (this.workingModels || []).filter(function (x) { return x.id === id; })[0];
+      if (!m || !m.provider) return;
+      this.configForm.provider = m.provider;
+      var p = (this.providerIndex || {})[m.provider];
+      if (p && p.api_key_env) this.configForm.api_key_env = p.api_key_env;
+    },
+
+    // Label a model the way a person picks one: who serves it, then its name.
+    workingModelLabel(m) {
+      var name = m.display_name && m.display_name !== m.id ? m.display_name : m.id;
+      return (m.provider || '?') + ' — ' + name;
+    },
+
+    // Same guarantee as providerKeyOptions: whatever is currently set always
+    // has an option, so rendering a select can never silently rewrite it.
+    workingModelOptions(current) {
+      var out = (this.workingModels || []).slice();
+      if (current && !out.some(function (m) { return m.id === current; })) {
+        out.unshift({ id: current, provider: '', display_name: current + '  (current)' });
+      }
+      return out;
     },
 
     editingModel: false,
@@ -591,6 +658,16 @@ function agentsPage() {
       this.detailAgent = detail;
       this.detailAgent._fallbacks = detail.fallback_models || [];
       this.configForm = this.buildConfigForm(detail);
+      // Providers must be known BEFORE the config panel renders.
+      //
+      // They used to load on the key field's `@focus`, so the first render had
+      // one option in that select -- "None needed (local model)". The agent's
+      // real value had no matching <option>, so the browser selected index 0
+      // and x-model wrote that blank back over it. Opening this panel was
+      // enough to unbind an agent's API key, and opening it is exactly what
+      // you do to change a model.
+      await this.loadProviders();
+      await this.loadWorkingModels();
       this.showDetailModal = true;
     },
 
@@ -931,10 +1008,19 @@ function agentsPage() {
 
     // ── Fallback model chain ──
     async addFallback() {
-      if (!this.detailAgent || !this.newFallbackValue.trim()) return;
-      var parts = this.newFallbackValue.trim().split('/');
-      var provider = parts.length > 1 ? parts[0] : this.detailAgent.model_provider;
-      var model = parts.length > 1 ? parts.slice(1).join('/') : parts[0];
+      if (!this.detailAgent || !this.newFallbackValue) return;
+      // The id comes from the catalog, so it is stored exactly as the provider
+      // answers to it. Splitting a typed "provider/model" on the slash could
+      // not tell a provider prefix from an id that genuinely begins with the
+      // vendor's name, and NVIDIA's all do.
+      var id = String(this.newFallbackValue).trim();
+      var picked = (this.workingModels || []).filter(function (m) { return m.id === id; })[0];
+      if (!picked) {
+        FreecoToast.error('Pick a model from the list — it must be one a configured key can call.');
+        return;
+      }
+      var provider = picked.provider || this.detailAgent.model_provider;
+      var model = picked.id;
       if (!this.detailAgent._fallbacks) this.detailAgent._fallbacks = [];
       this.detailAgent._fallbacks.push({ provider: provider, model: model });
       try {

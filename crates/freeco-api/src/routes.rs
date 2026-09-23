@@ -297,6 +297,164 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
     Json(agents)
 }
 
+/// Largest attachment copied into an agent's workspace.
+const MAX_STAGED_ATTACHMENT: usize = 50 * 1024 * 1024;
+
+/// A filename that is safe to create inside the workspace: the last path
+/// component only, ordinary characters, never hidden, never empty.
+fn safe_upload_name(name: &str, fallback: &str) -> String {
+    // The last component by plain string split rather than `Path`: `Path` is
+    // platform-dependent -- Windows reads "a:" as a drive and a backslash as a
+    // separator, Linux does neither -- and this must behave the same on both.
+    let normalized = name.trim().replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() || cleaned == ".." {
+        fallback.to_string()
+    } else {
+        cleaned.chars().take(120).collect()
+    }
+}
+
+/// Put every attachment where the agent can actually reach it, and say where.
+///
+/// Attachments used to reach the agent only if they were images: everything
+/// else -- a PDF, a spreadsheet, a Word file -- was dropped by
+/// `resolve_attachments` without a word. The upload succeeded, the user saw
+/// the file in the chat, and the agent never received it, so it went looking
+/// for the file across the user's disk with a host shell. The file now lands
+/// in the agent's own workspace, which is also `/workspace` inside its
+/// sandbox, and the message carries both paths so the agent does not have to
+/// guess.
+///
+/// Returns the note to append to the user's message, or None when there was
+/// nothing to stage.
+pub fn stage_attachments(
+    kernel: &freeco_kernel::FreecoKernel,
+    agent_id: AgentId,
+    attachments: &[AttachmentRef],
+) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let workspace = kernel
+        .registry
+        .get(agent_id)
+        .and_then(|e| e.manifest.workspace.clone())?;
+    let upload_dir = std::env::temp_dir().join("freeco_uploads");
+    let dest_dir = workspace.join("uploads");
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        tracing::warn!(error = %e, dir = %dest_dir.display(), "cannot create uploads dir");
+        return Some(format!(
+            "\n\n[The user attached {} file(s), but they could not be saved to your \
+             workspace ({e}). Tell the user; do not search the disk for them.]",
+            attachments.len()
+        ));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for att in attachments {
+        // The id names the file in the upload directory; anything else could
+        // point outside it.
+        if uuid::Uuid::parse_str(&att.file_id).is_err() {
+            continue;
+        }
+        let meta = UPLOAD_REGISTRY.get(&att.file_id);
+        let original = if !att.filename.trim().is_empty() {
+            att.filename.clone()
+        } else {
+            meta.as_ref().map(|m| m.filename.clone()).unwrap_or_default()
+        };
+        let content_type = meta
+            .as_ref()
+            .map(|m| m.content_type.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| att.content_type.clone());
+        drop(meta);
+        let name = safe_upload_name(&original, &att.file_id);
+
+        let bytes = match std::fs::read(upload_dir.join(&att.file_id)) {
+            Ok(b) if b.len() <= MAX_STAGED_ATTACHMENT => b,
+            Ok(b) => {
+                lines.push(format!(
+                    "- {name}: too large to stage ({} MB, limit {} MB)",
+                    b.len() / (1024 * 1024),
+                    MAX_STAGED_ATTACHMENT / (1024 * 1024)
+                ));
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(file_id = %att.file_id, error = %e, "upload missing when staging");
+                lines.push(format!(
+                    "- {name}: the upload could not be read; ask the user to attach it again"
+                ));
+                continue;
+            }
+        };
+
+        // Same name, same bytes: the file is already there. Same name,
+        // different bytes: keep both rather than overwrite what the agent
+        // may already be working on.
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut final_name = name.clone();
+        let mut n = 2;
+        loop {
+            let path = dest_dir.join(&final_name);
+            match std::fs::read(&path) {
+                Ok(existing) if existing == bytes => break,
+                Ok(_) => {
+                    final_name = format!("{stem} ({n}){ext}");
+                    n += 1;
+                }
+                Err(_) => {
+                    if let Err(e) = std::fs::write(&path, &bytes) {
+                        tracing::warn!(error = %e, path = %path.display(), "cannot stage upload");
+                        lines.push(format!("- {name}: could not be saved ({e})"));
+                        final_name.clear();
+                    }
+                    break;
+                }
+            }
+        }
+        if final_name.is_empty() {
+            continue;
+        }
+        let kind = if content_type.is_empty() {
+            String::new()
+        } else {
+            format!("{content_type}, ")
+        };
+        lines.push(format!(
+            "- uploads/{final_name} ({kind}{} KB) -- in your sandbox: /workspace/uploads/{final_name}",
+            bytes.len().div_ceil(1024)
+        ));
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n[Files the user attached, saved in your workspace]\n{}\n\
+         Read them from there. For PDFs and office documents use your sandbox \
+         (e.g. `pdftotext /workspace/uploads/<file> -`); if a reader is \
+         missing, install it inside the sandbox, never on the host.",
+        lines.join("\n")
+    ))
+}
+
 /// Resolve uploaded file attachments into ContentBlock::Image blocks.
 ///
 /// Reads each file from the upload directory, base64-encodes it, and
@@ -442,12 +600,18 @@ pub async fn send_message(
         None
     };
 
+    // Every attachment, not only images, goes into the agent's workspace.
+    let message = match stage_attachments(&state.kernel, agent_id, &req.attachments) {
+        Some(note) => format!("{}{}", req.message, note),
+        None => req.message.clone(),
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
         .kernel
         .send_message_with_handle_and_blocks(
             agent_id,
-            &req.message,
+            &message,
             Some(kernel_handle),
             content_blocks,
             req.sender_id,
@@ -7159,11 +7323,7 @@ pub async fn patch_agent(
 
     // Apply partial updates using dedicated registry methods
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
-        if let Err(e) = state
-            .kernel
-            .registry
-            .update_name(agent_id, name.to_string())
-        {
+        if let Err(e) = state.kernel.rename_agent(agent_id, name) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("{e}")})),
@@ -7695,7 +7855,25 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Only providers with a working key are queried -- the rest would 401 and add
 /// nothing but noise. Models already known are left alone rather than
 /// overwritten, so hand-tuned pricing and tier survive a refresh.
-pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// What one catalog refresh did: models registered, providers probed, providers
+/// passed over and why.
+pub struct ModelRefreshSummary {
+    pub added: Vec<String>,
+    pub checked: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Ask each configured provider which models its key may actually call, record
+/// that entitlement, and register anything the compiled catalog lacks.
+///
+/// Extracted from the HTTP handler so the daemon can also run this at boot.
+/// While a button in Settings was the only caller, `served_models.json` never
+/// came into existence on a machine where nobody pressed it; `is_served` then
+/// answers None for every model and availability quietly degrades to "this
+/// provider has some key". That is how an OpenAI project entitled to one model
+/// went on offering all 129, every other pick returning `Project does not have
+/// access` with no reply from the agent at all.
+pub async fn probe_and_register_models(state: &Arc<AppState>) -> ModelRefreshSummary {
     // (provider id, models endpoint, whether ids carry a vendor prefix)
     let sources: Vec<(&str, String, bool)> = vec![
         (
@@ -7729,10 +7907,11 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     let client = match client {
         Ok(c) => c,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("http client: {e}")})),
-            )
+            return ModelRefreshSummary {
+                added: Vec::new(),
+                checked: Vec::new(),
+                skipped: vec![format!("http client: {e}")],
+            }
         }
     };
 
@@ -7742,7 +7921,11 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
 
     for (provider, url, _vendor_prefixed) in sources {
         let env_var = state.kernel.config.resolve_api_key_env(provider);
-        let key = std::env::var(&env_var).unwrap_or_default();
+        // vault -> dotenv -> env, not the environment alone. A key held only in
+        // vault.enc is invisible to std::env::var, so the provider would be
+        // skipped here as unkeyed while the dashboard showed it configured --
+        // and its models would keep their optimistic availability forever.
+        let key = state.kernel.resolve_credential(&env_var).unwrap_or_default();
         if key.is_empty() {
             skipped.push(format!("{provider} (no key)"));
             continue;
@@ -7867,13 +8050,23 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         }
     }
 
+    ModelRefreshSummary {
+        added,
+        checked,
+        skipped,
+    }
+}
+
+/// POST /api/models/refresh — re-probe every configured provider on demand.
+pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let summary = probe_and_register_models(&state).await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "added": added.len(),
-            "models": added,
-            "checked": checked,
-            "skipped": skipped,
+            "added": summary.added.len(),
+            "models": summary.added,
+            "checked": summary.checked,
+            "skipped": summary.skipped,
         })),
     )
 }
@@ -8934,9 +9127,28 @@ fn write_default_model_config(
 /// Returns the same window the agent itself is given, plus the compacted
 /// summary of everything older, so what the user sees matches what the model
 /// sees rather than being a second, prettier version of it.
+/// How much of the conversation to return. Absent means the default page.
+#[derive(serde::Deserialize)]
+pub struct HistoryQuery {
+    pub limit: Option<usize>,
+}
+
+/// Messages returned when the caller does not ask for a number.
+///
+/// The endpoint used to pass None and take `canonical_context`'s own default of
+/// 50, which is the size of the model's replay window -- a prompt-budget
+/// decision that has no business deciding how much of their own conversation a
+/// person may look at. An agent holding 258 messages showed the last 50 and the
+/// other 208 simply were not in the response.
+const HISTORY_DEFAULT_LIMIT: usize = 200;
+/// Ceiling for an explicit `?limit=`, so one request cannot try to serialize an
+/// unbounded conversation.
+const HISTORY_MAX_LIMIT: usize = 5000;
+
 pub async fn get_agent_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<HistoryQuery>,
 ) -> impl IntoResponse {
     let Ok(agent_id) = id.parse::<AgentId>() else {
         return (
@@ -8945,7 +9157,13 @@ pub async fn get_agent_history(
         );
     };
 
-    match state.kernel.memory.canonical_context(agent_id, None) {
+    let limit = q
+        .limit
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .clamp(1, HISTORY_MAX_LIMIT);
+    let total = state.kernel.memory.canonical_len(agent_id).unwrap_or(0);
+
+    match state.kernel.memory.canonical_context(agent_id, Some(limit)) {
         Ok((summary, messages)) => {
             let items: Vec<serde_json::Value> = messages
                 .iter()
@@ -8961,6 +9179,13 @@ pub async fn get_agent_history(
                 })
                 .filter(|m| !m["content"].as_str().unwrap_or_default().trim().is_empty())
                 .collect();
+            // Counted before the macro takes ownership of `items`.
+            let returned = items.len();
+            // Against the window actually read, not the rendered count: blank
+            // and tool-only turns are filtered out of `items`, so comparing
+            // that against the total would claim there is more to load on a
+            // conversation already shown in full.
+            let has_more = total > messages.len();
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -8970,6 +9195,12 @@ pub async fn get_agent_history(
                     // agent look like it forgot -- it did not, it summarised.
                     "summary": summary,
                     "messages": items,
+                    // What was asked for and what exists, so a reader can tell
+                    // "this is the whole conversation" from "this is the end of
+                    // one" and offer the rest rather than silently truncating.
+                    "returned": returned,
+                    "total": total,
+                    "has_more": has_more,
                 })),
             )
         }
@@ -9429,6 +9660,23 @@ pub async fn set_provider_key(
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
+
+    // Learn what the new key actually reaches, without making the user wait.
+    //
+    // detect_auth above only records that a key exists. Until the provider is
+    // asked which models it will serve this key, every model it publishes is
+    // offered -- so a key added here would look like it unlocked hundreds of
+    // models it cannot call, until the next restart.
+    {
+        let probe_state = state.clone();
+        tokio::spawn(async move {
+            let summary = probe_and_register_models(&probe_state).await;
+            tracing::info!(
+                probed = ?summary.checked,
+                "re-probed provider entitlement after key change"
+            );
+        });
+    }
 
     // Auto-switch default provider if current default has no working key.
     // This fixes the common case where a user adds e.g. a Gemini key via dashboard
@@ -11590,11 +11838,7 @@ pub async fn patch_agent_config(
     // Update name
     if let Some(ref new_name) = req.name {
         if !new_name.is_empty() {
-            if let Err(e) = state
-                .kernel
-                .registry
-                .update_name(agent_id, new_name.clone())
-            {
+            if let Err(e) = state.kernel.rename_agent(agent_id, new_name) {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({"error": format!("{e}")})),
@@ -12347,7 +12591,6 @@ struct UploadResponse {
 
 /// Metadata stored alongside uploaded files.
 struct UploadMeta {
-    #[allow(dead_code)]
     filename: String,
     content_type: String,
 }
@@ -12359,7 +12602,25 @@ static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> = LazyLock::new(Da
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
 /// Allowed content type prefixes for upload.
-const ALLOWED_CONTENT_TYPES: &[&str] = &["image/", "text/", "application/pdf", "audio/"];
+///
+/// Office and OpenDocument formats are here because they are what real work
+/// arrives in -- a grant form, a budget sheet, a CV. They are only ever
+/// written into the agent's workspace and read inside its sandbox; nothing
+/// uploaded is opened or executed on the host.
+const ALLOWED_CONTENT_TYPES: &[&str] = &[
+    "image/",
+    "text/",
+    "audio/",
+    "application/pdf",
+    "application/json",
+    "application/rtf",
+    "application/zip",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.",
+    "application/vnd.oasis.opendocument.",
+];
 
 fn is_allowed_content_type(ct: &str) -> bool {
     ALLOWED_CONTENT_TYPES
@@ -12448,7 +12709,7 @@ pub async fn upload_file(
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                serde_json::json!({"error": "Unsupported content type. Allowed: image/*, text/*, audio/*, application/pdf"}),
+                serde_json::json!({"error": "Unsupported file type. Allowed: images, text, audio, PDF, JSON, RTF, ZIP, Word, Excel, PowerPoint and OpenDocument files"}),
             ),
         );
     }
@@ -15572,5 +15833,33 @@ mod role_resolution_tests {
     fn unrecognized_role_string_defaults_to_user() {
         let users = vec![user("dave", "wizard", true)];
         assert_eq!(role_for("dave", "admin", &users), "user");
+    }
+}
+
+#[cfg(test)]
+mod upload_name_tests {
+    use super::safe_upload_name;
+
+    #[test]
+    fn keeps_an_ordinary_name() {
+        assert_eq!(safe_upload_name("CV Anna (2024).pdf", "id"), "CV Anna (2024).pdf");
+    }
+
+    #[test]
+    fn cannot_escape_the_uploads_directory() {
+        assert_eq!(safe_upload_name("../../secrets.env", "id"), "secrets.env");
+        assert_eq!(safe_upload_name(r"..\..\config.toml", "id"), "config.toml");
+        assert_eq!(safe_upload_name("..", "id"), "id");
+    }
+
+    #[test]
+    fn never_hidden_never_empty() {
+        assert_eq!(safe_upload_name(".bashrc", "id"), "bashrc");
+        assert_eq!(safe_upload_name("   ", "fallback-id"), "fallback-id");
+    }
+
+    #[test]
+    fn odd_characters_are_replaced_not_passed_through() {
+        assert_eq!(safe_upload_name("a:b*c?.pdf", "id"), "a_b_c_.pdf");
     }
 }

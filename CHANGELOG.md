@@ -10,6 +10,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Attachments reach the agent whatever their type. Only images were passed on:
+  every other upload - a PDF, a CV, a spreadsheet - was dropped without a word
+  by the code that resolved attachments. The upload succeeded and the file
+  appeared in the chat, so the agent was asked about a document it had never
+  received, and went looking for it across the user's disk with a host shell.
+  Every attachment is now copied into the agent's own workspace under
+  `uploads/`, and the message carries both paths: the workspace one and
+  `/workspace/uploads/<name>` inside its sandbox. Word, Excel, PowerPoint and
+  OpenDocument files are accepted alongside images, text, audio and PDF, and the
+  sandbox image ships `pdftotext`, `tesseract` (en/fr/de/ru), `docx2txt`,
+  `pypdf`, `python-docx` and `openpyxl` so an agent can read them without asking
+  for anything on the host.
+
+- Renaming an agent moves its folder instead of leaving a copy behind. The
+  manifest is mirrored to `agents/<name>/`, and boot spawns every folder there
+  whose name no agent holds - so a rename left a folder that the next restart
+  turned into a second agent sharing the first one's workspace. That is how the
+  assistant came to exist twice. If a folder already stands under the new name,
+  the old one is archived rather than deleted.
+
+- The Podman VM comes back after the machine sleeps. Waking is detected from the
+  jump in wall-clock time between watchdog ticks, which clears the ten-minute
+  backoff that could otherwise leave every service down long after the user
+  returned. When starting the VM fails the way it does after sleep - the VM
+  running and sshd listening inside it, but WSL's port forwarding gone, so
+  `machine start` reports "not listening on ssh port" - WSL itself is restarted,
+  at most once every ten minutes.
+
+- Runtime commands no longer outlive their timeout. Every `podman` call is
+  spawned with `kill_on_drop`, so one that hangs is killed rather than left
+  holding Podman's lock while every later call queues behind it - which is how
+  the daemon came to report no container runtime while twelve containers ran.
+
+- A failed fallback chain reports every link, in the order tried. Only the last
+  error was kept, so a primary out of credit followed by a backup whose model id
+  does not exist surfaced as "404 page not found" - naming a model the user
+  never chose, and saying nothing about the balance that actually stopped the
+  turn. Retryable errors keep their variant so the agent loop still backs off,
+  and a chain of one reports its own error unchanged.
+
+- The dashboard no longer asks Google for its fonts. Inter and Geist Mono were
+  fetched from fonts.googleapis.com on every page view, sending the viewer's
+  address and browser to a third party. Both are SIL Open Font License 1.1 and
+  now ship with the binary, and Google is gone from the page's
+  Content-Security-Policy so it cannot return unnoticed.
+
+- An agent's configured key can no longer be blanked by opening its settings.
+  The provider list loaded only when the key field was focused, so the first
+  render offered a single option - "None needed (local model)" - and the browser
+  wrote that blank over the real value.
+
 - An agent keeps its sandbox across a daemon restart. The container name is
   fixed per agent and workspace, but the pool that remembers containers lives
   in memory, so after any restart, rebuild, or idle hibernation the next
@@ -121,6 +172,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not found` — an error naming a provider and a model the user never chose. The
   catalog is now asked whether the prefixed form is the real id, which repairs
   existing rows on read.
+
+### Changed
+
+- Model availability is learned at boot rather than assumed. Each provider is
+  asked which models its key may actually call and the answer is persisted, so
+  the picker stops offering models that return "does not have access". The probe
+  existed already, but only a button in Settings ever called it.
+
+- Models are chosen from a list everywhere they are configured - agent config,
+  the fallback chain and the spawn form - instead of typed. A fallback entered as
+  "provider/model" was split on the slash, discarding the "nvidia/" that is part
+  of NVIDIA's real model ids, so the backup answered 404 at exactly the moment it
+  was needed.
+
+- The chat shows what the agent remembers. History was capped at the model's
+  50-message replay window, so a conversation of 284 messages displayed the last
+  50 with no sign the rest existed. It now pages, reports the total and offers the
+  earlier messages. What the model receives is unchanged, so this costs no tokens.
+  A message sent but not yet answered survives a reload instead of vanishing.
+
+- One loader owns the conversation view. Two ran against different stores and
+  raced, so the thread came back whole, truncated or empty depending on timing.
+
+- The assistant widget shows the model the assistant is actually using rather
+  than the model new agents are created with, so one assistant stops looking like
+  two.
+
+- The composer says whether replies are streaming or arriving over plain HTTP,
+  which until now degraded silently when the socket gave up reconnecting.
 
 ### Added
 
@@ -500,6 +580,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Empty POST/PUT/PATCH bodies are now rejected** instead of sending an empty request that the server rejects with a confusing error.
 - **Exec-policy refusal names the actual blocked command** instead of always saying "git and gh", so the caller knows what to allowlist or sandbox.
 - **Brave browser is now detected and preferred** over Chrome and Edge. Brave installs per-user in LOCALAPPDATA on Windows, which was not checked, so an ordinary Brave install was reported as "no browser found." The search order now puts Brave and Chromium ahead of Chrome and Edge â same engine, no Google telemetry.
+
+### Added
 - **Voice dictation privacy fix.** The page was telling users that browser-based transcription was on-device, but the Web Speech API is server-side by default. The page now sets `processLocally` and checks `availableOnDevice()`, and warns plainly when the browser vendor's servers are used.
 
 ### Security

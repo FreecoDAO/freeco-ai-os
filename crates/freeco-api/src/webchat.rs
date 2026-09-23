@@ -52,6 +52,58 @@ pub async fn favicon_ico() -> impl IntoResponse {
     )
 }
 
+/// Self-hosted web fonts, so the dashboard makes no request to Google.
+///
+/// The page used to load Inter and Geist Mono from fonts.googleapis.com and
+/// fonts.gstatic.com, which sent the viewer's IP address and browser to Google
+/// on every single page load -- the only third-party request the dashboard
+/// made. Both families are SIL Open Font License 1.1, so they ship here.
+///
+/// A fixed table rather than a directory read: the name in the URL only ever
+/// selects one of these compiled-in files, so no request can reach the disk.
+const FONT_FILES: &[(&str, &[u8])] = &[
+    ("geist-mono-cyrillic-ext.woff2", include_bytes!("../static/fonts/geist-mono-cyrillic-ext.woff2")),
+    ("geist-mono-cyrillic.woff2", include_bytes!("../static/fonts/geist-mono-cyrillic.woff2")),
+    ("geist-mono-latin-ext.woff2", include_bytes!("../static/fonts/geist-mono-latin-ext.woff2")),
+    ("geist-mono-latin.woff2", include_bytes!("../static/fonts/geist-mono-latin.woff2")),
+    ("geist-mono-vietnamese.woff2", include_bytes!("../static/fonts/geist-mono-vietnamese.woff2")),
+    ("inter-cyrillic-ext.woff2", include_bytes!("../static/fonts/inter-cyrillic-ext.woff2")),
+    ("inter-cyrillic.woff2", include_bytes!("../static/fonts/inter-cyrillic.woff2")),
+    ("inter-greek-ext.woff2", include_bytes!("../static/fonts/inter-greek-ext.woff2")),
+    ("inter-greek.woff2", include_bytes!("../static/fonts/inter-greek.woff2")),
+    ("inter-latin-ext.woff2", include_bytes!("../static/fonts/inter-latin-ext.woff2")),
+    ("inter-latin.woff2", include_bytes!("../static/fonts/inter-latin.woff2")),
+    ("inter-vietnamese.woff2", include_bytes!("../static/fonts/inter-vietnamese.woff2")),
+];
+
+/// The @font-face rules pointing at the files above.
+const FONTS_CSS: &str = include_str!("../static/fonts/fonts.css");
+
+/// GET /fonts/{name} — serve one of the compiled-in font files.
+pub async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
+    if name == "fonts.css" {
+        return (
+            [
+                (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            FONTS_CSS,
+        )
+            .into_response();
+    }
+    match FONT_FILES.iter().find(|(n, _)| *n == name) {
+        Some((_, bytes)) => (
+            [
+                (header::CONTENT_TYPE, "font/woff2"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            *bytes,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Embedded PWA manifest for installable web app support.
 const MANIFEST_JSON: &str = include_str!("../static/manifest.json");
 
@@ -91,10 +143,10 @@ pub async fn webchat_page() -> impl IntoResponse {
     let csp = format!(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}' 'unsafe-eval' https://cdn.jsdelivr.net; \
-         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+         style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
          img-src 'self' data: blob:; \
          connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:* https://cdn.jsdelivr.net https://api.github.com; \
-         font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+         font-src 'self' https://cdn.jsdelivr.net; \
          media-src 'self' blob:; \
          frame-src 'self' blob:; \
          object-src 'none'; \

@@ -21,6 +21,14 @@ function chatPage() {
     // Multi-session state
     sessions: [],
     sessionsOpen: false,
+    // Conversation history paging. `_historyGen` rises on every load so a
+    // slow reply for an agent the user has already left cannot overwrite the
+    // thread they are now looking at.
+    _historyGen: 0,
+    _historyLimit: 0,
+    historyTotal: 0,
+    historyHasMore: false,
+    historyLoading: false,
     searchOpen: false,
     searchQuery: '',
     // Voice recording state
@@ -189,10 +197,17 @@ function chatPage() {
         }
       });
 
-      // Load session + session list when agent changes
+      // Load the session list when the agent changes.
+      //
+      // `loadSession` used to run here too, and it also assigned
+      // `self.messages`. So did `loadHistory`, from `selectAgent`, against a
+      // different store -- `sessions` versus `canonical_sessions`. Two async
+      // loads racing for one array is why the thread sometimes came back
+      // whole, sometimes truncated and sometimes empty. `canonical_sessions`
+      // is what the agent itself is given, so that is the one the view must
+      // show: anything else displays a conversation the model does not have.
       this.$watch('currentAgent', function(agent) {
         if (agent) {
-          self.loadSession(agent.id);
           self.loadSessions(agent.id);
         }
       });
@@ -652,6 +667,9 @@ function chatPage() {
     // showing it twice is worse than dropping a genuine repeat.
     _pushAgentReply: function (text, meta, tools, ts) {
       var body = (text || '').trim();
+      // The turn produced an answer, so the user's message is now part of the
+      // server's history and no longer needs carrying across a reload.
+      this.messages.forEach(function(m) { if (m.pending) m.pending = false; });
       for (var i = this.messages.length - 1; i >= 0 && i >= this.messages.length - 4; i--) {
         var m = this.messages[i];
         if (m.role !== 'agent' || m.thinking || m.streaming) continue;
@@ -829,9 +847,17 @@ function chatPage() {
     // The summary line is deliberate: once a conversation outgrows the replay
     // window the older turns are compacted rather than kept verbatim, and
     // saying so is the difference between "it forgot" and "it summarised".
-    async loadHistory(agentId) {
+    async loadHistory(agentId, limit) {
+      var gen = ++this._historyGen;
+      this.historyLoading = true;
       try {
-        var res = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/history');
+        var url = '/api/agents/' + encodeURIComponent(agentId) + '/history';
+        if (limit) url += '?limit=' + encodeURIComponent(limit);
+        var res = await FreecoAPI.get(url);
+        // A newer load started while this one was in flight -- its agent, or
+        // its page size, is what the user is looking at now. Drop this reply
+        // rather than letting the slower request win.
+        if (gen !== this._historyGen) return;
         if (!res) return;
         var restored = [];
         if (res.summary) {
@@ -847,10 +873,32 @@ function chatPage() {
             html: renderMarkdown(String(m.content || ''))
           });
         });
-        // Only replace the view if nothing has been typed since the request
-        // went out, or a fast reply would be wiped by its own history.
-        if (!this.messages.length) this.messages = restored;
-      } catch (e) { /* an empty thread is better than a broken page */ }
+        this._historyLimit = limit || 0;
+        this.historyTotal = res.total || restored.length;
+        this.historyHasMore = !!res.has_more;
+        // Anything typed but not yet answered is not in the server's history,
+        // because the turn it belongs to has not finished. Replacing the array
+        // outright is what made a just-sent message vanish the moment the
+        // agent reloaded -- the message was still in flight, so the reload
+        // brought back a conversation that did not contain it yet.
+        var pending = this.messages.filter(function(m) {
+          return m.pending || m.streaming || m.thinking;
+        });
+        this.messages = restored.concat(pending);
+        var self = this;
+        this.$nextTick(function() { self.scrollToBottom(); });
+      } catch (e) {
+        /* an empty thread is better than a broken page */
+      } finally {
+        if (gen === this._historyGen) this.historyLoading = false;
+      }
+    },
+
+    // Fetch the rest of a conversation the default page only showed the end of.
+    loadEarlierHistory() {
+      if (!this.currentAgent || this.historyLoading) return;
+      var next = Math.max((this._historyLimit || 200) * 4, 800);
+      this.loadHistory(this.currentAgent.id, next);
     },
 
     selectAgent(agent) {
@@ -865,17 +913,27 @@ function chatPage() {
       // calling it. The user saw an empty thread and reasonably concluded the
       // history was gone, while the agent still had it -- the two disagreeing
       // about what was said is worse than either being empty.
-      this.loadHistory(agent.id);
+      var historyLoaded = this.loadHistory(agent.id);
       this.connectWs(agent.id);
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
-      // Show welcome tips on first use
+      // Show welcome tips on first use.
+      //
+      // These are appended after the history resolves, not before it. Pushing
+      // them first made the thread non-empty, and the old restore only ran
+      // `if (!this.messages.length)` -- so on the one chat where the tips
+      // appear, the entire conversation was skipped, and the flag was set so
+      // it never recurred and never got explained.
       if (!localStorage.getItem('of-chat-tips-seen')) {
-        this.messages.push({
-          id: ++msgId,
-          role: 'system',
-          text: t('chat.welcome_message'),
-          meta: '',
-          tools: []
+        var self0 = this;
+        Promise.resolve(historyLoaded).then(function() {
+          self0.messages.push({
+            id: ++msgId,
+            role: 'system',
+            text: t('chat.welcome_message'),
+            meta: '',
+            tools: []
+          });
+          self0.scrollToBottom();
         });
         localStorage.setItem('of-chat-tips-seen', 'true');
       }
@@ -1369,8 +1427,9 @@ function chatPage() {
       // Collect image references for inline rendering
       var msgImages = uploadedFiles.filter(function(f) { return f.content_type && f.content_type.startsWith('image/'); });
 
-      // Always show user message immediately
-      this.messages.push({ id: ++msgId, role: 'user', text: finalText, meta: '', tools: [], images: msgImages, ts: Date.now() });
+      // Always show user message immediately, and mark it pending until the
+      // server's own history contains it, so a reload cannot drop it.
+      this.messages.push({ id: ++msgId, role: 'user', text: finalText, meta: '', tools: [], images: msgImages, ts: Date.now(), pending: true });
       this.scrollToBottom();
       localStorage.setItem('of-first-msg', 'true');
 

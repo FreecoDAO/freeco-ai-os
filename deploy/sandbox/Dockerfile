@@ -142,6 +142,29 @@ RUN curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-arch
 COPY freeco-screen /usr/local/bin/freeco-screen
 RUN chmod +x /usr/local/bin/freeco-screen
 
+# Document readers, so an agent can read what people attach.
+#
+# Attached files land in the agent's workspace, mounted here at
+# /workspace/uploads. Without these the agent had a PDF it could not open,
+# and asked for a host shell to go and read it - the exact detour this image
+# exists to close. Agents run unprivileged and cannot apt-get install at run
+# time, so the readers people actually need ship here:
+#   pdftotext / pdfinfo  - text-layer PDFs (poppler-utils)
+#   tesseract            - scanned PDFs and photos of documents, en/fr/de/ru
+#   docx2txt, python-docx, openpyxl, pypdf - Word, Excel and PDF from Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        poppler-utils \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-fra \
+        tesseract-ocr-deu \
+        tesseract-ocr-rus \
+        docx2txt \
+        python3-pypdf \
+        python3-docx \
+        python3-openpyxl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Drop privileges last, after every step above that needed root.
 USER agent
 WORKDIR /workspace

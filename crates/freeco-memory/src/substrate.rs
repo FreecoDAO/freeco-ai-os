@@ -324,6 +324,12 @@ impl MemorySubstrate {
         self.sessions.canonical_context(agent_id, window_size)
     }
 
+    /// Total messages held in the agent's canonical session, whatever window
+    /// `canonical_context` was asked for.
+    pub fn canonical_len(&self, agent_id: AgentId) -> FreecoResult<usize> {
+        self.sessions.canonical_len(agent_id)
+    }
+
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
     ///
     /// Used by the compactor to replace text-truncation compaction with an
