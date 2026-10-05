@@ -4,12 +4,12 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use freeco_types::model_catalog::{
-    AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL, NOVITA_BASE_URL,
+    AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL,
     AZURE_OPENAI_BASE_URL, BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
     DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
     HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
-    MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL,
-    OMNIROUTE_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL,
+    MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NOVITA_BASE_URL, NVIDIA_NIM_BASE_URL,
+    OLLAMA_BASE_URL, OMNIROUTE_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL,
     QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, REQUESTY_BASE_URL, SAMBANOVA_BASE_URL,
     TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
     VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
@@ -543,7 +543,9 @@ impl ModelCatalog {
         // (`openrouter/openai/gpt-4o`) while the provider answers to the bare
         // vendor form (`openai/gpt-4o`). Compare both ways round so a working
         // model is never hidden over a naming convention.
-        let unprefixed = id.strip_prefix(&format!("{provider_key}/")).map(str::to_string);
+        let unprefixed = id
+            .strip_prefix(&format!("{provider_key}/"))
+            .map(str::to_string);
         if let Some(u) = unprefixed {
             if set.contains(&u) {
                 return Some(true);
@@ -2755,6 +2757,10 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
         // /models endpoint. `/api/models/refresh` discovers the other ~110,
         // but the ones actually in use are listed here so they work on a fresh
         // install before anyone presses Refresh.
+        // Prices are Novita's published figures (api.novita.ai/v3/openai/models,
+        // read 2026-10-02; that list gives 1/10,000 USD per million tokens).
+        // They were 0.0, so every call to these models was recorded as free:
+        // 26 M+ paid tokens the Budget page could not see.
         ModelCatalogEntry {
             id: "zai-org/glm-5.3".into(),
             display_name: "GLM 5.3 (Novita)".into(),
@@ -2762,8 +2768,8 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             tier: ModelTier::Frontier,
             context_window: 200_000,
             max_output_tokens: 32_768,
-            input_cost_per_m: 0.0,
-            output_cost_per_m: 0.0,
+            input_cost_per_m: 1.40,
+            output_cost_per_m: 4.40,
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
@@ -2776,8 +2782,8 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             tier: ModelTier::Smart,
             context_window: 200_000,
             max_output_tokens: 32_768,
-            input_cost_per_m: 0.0,
-            output_cost_per_m: 0.0,
+            input_cost_per_m: 0.15,
+            output_cost_per_m: 0.50,
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
@@ -2790,8 +2796,8 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             tier: ModelTier::Frontier,
             context_window: 200_000,
             max_output_tokens: 32_768,
-            input_cost_per_m: 0.0,
-            output_cost_per_m: 0.0,
+            input_cost_per_m: 1.40,
+            output_cost_per_m: 4.40,
             supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
@@ -5370,7 +5376,10 @@ mod tests {
     fn our_provider_prefix_still_matches_entitlement() {
         let mut c = ModelCatalog::new();
         c.set_served("openrouter", vec!["openai/gpt-4o".to_string()]);
-        assert_eq!(c.is_served("openrouter", "openrouter/openai/gpt-4o"), Some(true));
+        assert_eq!(
+            c.is_served("openrouter", "openrouter/openai/gpt-4o"),
+            Some(true)
+        );
         assert_eq!(c.is_served("openrouter", "openai/gpt-4o"), Some(true));
     }
 

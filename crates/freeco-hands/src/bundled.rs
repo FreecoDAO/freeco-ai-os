@@ -55,6 +55,11 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
             include_str!("../bundled/omniroute/HAND.toml"),
             include_str!("../bundled/omniroute/SKILL.md"),
         ),
+        (
+            "speaches",
+            include_str!("../bundled/speaches/HAND.toml"),
+            include_str!("../bundled/speaches/SKILL.md"),
+        ),
         // Service hands that are stacks rather than single containers: an
         // application plus its database, brought up with compose.
         (

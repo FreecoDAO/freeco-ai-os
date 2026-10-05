@@ -10,6 +10,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reached limit hands over to the fallback chain. Rate limits and used-up
+  allowances (a Claude subscription's 5-hour limit, a provider's quota) never
+  fell back, so the agent stopped until the limit reset even with GLM and
+  Nemotron configured behind it. A wrong or revoked key still does not.
+- The Claude Code provider passes the conversation on standard input. It was
+  a command-line argument, which Windows caps near 32,000 characters, so any
+  real conversation failed to start.
+- The data gateway now protects the chat. It masked secrets only on the
+  non-streaming path, which background ticks use; the dashboard chat and the
+  popup stream, so everything typed there reached the model provider unscanned
+  while the log showed the gateway busy. It now also covers the system prompt,
+  tool results and tool arguments (only plain-text messages were scanned), and
+  restores real values in tool-call arguments so a masked address or key still
+  works when a tool uses it.
+- A number that passes the card checksum no longer bricks a conversation.
+  Cards and private keys were refused outright; the text stays in history, so
+  every later request was refused too. A phone number in a tool call did that
+  to the CEO's chat. Both are now masked (restored in replies and tool
+  arguments), and digits running into letters -- message ids, hashes -- are
+  not read as cards at all.
+- Dictation works with a local speech server. FreEco.ai always asked for
+  OpenAI's `whisper-1`, which speaches maps to a model not installed here, so
+  every dictation failed with a 404. `[media] audio_model` names the model to
+  request.
+- Read-aloud in the main chat no longer says "asterisk asterisk". Markdown is
+  stripped before speaking, as the popup already did, and the main chat uses
+  the voice chosen in the assistant (or the best local "Natural" voice for the
+  language) instead of the browser's default robotic one.
+- The gateway recognises JSON Web Tokens -- how self-hosted services such as
+  Twenty issue API keys, with no vendor prefix -- and values announced as
+  secrets ("CRM key: …", `CRM_API_KEY=…`, "password is …"). Ordinary prose
+  around the same words is left alone.
+- Agents can reach the services FreEco.ai installs from their sandbox. The
+  services listen on the VM's loopback, which a sandbox on podman's default
+  network cannot see: tested, every one refused, and agents asked for a host
+  shell instead. A networked podman sandbox now gets exactly the service ports
+  forwarded (`[docker] service_ports`, default CRM 3200, voice 3010/8000,
+  speech 8010, accounting 8080) and no other host port. The voice, speech,
+  accounting and CRM agents get `sandbox_exec`, and are told the addresses.
+- Backups: the database's write-ahead log is checkpointed first (uncheckpointed
+  it had reached 106 MB beside a 24 MB database); an archive a restore would
+  refuse is no longer written -- it was reported as a success, and pruning then
+  deleted the oldest good archive to make room; the restore limit is 512 MB.
+
+- Conversations show up in the chat again. The chat loaded the agent's compact
+  cross-channel memory instead of the conversation it is in, and built those
+  messages in a shape the page does not draw -- so whole conversations looked
+  empty (the CEO's chat showed none of its 116 messages) and "load earlier" fetched more of
+  the wrong thing. It now opens the agent's current conversation, tool steps
+  included, draws the latest 200 and shows the rest instantly on request; the
+  switcher names the conversation you are in.
+- Paid models were recorded as free. GLM 5.3, 5.3 Flash and 5.2 on Novita had
+  a price of 0 in the catalog, so 26 M+ tokens cost "$0"; they now carry
+  Novita's published prices.
+- The Budget page shows where the money went: spend, calls and tokens by
+  agent, team, project, company and model, for today, 7 days, 30 days or all
+  time, from the stored calls. Its agent list only included agents with a
+  spending limit and was empty; per-agent usage read an in-memory counter that
+  starts at zero on every restart. Calls recorded at $0 before a price was
+  known are estimated at today's price and marked.
+- The assistant button no longer trembles. Its logo bobbed and rotated every
+  3.4 seconds, and wiggled continuously under the mouse.
+- Pausing a hand stops it. Pause only set a flag nothing read, so a paused
+  agent kept waking every hour and spending tokens; a paused hand was also
+  dropped from the saved state and gone after a restart. Its agent's loop now
+  stops, resumes on resume, and stays paused across restarts. The service
+  container keeps running: the agent sleeps, the service does not.
+- A reactive agent with an `[autonomous]` block (freeco-shopping) is no longer
+  flagged unresponsive every minute. The block carries limits, not a schedule.
+- Agents that list `docker_exec` see the sandbox tool again. The rename to
+  `sandbox_exec` was honoured when running a tool but not when choosing which
+  tools to show the model, so those agents silently lost their sandbox.
+- Deleting or restoring a conversation never destroys it without a copy. A
+  failed archive copy was ignored and the conversation cleared anyway.
+- The service-data backup no longer deletes real backups. A day with the
+  container runtime down left an empty run directory that pruning counted as a
+  backup; one container that could not be inspected aborted the whole run.
+- The chat's file panel shows workspace-relative paths on Windows. Comparing a
+  `\\?\`-prefixed root with plain paths never matched.
+- Saving keys from a chat message no longer overwrites one with another: two
+  keys in one message get distinct names, the dialog says when a name already
+  holds a key, and system variables such as `PATH` are refused as names.
+- The cross-site request guard works behind a reverse proxy. It required a
+  loopback `Host` on every write, which only defends a daemon listening on
+  loopback; anywhere else it refused all writes.
+
+### Security
+
+- With dashboard login on and no API key set, an empty token was accepted:
+  the empty key and `Authorization: Bearer ` with nothing after it compared
+  equal. An empty key now matches nothing.
+- The old `POST /mcp` is removed. It ran any built-in tool -- `shell_exec`
+  included -- with no token and no permission check. It is replaced by the
+  MCP endpoint below, which needs a token and acts with one agent's own tools.
+  (Registered twice, the two would also have stopped the daemon starting.)
+
+- The container watchdog no longer takes down a healthy Podman VM. It treated a
+  failed `podman version` probe as proof the runtime was dead, and escalated to
+  `podman machine stop` and then `wsl --shutdown` -- but that probe also fails
+  while the VM is perfectly well, and the daemon had once reported no runtime
+  with twelve containers running. With the daemon stopped the VM stayed up; with
+  it running, the VM went down within minutes, repeatedly. Nothing destructive
+  now happens unless the VM's SSH port is confirmed to refuse connections from
+  Windows, which is what actually distinguishes the post-sleep failure. The
+  watchdog also writes `logs/watchdog.json` on every tick -- what it saw and what
+  it did -- because a daemon launched without its output captured left no way
+  to tell whether it had tried at all.
+
+- Scheduled agents are no longer declared crashed between their own runs. The
+  heartbeat judged every agent by its heartbeat interval alone, so a service hand
+  told to run once an hour was marked unresponsive after sixty idle seconds,
+  marked Crashed, and "recovered" -- about 860 times across five agents in three
+  days. An agent is now late only once its scheduled run is overdue.
+
+- Pressing Enter twice in the assistant no longer sends the message twice. The
+  guard against a second send only closed after an awaited call to the session
+  router; for as long as that took, the message was not yet on screen and a
+  second Enter ran the whole path again. The message now appears at once and
+  the guard closes before anything is awaited. A message sent but not yet
+  answered also survives a reload or a model switch.
+
+- Dictation works in Brave. The browser defines speech recognition but removed
+  the service behind it, so it failed with `language-not-supported` every time,
+  and the record-and-upload fallback -- which only ran when recognition was
+  absent -- never did. A failure that will not change now switches to recording.
+
+- File tools cannot reach outside a workspace. With no workspace set, the only
+  check rejected `..`, so any absolute path was readable and writable,
+  `~/.freeco-ai/secrets.env` included. They now refuse and say why.
+
+- A local speech service is no longer sent the OpenAI key. Pointing
+  `audio_base_url` or `tts_openai_base_url` at a local server still built the
+  Authorization header from `OPENAI_API_KEY`: the wrong credential for that
+  server, and one that should only ever go to OpenAI. `local_audio_api_key_env`
+  names the key to use instead.
+
+- Approving one of several waiting requests no longer announces the rest again.
+  The alert compared the whole set, so any change -- a removal included --
+  re-fired it for requests already on screen.
+
+- Browser settings apply without a restart. `[browser]` changes were detected and
+  queued as a hot-reload action that nothing handled.
+
 - Attachments reach the agent whatever their type. Only images were passed on:
   every other upload - a PDF, a CV, a spreadsheet - was dropped without a word
   by the code that resolved attachments. The upload succeeded and the file
@@ -175,6 +318,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The sandbox tool is `sandbox_exec`. It was named `docker_exec` when Docker was
+  the only runtime, and the name sent agents looking for Docker. The old name
+  still works, and a manifest listing it keeps the capability: tool permissions
+  are now compared by canonical name on both sides.
+
+- dograh runs from FreecoDAO/dograh, the audited fork, built by that fork's CI
+  and pinned to the commit. It ran upstream's `latest` images, so the code
+  running was neither the code that was read nor a version anyone could name.
+
+- The assistant everyone talks to is first in every agent list, found by its
+  role rather than guessed from its name.
+
+- A refused host `shell_exec` says where the command can run instead:
+  `sandbox_exec` accepts pipes and substitution because nothing it runs can
+  reach this machine. A timed-out `agent_send` says the other agent's model is
+  the usual cause, instead of inviting another ten-minute wait.
+
 - Model availability is learned at boot rather than assumed. Each provider is
   asked which models its key may actually call and the answer is persisted, so
   the picker stops offering models that return "does not have access". The probe
@@ -202,7 +362,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The composer says whether replies are streaming or arriving over plain HTTP,
   which until now degraded silently when the socket gave up reconnecting.
 
+- Every agent follows a "Truth And Evidence" standard: name what a claim
+  rests on, never invent a citation, line number or statistic, separate what
+  was verified from what was inferred, treat "I cannot verify this" as a
+  complete answer, show the working, and check before finishing. It replaces
+  three overlapping lines rather than repeating them, so the shared
+  instructions grow by about 200 tokens per request rather than 360.
+- The stated minimum Rust version is 1.87, not 1.75. The code already needed
+  1.87 (`u32::is_multiple_of`), so packagers were told something false. The
+  exact floor is not yet measured. The toolchain is pinned to 1.96.1 instead
+  of floating `stable`, so a Rust release cannot break the build without a
+  commit here.
+- The vendored dashboard libraries (Alpine.js 3.15.8, Chart.js 4.4.7,
+  highlight.js 11.11.1, marked 15.0.12) are recorded with their SHA-256 in
+  `static/vendor/VERSIONS.md` and `SHA256SUMS`, and CI checks them; they ship
+  in the binary and no audit tool covered them. They are kept byte-identical on
+  every platform (`.gitattributes`), since line-ending conversion changed them.
+- CI lints test code too (`clippy --all-targets`), as the project rules require.
+- `tokio-tungstenite` comes from the workspace, so it cannot pull a native TLS
+  stack into a tree that is deliberately rustls-only.
+- The global spend cap has a regression test; it is enforced and nothing
+  checked that it stays so. `docs/ui-coverage-audit.md` is marked superseded:
+  it lists 157 routes, and there are 237.
+
 ### Added
+
+- "New task" in the popup's routing card puts the task on the task board,
+  assigned to the agent, and starts its own conversation. Routing stays in the
+  popup; the main chat sends to the conversation on screen.
+- `/?widget=1` shows only the assistant, filling its window: what the
+  "FreEco Assistant" desktop shortcut opens.
+- Claude Code and Codex can join the FreEco team. `POST /mcp` is an MCP
+  endpoint with ten tools -- task board, agent conversations, asking an agent,
+  the agent's sandbox, the CRM -- and `integrations/claude-code-plugin`
+  installs it in Claude Code (Codex setup documented). The client acts as a
+  named agent with that agent's own permissions, completes only tasks that
+  agent holds, and the endpoint refuses everything until `FREECO_MCP_TOKEN` is
+  set.
+
+- Claude can be an agent's model and use FreEco's tools. The `claude-code`
+  provider gave the model no tools and dropped earlier tool calls and results,
+  so a Claude-backed agent could talk but not act. It now receives the agent's
+  tool list, its calls come back as real tool calls that FreEco runs with the
+  usual checks, and Claude Code's own built-in tools are switched off.
+- The Claude CLI runs in a container. `base_url = "podman:freeco-claude"`
+  runs it through `podman exec` in a container built from
+  `deploy/claude/Containerfile`, not on the host; the owner's token
+  (`CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`) is passed per call and
+  never stored in the container.
+- The CRM is usable by agents. `crm_api` reads and changes Twenty's tasks (with
+  due dates: the owner's schedule), people, companies, notes and opportunities.
+  It reaches one fixed local address, only the CRM's API paths, with the key
+  read from the vault by the tool, so the key never passes through a model.
+  Services -> Twenty CRM has a Connect field that checks the key against the
+  CRM before storing it. Previously there was no way to connect it: the crm
+  agent had only `web_fetch`, which refuses local addresses.
+- Chat and popup stop a message that contains a key. They offer to save it in
+  the vault under a suggested name (`CRM_API_KEY` when the message mentions the
+  CRM) and send the message with the key replaced by that name.
+
+- The assistant routes work to where it already lives. Each message is checked
+  against existing conversations by theme (`GET /api/sessions/search`) and
+  against the current thread in parallel; when there is a real alternative it
+  offers it -- an existing conversation, a new task, a new project, a new
+  company, or continuing here -- and delivers only when one is chosen.
+
+- Actions that travel. The assistant's Ask, Translate and Shell chips can be
+  dragged into another app or page, or copied: a drag carries a link, an HTML
+  anchor and a ready `curl` command at once. `/?ask=...&agent=...` opens the
+  dashboard with the text prefilled, never sent.
+
+- Dictation language: browser default, English (US and UK), Ukrainian, French,
+  German and Italian. Spoken replies use the same language.
+
+- Spoken replies in the main chat, sharing the assistant's setting.
+
+- Approval alerts with sound and a desktop notification when the dashboard is
+  not the window in front, with a switch in Settings.
+
+- Cross-site request forgery protection on every state-changing request. With
+  dashboard auth off every loopback request is trusted, and a page on any site
+  reaches 127.0.0.1 like any other client; only one endpoint was guarded.
+
+- `docker.sandbox_env`: named environment variables passed into the sandbox,
+  empty by default. `sandbox_env = ["GH_TOKEN"]` lets agents use `gh` inside
+  their container.
+
+- Service data backups. Databases are dumped with their own tools
+  (`pg_dumpall`, `mariadb-dump`) and other service volumes exported, daily and
+  on demand at `POST /api/backups/services`. The `.ofbak` archive never covered
+  container volumes, which is how the CRM's data was lost with no copy.
+
+- Speaches, local speech-to-text and text-to-speech, as a service hand. Built
+  from the audited FreecoDAO/speaches fork, with authentication on, its demo UI
+  off and telemetry off, on port 8010.
 
 - `company_create`, so an agent can create the organisation it belongs to. The
   store method and the HTTP route both existed and the tool did not, so an agent

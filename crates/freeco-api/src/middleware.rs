@@ -123,7 +123,12 @@ pub async fn auth(
         || path == "/api/auth/set-password"
         || path == "/api/auth/dismiss-setup"
         || path == "/api/auth/disable"
-        || (path == "/api/auth/check" && is_get);
+        || (path == "/api/auth/check" && is_get)
+        // The MCP endpoint authenticates itself with FREECO_MCP_TOKEN and
+        // refuses everything while that is unset. Both use the Authorization
+        // header, so checking the API key here as well rejected every MCP
+        // call whenever an api_key or dashboard login was configured.
+        || path == "/mcp";
 
     if is_public {
         return next.run(request).await;
@@ -170,9 +175,13 @@ pub async fn auth(
     });
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
+    //
+    // With dashboard login on and no api_key, `api_key` is empty -- and an
+    // empty token has the same length, so `Bearer ` with nothing after it
+    // compared equal and got in. An empty key matches nothing.
     let header_auth = api_token.map(|token| {
         use subtle::ConstantTimeEq;
-        if token.len() != api_key.len() {
+        if api_key.is_empty() || token.len() != api_key.len() {
             return false;
         }
         token.as_bytes().ct_eq(api_key.as_bytes()).into()
@@ -189,7 +198,7 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let query_auth = query_token_decoded.as_deref().map(|token| {
         use subtle::ConstantTimeEq;
-        if token.len() != api_key.len() {
+        if api_key.is_empty() || token.len() != api_key.len() {
             return false;
         }
         token.as_bytes().ct_eq(api_key.as_bytes()).into()
@@ -361,6 +370,29 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Dashboard login on, no api_key: the key is empty, and an empty bearer
+    /// token has the same length -- it compared equal and got in.
+    #[tokio::test]
+    async fn an_empty_token_does_not_match_an_empty_key() {
+        let mut s = auth_state_empty();
+        s.auth_enabled = true;
+        for (header, uri) in [
+            (Some("Bearer "), "/api/agents/1"),
+            (None, "/api/agents/1?token="),
+        ] {
+            let app = router(s.clone());
+            let addr: SocketAddr = "203.0.113.5:40000".parse().unwrap();
+            let mut b = Request::builder().method(Method::GET).uri(uri);
+            if let Some(h) = header {
+                b = b.header("authorization", h);
+            }
+            let mut req = b.body(Body::empty()).unwrap();
+            req.extensions_mut().insert(ConnectInfo(addr));
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri} {header:?}");
+        }
     }
 
     #[tokio::test]

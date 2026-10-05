@@ -24,6 +24,50 @@ const RUNTIME_TIMEOUT: Duration = Duration::from_secs(20);
 // Podman's lock, so every later call -- the watchdog's included -- queued
 // behind it and the daemon reported the runtime down while it was up.
 
+/// Make sure an image is local before `run` is asked to start it.
+///
+/// `run` pulls a missing image itself, inside whatever time limit it was given.
+/// A service image is often several gigabytes, and the single-container path
+/// gave `run` ninety seconds: a service whose image was not yet local could
+/// never start, and every retry began the download again and was killed again.
+/// Pulling separately, with a limit sized for a download, lets `run` keep the
+/// short limit that suits what it actually does.
+async fn ensure_image(rt: &str, image: &str) -> Result<(), HandError> {
+    let present = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(rt)
+            .kill_on_drop(true)
+            .args(["image", "inspect", image])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+    if matches!(present, Ok(Ok(s)) if s.success()) {
+        return Ok(());
+    }
+    tracing::info!(image, "pulling image before first start");
+    let out = tokio::time::timeout(
+        Duration::from_secs(45 * 60),
+        tokio::process::Command::new(rt)
+            .kill_on_drop(true)
+            .args(["pull", image])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| HandError::Config(format!("pulling {image} took longer than 45 minutes")))?
+    .map_err(|e| HandError::Config(format!("could not run {rt} pull: {e}")))?;
+    if !out.status.success() {
+        return Err(HandError::Config(format!(
+            "could not pull {image}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// When the daemon last restarted WSL, in seconds since the Unix epoch.
 static LAST_WSL_RESTART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -194,7 +238,8 @@ pub fn vm_fix_command(id: &str) -> Option<String> {
 async fn vm_ssh(script: &str, timeout: Duration) -> Option<String> {
     let out = tokio::time::timeout(
         timeout,
-        tokio::process::Command::new("podman").kill_on_drop(true)
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
             .args(["machine", "ssh", script])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -219,7 +264,8 @@ pub async fn check_vm_resolver() -> Option<VmIssue> {
     }
     let present = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman").kill_on_drop(true)
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
             .args(["machine", "ssh", "test -f /etc/resolv.conf"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -350,10 +396,64 @@ pub async fn try_start_runtime() -> bool {
 ///
 /// Returns whether a start was attempted and reported success. Does nothing on
 /// Linux, where `podman machine` has no VM to manage.
+/// Whether the Podman VM's SSH forward accepts connections from this machine.
+///
+/// This is the one fact that separates a VM that is genuinely unreachable from
+/// a `podman` command that merely failed. After sleep, WSL can lose its port
+/// forwarding: the VM runs, sshd listens inside it, and the port on Windows
+/// refuses -- that needs a restart. But the `podman version` probe also fails
+/// for other reasons while the VM is perfectly healthy (the daemon once
+/// reported no runtime with twelve containers running), and acting on that
+/// alone stopped a working VM and took every service down with it, repeatedly.
+///
+/// `Some(true)`: reachable, so do nothing destructive. `Some(false)`: refused,
+/// a restart is justified. `None`: the port could not be determined.
+async fn machine_port_open() -> Option<bool> {
+    let out = tokio::time::timeout(
+        RUNTIME_TIMEOUT,
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
+            .args([
+                "system",
+                "connection",
+                "list",
+                "--format",
+                "{{.URI}} {{.Default}}",
+            ])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Prefer the default connection; otherwise the first one listed.
+    let line = text
+        .lines()
+        .find(|l| l.trim_end().ends_with("true"))
+        .or_else(|| text.lines().next())?;
+    // ssh://user@127.0.0.1:52898/run/user/1000/podman/podman.sock
+    let after_host = line.split("127.0.0.1:").nth(1)?;
+    let port: u16 = after_host
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    let reachable = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+    Some(reachable)
+}
+
 async fn start_podman_machine() -> bool {
     let listed = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman").kill_on_drop(true)
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
             .args(["machine", "list", "--format", "{{.Name}}"])
             .output(),
     )
@@ -380,12 +480,29 @@ async fn start_podman_machine() -> bool {
     if !stderr.to_lowercase().contains("already running") {
         // A start that fails outright is what the post-sleep state looks
         // like: "machine did not transition into running state: ssh error:
-        // machine is not listening on ssh port".
+        // machine is not listening on ssh port". Confirm it before acting.
         tracing::warn!(error = %stderr.trim(), "podman machine start failed");
+        // Only a port confirmed refused justifies restarting WSL; an answering
+        // port, or one that cannot be determined, does not.
+        if machine_port_open().await != Some(false) {
+            tracing::warn!("the VM's port is not confirmed unreachable; not restarting WSL");
+            return false;
+        }
         return restart_wsl_then_start().await;
     }
     if probe("podman").await {
         return true;
+    }
+
+    // Before stopping anything: is the VM actually unreachable, or did the
+    // probe fail for some other reason? Only a refused port justifies taking
+    // down a VM that may be serving every container the user relies on.
+    if machine_port_open().await != Some(false) {
+        tracing::warn!(
+            "Podman did not answer, but its VM is reachable (or its port is \
+             unknown); leaving the VM running rather than stopping it"
+        );
+        return false;
     }
 
     // Cycling the VM re-establishes the forward, and `start` reassigns a
@@ -409,7 +526,8 @@ async fn start_podman_machine() -> bool {
 async fn podman_machine(args: &[&str], timeout_secs: u64) -> (bool, String) {
     let run = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        tokio::process::Command::new("podman").kill_on_drop(true)
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
             .arg("machine")
             .args(args)
             .stdout(std::process::Stdio::null())
@@ -439,7 +557,8 @@ pub async fn runtime_status() -> RuntimeStatus {
     }
     let listed = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new("podman").kill_on_drop(true)
+        tokio::process::Command::new("podman")
+            .kill_on_drop(true)
             .args(["machine", "list", "--format", "{{.Name}}"])
             .output(),
     )
@@ -486,7 +605,8 @@ impl RuntimeStatus {
 }
 
 async fn probe(runtime: &str) -> bool {
-    let cmd = tokio::process::Command::new(runtime).kill_on_drop(true)
+    let cmd = tokio::process::Command::new(runtime)
+        .kill_on_drop(true)
         .arg("version")
         .arg("--format")
         .arg("{{.Server.Version}}")
@@ -697,7 +817,8 @@ async fn start_native_stack(
     // Idempotent: an existing network from a previous start is fine.
     let _ = tokio::time::timeout(
         RUNTIME_TIMEOUT,
-        tokio::process::Command::new(rt).kill_on_drop(true)
+        tokio::process::Command::new(rt)
+            .kill_on_drop(true)
             .args(["network", "create", &net])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -712,12 +833,15 @@ async fn start_native_stack(
         if is_running(&name).await {
             continue;
         }
-        let _ = tokio::process::Command::new(rt).kill_on_drop(true)
+        let _ = tokio::process::Command::new(rt)
+            .kill_on_drop(true)
             .args(["rm", "-f", &name])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await;
+
+        ensure_image(rt, &svc.image).await?;
 
         let mut cmd = tokio::process::Command::new(rt);
         cmd.kill_on_drop(true);
@@ -845,7 +969,8 @@ async fn start_stack(
     let project = project_name(hand_id, tenant);
     let out = tokio::time::timeout(
         Duration::from_secs(900), // first run pulls images; a CRM stack is gigabytes
-        tokio::process::Command::new(rt).kill_on_drop(true)
+        tokio::process::Command::new(rt)
+            .kill_on_drop(true)
             .args(["compose", "-p", &project, "up", "-d"])
             .current_dir(&dir)
             .output(),
@@ -906,11 +1031,20 @@ pub async fn is_running(name: &str) -> bool {
     let Some(rt) = runtime().await else {
         return false;
     };
-    let out = tokio::process::Command::new(rt).kill_on_drop(true)
-        .args(["ps", "--filter", &format!("name={name}"), "--format", "{{.Names}}"])
+    let out = tokio::process::Command::new(rt)
+        .kill_on_drop(true)
+        .args([
+            "ps",
+            "--filter",
+            &format!("name={name}"),
+            "--format",
+            "{{.Names}}",
+        ])
         .output();
     match tokio::time::timeout(RUNTIME_TIMEOUT, out).await {
-        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == name),
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.trim() == name),
         _ => false,
     }
 }
@@ -953,12 +1087,15 @@ pub async fn start(
 
     // Remove any stopped container of the same name, or `run` fails on the
     // leftover rather than starting.
-    let _ = tokio::process::Command::new(rt).kill_on_drop(true)
+    let _ = tokio::process::Command::new(rt)
+        .kill_on_drop(true)
         .args(["rm", "-f", &name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .await;
+
+    ensure_image(rt, &spec.image).await?;
 
     let mut cmd = tokio::process::Command::new(rt);
     cmd.kill_on_drop(true);
@@ -983,8 +1120,7 @@ pub async fn start(
         if looks_like_host_path {
             cmd.arg("-v").arg(v);
         } else {
-            cmd.arg("-v")
-                .arg(volume_name(hand_id, tenant, v));
+            cmd.arg("-v").arg(volume_name(hand_id, tenant, v));
         }
     }
     for (k, v) in &spec.env {
@@ -1057,19 +1193,24 @@ pub async fn stop_native_stack(
         let name = service_container_name(hand_id, tenant, &spec.services[idx].name);
         let _ = tokio::time::timeout(
             Duration::from_secs(60),
-            tokio::process::Command::new(rt).kill_on_drop(true).args(["stop", &name]).status(),
+            tokio::process::Command::new(rt)
+                .kill_on_drop(true)
+                .args(["stop", &name])
+                .status(),
         )
         .await;
         // Removed, not just stopped: the container is recreated on next start,
         // while the named volumes -- the actual data -- are left untouched.
-        let _ = tokio::process::Command::new(rt).kill_on_drop(true)
+        let _ = tokio::process::Command::new(rt)
+            .kill_on_drop(true)
             .args(["rm", "-f", &name])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await;
     }
-    let _ = tokio::process::Command::new(rt).kill_on_drop(true)
+    let _ = tokio::process::Command::new(rt)
+        .kill_on_drop(true)
         .args(["network", "rm", &network_name(hand_id, tenant)])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1087,7 +1228,8 @@ pub async fn stop(hand_id: &str, tenant: Option<&str>, is_stack: bool) -> Result
         let dir = stack_dir(hand_id, tenant);
         let _ = tokio::time::timeout(
             Duration::from_secs(180),
-            tokio::process::Command::new(rt).kill_on_drop(true)
+            tokio::process::Command::new(rt)
+                .kill_on_drop(true)
                 .args(["compose", "-p", &project, "down"])
                 .current_dir(&dir)
                 .status(),
@@ -1098,7 +1240,10 @@ pub async fn stop(hand_id: &str, tenant: Option<&str>, is_stack: bool) -> Result
     let name = container_name(hand_id, tenant);
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
-        tokio::process::Command::new(rt).kill_on_drop(true).args(["stop", &name]).status(),
+        tokio::process::Command::new(rt)
+            .kill_on_drop(true)
+            .args(["stop", &name])
+            .status(),
     )
     .await;
     Ok(())
@@ -1358,9 +1503,15 @@ mod tests {
     /// means someone else's database going away.
     #[test]
     fn stack_projects_are_per_tenant_not_per_instance() {
-        assert_ne!(project_name("crm", Some("acme")), project_name("crm", Some("globex")));
+        assert_ne!(
+            project_name("crm", Some("acme")),
+            project_name("crm", Some("globex"))
+        );
         // And stable for one tenant, so a restart adopts the running stack.
-        assert_eq!(project_name("crm", Some("acme")), project_name("crm", Some("acme")));
+        assert_eq!(
+            project_name("crm", Some("acme")),
+            project_name("crm", Some("acme"))
+        );
     }
 
     /// The compose file and its generated `.env` follow the same key. Keyed by
@@ -1368,8 +1519,14 @@ mod tests {
     /// passwords, so the stack came back unable to open its own database.
     #[test]
     fn stack_dirs_are_stable_per_tenant() {
-        assert_eq!(stack_dir("crm", Some("acme")), stack_dir("crm", Some("acme")));
-        assert_ne!(stack_dir("crm", Some("acme")), stack_dir("crm", Some("globex")));
+        assert_eq!(
+            stack_dir("crm", Some("acme")),
+            stack_dir("crm", Some("acme"))
+        );
+        assert_ne!(
+            stack_dir("crm", Some("acme")),
+            stack_dir("crm", Some("globex"))
+        );
     }
 
     /// A tenant must not see another tenant's services.
@@ -1404,16 +1561,33 @@ mod tests {
     /// whole guarantee that no request can choose what runs with sudo.
     #[test]
     fn vm_fix_command_knows_only_its_two_fixed_commands() {
-        for id in ["", "RESOLVER", "resolver ", "resolver; rm -rf /", "../resolver", "rm -rf /"] {
-            assert_eq!(vm_fix_command(id), None, "id {id:?} must not map to a command");
+        for id in [
+            "",
+            "RESOLVER",
+            "resolver ",
+            "resolver; rm -rf /",
+            "../resolver",
+            "rm -rf /",
+        ] {
+            assert_eq!(
+                vm_fix_command(id),
+                None,
+                "id {id:?} must not map to a command"
+            );
         }
         assert_eq!(
             vm_fix_command(VM_ISSUE_RESTART_SERVICE).as_deref(),
             Some("sudo -n systemctl --global enable podman-restart.service")
         );
         let resolver = vm_fix_command(VM_ISSUE_RESOLVER).expect("resolver fix");
-        assert!(resolver.starts_with("sudo -n "), "must not wait on a password prompt");
-        assert!(resolver.ends_with("> /etc/resolv.conf'"), "must write only resolv.conf");
+        assert!(
+            resolver.starts_with("sudo -n "),
+            "must not wait on a password prompt"
+        );
+        assert!(
+            resolver.ends_with("> /etc/resolv.conf'"),
+            "must write only resolv.conf"
+        );
     }
 
     /// Whatever starts a hand -- the dashboard or an agent -- is told the cause
@@ -1425,5 +1599,4 @@ mod tests {
         assert!(msg.contains("Settings > Services"));
         assert!(msg.contains("Nothing was changed"));
     }
-
 }

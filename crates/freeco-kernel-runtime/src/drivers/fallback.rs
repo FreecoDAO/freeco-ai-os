@@ -383,7 +383,10 @@ mod tests {
         struct NoBalance;
         #[async_trait]
         impl LlmDriver for NoBalance {
-            async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            async fn complete(
+                &self,
+                _r: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
                 Err(LlmError::Api {
                     status: 403,
                     message: "not enough balance".to_string(),
@@ -393,7 +396,10 @@ mod tests {
         struct NoSuchModel;
         #[async_trait]
         impl LlmDriver for NoSuchModel {
-            async fn complete(&self, _r: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            async fn complete(
+                &self,
+                _r: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
                 Err(LlmError::Api {
                     status: 404,
                     message: "404 page not found".to_string(),
@@ -439,11 +445,18 @@ mod tests {
     #[test]
     fn retryable_error_keeps_its_variant_at_the_end_of_a_chain() {
         let err = chain_error(
-            Some(LlmError::RateLimited { retry_after_ms: 1500 }),
+            Some(LlmError::RateLimited {
+                retry_after_ms: 1500,
+            }),
             vec!["a: failed".to_string(), "b: rate limited".to_string()],
         );
         assert!(
-            matches!(err, LlmError::RateLimited { retry_after_ms: 1500 }),
+            matches!(
+                err,
+                LlmError::RateLimited {
+                    retry_after_ms: 1500
+                }
+            ),
             "got {err:?}"
         );
     }

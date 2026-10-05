@@ -36,6 +36,14 @@ pub fn map_tool_name(openclaw_name: &str) -> Option<&'static str> {
             Some("shell_exec")
         }
 
+        // The sandbox tool was called `docker_exec` when Docker was the only
+        // runtime it knew. It has run on Podman for far longer than it ran on
+        // Docker, and the old name sends agents looking for Docker and telling
+        // users to install it. The name stays mapped rather than retired:
+        // agent manifests list their tools by name, and a rename that silently
+        // removed a capability would leave those agents unable to run anything.
+        "docker_exec" | "container_exec" | "sandbox_run" | "docker_run" => Some("sandbox_exec"),
+
         _ => None,
     }
 }
@@ -81,6 +89,8 @@ pub fn is_known_freeco_tool(name: &str) -> bool {
             | "schedule_delete"
             | "image_analyze"
             | "location_get"
+            | "sandbox_exec"
+            | "crm_api"
     )
 }
 
@@ -162,6 +172,18 @@ mod tests {
         // Unknown
         assert_eq!(map_tool_name("unknown_tool"), None);
         assert_eq!(map_tool_name(""), None);
+    }
+
+    /// The sandbox tool was renamed. Agent manifests list their tools by name,
+    /// so the old name must still resolve or those agents lose the capability.
+    #[test]
+    fn docker_exec_still_reaches_the_sandbox_tool() {
+        assert_eq!(normalize_tool_name("docker_exec"), "sandbox_exec");
+        assert_eq!(normalize_tool_name("container_exec"), "sandbox_exec");
+        assert_eq!(normalize_tool_name("sandbox_run"), "sandbox_exec");
+        // And the new name is canonical, not itself an alias of something else.
+        assert_eq!(normalize_tool_name("sandbox_exec"), "sandbox_exec");
+        assert!(is_known_freeco_tool("sandbox_exec"));
     }
 
     #[test]

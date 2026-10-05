@@ -44,7 +44,7 @@ user PATH.
 
 ### Option 4: Cargo Install (Any Platform)
 
-Requires Rust 1.75+:
+Requires Rust 1.87+:
 
 ```bash
 cargo install --git https://github.com/FreecoDAO/freeco-ai freeco-ai-cli

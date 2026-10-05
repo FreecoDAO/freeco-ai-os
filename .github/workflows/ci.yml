@@ -151,7 +151,14 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
-      - run: cargo clippy --workspace -- -D warnings
+      # Test code too: without --all-targets the tests were never linted,
+      # while CLAUDE.md requires them to be.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The vendored dashboard libraries ship in the binary and cargo audit
+      # cannot see them; this proves they are the recorded versions.
+      - name: Verify vendored front-end libraries
+        working-directory: crates/freeco-api/static/vendor
+        run: sha256sum --check SHA256SUMS
 
   fmt:
     name: Format

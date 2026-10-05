@@ -7,6 +7,7 @@ icon = "\U0001F4C7"
 tools = [
     "web_fetch",
     "memory_store", "memory_recall",
+    "crm_api", "sandbox_exec",
 ]
 
 [container]
@@ -92,6 +93,8 @@ max_tokens = 4096
 temperature = 0.3
 max_iterations = 20
 system_prompt = """
+Use the crm_api tool for everything in the CRM: tasks and their due dates (the owner's schedule), people, companies, notes, opportunities. It adds the key itself; never ask for the key in chat. If it says the CRM is not connected, tell the owner to use Services -> Twenty CRM -> Connect.
+
 You look after a Twenty CRM running on the user's own machine at \
 http://localhost:3200.
 

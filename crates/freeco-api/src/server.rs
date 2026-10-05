@@ -166,6 +166,7 @@ pub async fn build_router(
     // server is bound to a non-loopback address without an explicit opt-in,
     // shout about it. The middleware will reject non-loopback traffic.
     let bind_is_loopback = listen_addr.ip().is_loopback();
+    crate::csrf::set_listens_on_loopback(bind_is_loopback);
     if api_key.is_empty() && !state.kernel.config.auth.enabled && !bind_is_loopback {
         if allow_no_auth {
             tracing::warn!(
@@ -275,8 +276,7 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/history",
-            axum::routing::get(routes::get_agent_history)
-                .delete(routes::clear_agent_history),
+            axum::routing::get(routes::get_agent_history).delete(routes::clear_agent_history),
         )
         .route(
             "/api/agents/{id}/session/compact",
@@ -453,6 +453,10 @@ pub async fn build_router(
         .route(
             "/api/backups/restore",
             axum::routing::post(routes::restore_backup),
+        )
+        .route(
+            "/api/backups/services",
+            axum::routing::post(routes::backup_service_data),
         )
         // Skills endpoints
         .route("/api/skills", axum::routing::get(routes::list_skills))
@@ -641,8 +645,7 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams",
-            axum::routing::get(crate::org_routes::list_teams)
-                .post(crate::org_routes::create_team),
+            axum::routing::get(crate::org_routes::list_teams).post(crate::org_routes::create_team),
         )
         .route(
             "/api/org/projects/{id}/sessions",
@@ -711,6 +714,26 @@ pub async fn build_router(
             axum::routing::post(crate::services::vm_fix),
         )
         .route(
+            "/api/services/{id}/connect",
+            axum::routing::post(crate::crm::connect_service),
+        )
+        // Secrets typed into a chat: found before sending, kept in the vault.
+        .route(
+            "/api/gateway/scan",
+            axum::routing::post(crate::secret_guard::scan),
+        )
+        .route(
+            "/api/vault/secrets",
+            axum::routing::post(crate::secret_guard::save_secret),
+        )
+        // MCP over Streamable HTTP: external clients as team members.
+        .route(
+            "/mcp",
+            axum::routing::post(crate::mcp_http::handle)
+                .get(crate::mcp_http::method_not_allowed)
+                .delete(crate::mcp_http::method_not_allowed),
+        )
+        .route(
             "/api/system/freeze",
             axum::routing::get(routes::get_freeze)
                 .post(routes::freeze_system)
@@ -744,6 +767,11 @@ pub async fn build_router(
             axum::routing::get(routes::usage_by_model),
         )
         .route("/api/usage/daily", axum::routing::get(routes::usage_daily))
+        // By agent, model, team, project and company, from the stored calls.
+        .route(
+            "/api/usage/breakdown",
+            axum::routing::get(crate::usage_breakdown::breakdown),
+        )
         // Budget endpoints
         .route(
             "/api/budget",
@@ -758,7 +786,76 @@ pub async fn build_router(
             axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
         )
         // Session endpoints
+        // The working surface around a conversation -- see chat_tools.rs.
+        .route(
+            "/api/agents/{id}/workspace/tree",
+            axum::routing::get(crate::chat_tools::workspace_tree),
+        )
+        .route(
+            "/api/agents/{id}/workspace/file",
+            axum::routing::get(crate::chat_tools::workspace_file),
+        )
+        .route(
+            "/api/agents/{id}/workspace/changes",
+            axum::routing::get(crate::chat_tools::workspace_changes),
+        )
+        .route(
+            "/api/agents/{id}/artifacts",
+            axum::routing::get(crate::chat_tools::artifacts),
+        )
+        .route(
+            "/api/agents/{id}/terminal",
+            axum::routing::post(crate::chat_tools::terminal),
+        )
+        .route(
+            "/api/agents/{id}/browser/screenshot",
+            axum::routing::get(crate::chat_tools::browser_screenshot),
+        )
+        .route(
+            "/api/agents/{id}/background",
+            axum::routing::get(crate::chat_tools::background),
+        )
+        .route(
+            "/api/agents/{id}/conversation",
+            axum::routing::delete(crate::chat_tools::conversation_delete),
+        )
+        .route(
+            "/api/agents/{id}/conversation/label",
+            axum::routing::put(crate::chat_tools::conversation_label),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archive",
+            axum::routing::post(crate::chat_tools::conversation_archive),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archives",
+            axum::routing::get(crate::chat_tools::conversation_archives),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archives/{file}/restore",
+            axum::routing::post(crate::chat_tools::conversation_restore),
+        )
+        .route(
+            "/api/agents/{id}/conversation/fork",
+            axum::routing::post(crate::chat_tools::conversation_fork),
+        )
+        .route(
+            "/api/agents/{id}/output-style",
+            axum::routing::put(crate::chat_tools::set_output_style),
+        )
+        .route(
+            "/api/agents/{id}/tasks",
+            axum::routing::post(crate::chat_tools::create_task),
+        )
+        .route(
+            "/api/output-styles",
+            axum::routing::get(crate::chat_tools::output_styles),
+        )
         .route("/api/sessions", axum::routing::get(routes::list_sessions))
+        .route(
+            "/api/sessions/search",
+            axum::routing::get(routes::search_sessions),
+        )
         .route("/api/tenancy", axum::routing::get(routes::get_tenancy))
         .route(
             "/api/tenancy/users",
@@ -971,8 +1068,6 @@ pub async fn build_router(
             "/api/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
-        // MCP HTTP endpoint (exposes MCP protocol over HTTP)
-        .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -1015,6 +1110,12 @@ pub async fn build_router(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        // Above auth in the stack, so it runs first: a cross-site request is
+        // refused before anything looks at who is asking. With dashboard auth
+        // off, every loopback request is trusted, and a page on any website can
+        // reach 127.0.0.1 -- CORS stops the reply being read, not the request
+        // arriving, which is no help when the request itself is the damage.
+        .layer(axum::middleware::from_fn(crate::csrf::guard))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -1062,9 +1163,7 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
             // on a laptop that sleeps several times a day, long enough for the
             // owner to find every service down.
             let now_wall = std::time::SystemTime::now();
-            let gap = now_wall
-                .duration_since(last_tick_wall)
-                .unwrap_or_default();
+            let gap = now_wall.duration_since(last_tick_wall).unwrap_or_default();
             last_tick_wall = now_wall;
             if gap > std::time::Duration::from_secs(180) {
                 info!(
@@ -1086,9 +1185,9 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                         "container runtime stopped — service hands cannot run. \
                          Recover with `podman machine start`"
                     ),
-                    RuntimeStatus::NotInstalled => tracing::warn!(
-                        "no container runtime found — service hands are unavailable"
-                    ),
+                    RuntimeStatus::NotInstalled => {
+                        tracing::warn!("no container runtime found — service hands are unavailable")
+                    }
                 }
                 previous = Some(status.clone());
             }
@@ -1158,7 +1257,10 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                         }
                         all
                     } else {
-                        let name = freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref());
+                        let name = freeco_hands::container::container_name(
+                            &inst.hand_id,
+                            tenant.as_deref(),
+                        );
                         freeco_hands::container::is_running(&name).await
                     };
                     if alive {
@@ -1169,7 +1271,10 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                         hand = %inst.hand_id,
                         "service hand is recorded active but its containers are gone — restarting"
                     );
-                    match kernel.start_hand_service(&inst.hand_id, &inst.instance_id).await {
+                    match kernel
+                        .start_hand_service(&inst.hand_id, &inst.instance_id)
+                        .await
+                    {
                         Ok(_) => tracing::info!(hand = %inst.hand_id, "service hand restarted"),
                         // Reported, not retried in a tight loop: the next tick is
                         // a minute away, which is the right pace for something
@@ -1183,6 +1288,7 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                 }
             }
 
+            let mut action = "none";
             if status == RuntimeStatus::Stopped {
                 let due = last_start_attempt
                     .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(600));
@@ -1191,11 +1297,49 @@ fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
                     if freeco_hands::container::try_start_runtime().await {
                         info!("container runtime recovered");
                         previous = None; // re-announce the new state next tick
+                        action = "started runtime: recovered";
+                    } else {
+                        action = "started runtime: FAILED";
                     }
+                } else {
+                    action = "runtime stopped; waiting out the retry backoff";
                 }
             }
+            write_watchdog_heartbeat(&kernel.config.home_dir, &status, gap.as_secs(), action);
         }
     });
+}
+
+/// Record what the watchdog saw and did on its last tick.
+///
+/// The daemon's log goes wherever the process that launched it points stdout,
+/// and a daemon started without that redirected leaves no trace: when the
+/// container runtime failed to come back after sleep, there was no way to tell
+/// whether the watchdog had tried, failed, or never run. This file is written
+/// by the watchdog itself, on every tick, so the question always has an
+/// answer. One small overwrite per minute, never an append that grows.
+fn write_watchdog_heartbeat(
+    home: &std::path::Path,
+    status: &freeco_hands::container::RuntimeStatus,
+    gap_secs: u64,
+    action: &str,
+) {
+    let dir = home.join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({
+        "checked_at": chrono::Utc::now().to_rfc3339(),
+        "runtime": format!("{status:?}"),
+        "seconds_since_previous_tick": gap_secs,
+        "resumed_from_sleep": gap_secs > 180,
+        "action": action,
+        "pid": std::process::id(),
+    });
+    let _ = std::fs::write(
+        dir.join("watchdog.json"),
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    );
 }
 
 /// Create an encrypted recovery point daily. Individual failures are logged and
@@ -1209,6 +1353,8 @@ fn start_backup_scheduler(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
         interval.tick().await;
         loop {
+            // Taken before `home_dir` moves into the blocking task below.
+            let backups_dir = home_dir.join("backups");
             let home_dir = home_dir.clone();
             let data_dir = data_dir.clone();
             let db_path = db_path.clone();
@@ -1220,6 +1366,18 @@ fn start_backup_scheduler(
                 Ok(Ok(backup)) => info!(path = %backup.path, "scheduled encrypted backup created"),
                 Ok(Err(error)) => tracing::warn!(%error, "scheduled encrypted backup failed"),
                 Err(error) => tracing::warn!(%error, "scheduled backup task failed"),
+            }
+            // The archive above covers ~/.freeco-ai only. Service data lives in
+            // container volumes, which it never reached -- so it is saved here,
+            // on the same schedule and with the same retention.
+            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+                Ok(r) => info!(
+                    directory = %r.directory,
+                    saved = r.saved.len(),
+                    failed = r.failed.len(),
+                    "scheduled service data backup"
+                ),
+                Err(error) => tracing::warn!(%error, "scheduled service data backup failed"),
             }
             interval.tick().await;
         }

@@ -284,6 +284,9 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "auth_status": auth_status,
                 "ready": ready,
                 "is_inferencing": is_inferencing,
+                // So the chat's style menu shows the real choice after a reload.
+                "output_style": e.manifest.metadata.get("output_style").cloned()
+                    .unwrap_or_else(|| serde_json::json!("default")),
                 "profile": e.manifest.profile,
                 "identity": {
                     "emoji": e.identity.emoji,
@@ -373,7 +376,9 @@ pub fn stage_attachments(
         let original = if !att.filename.trim().is_empty() {
             att.filename.clone()
         } else {
-            meta.as_ref().map(|m| m.filename.clone()).unwrap_or_default()
+            meta.as_ref()
+                .map(|m| m.filename.clone())
+                .unwrap_or_default()
         };
         let content_type = meta
             .as_ref()
@@ -1525,6 +1530,31 @@ pub async fn create_backup(
 }
 
 /// POST /api/backups/restore — Verify or stage an encrypted recovery archive.
+/// POST /api/backups/services — save service containers' data now.
+///
+/// The scheduled run does this daily; this is for "before I change anything".
+/// Databases are dumped with their own tools and other volumes exported, into
+/// `backups/services/<timestamp>/`. The report lists what was saved and what
+/// was not, so a partial backup is never mistaken for a complete one.
+pub async fn backup_service_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let dir = state.kernel.config.home_dir.join("backups");
+    match crate::service_backup::export_service_data(&dir, 7).await {
+        Ok(report) => {
+            let status = if report.failed.is_empty() {
+                StatusCode::CREATED
+            } else {
+                // Some of it worked: say so, and do not call it a success.
+                StatusCode::MULTI_STATUS
+            };
+            (status, Json(serde_json::json!(report)))
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": error})),
+        ),
+    }
+}
+
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RestoreRequest>,
@@ -4212,20 +4242,32 @@ async fn container_audit(state: &AppState) -> serde_json::Value {
         let Some(def) = state.kernel.hand_registry.get_definition(&inst.hand_id) else {
             continue;
         };
-        let Some(spec) = def.container.as_ref() else { continue };
+        let Some(spec) = def.container.as_ref() else {
+            continue;
+        };
         let tenant = inst.tenant_id.clone();
         let names: Vec<String> = if spec.is_native_stack() {
             spec.services
                 .iter()
                 .map(|s| {
-                    freeco_hands::container::service_container_name(&inst.hand_id, tenant.as_deref(), &s.name)
+                    freeco_hands::container::service_container_name(
+                        &inst.hand_id,
+                        tenant.as_deref(),
+                        &s.name,
+                    )
                 })
                 .collect()
         } else {
-            vec![freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref())]
+            vec![freeco_hands::container::container_name(
+                &inst.hand_id,
+                tenant.as_deref(),
+            )]
         };
         for n in &names {
-            if !listing.lines().any(|l| l.split('\t').next() == Some(n.as_str())) {
+            if !listing
+                .lines()
+                .any(|l| l.split('\t').next() == Some(n.as_str()))
+            {
                 missing.push(serde_json::json!({ "hand": inst.hand_id, "container": n }));
             }
         }
@@ -4236,7 +4278,8 @@ async fn container_audit(state: &AppState) -> serde_json::Value {
     let mut unexpected = Vec::new();
     for line in listing.lines() {
         let mut f = line.split('\t');
-        let (Some(name), image, status) = (f.next(), f.next().unwrap_or(""), f.next().unwrap_or(""))
+        let (Some(name), image, status) =
+            (f.next(), f.next().unwrap_or(""), f.next().unwrap_or(""))
         else {
             continue;
         };
@@ -6606,13 +6649,20 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .registry
         .list()
         .iter()
+        // From the stored calls, not the scheduler's in-memory counter, which
+        // starts at zero on every restart: every agent read 0 tokens while the
+        // database held a hundred million.
         .map(|e| {
-            let (tokens, tool_calls) = state.kernel.scheduler.get_usage(e.id).unwrap_or((0, 0));
+            let s = state.kernel.memory.usage().query_summary(Some(e.id)).ok();
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
-                "total_tokens": tokens,
-                "tool_calls": tool_calls,
+                "total_tokens": s.as_ref().map(|s| s.total_input_tokens + s.total_output_tokens).unwrap_or(0),
+                "input_tokens": s.as_ref().map(|s| s.total_input_tokens).unwrap_or(0),
+                "output_tokens": s.as_ref().map(|s| s.total_output_tokens).unwrap_or(0),
+                "cost_usd": s.as_ref().map(|s| s.total_cost_usd).unwrap_or(0.0),
+                "calls": s.as_ref().map(|s| s.call_count).unwrap_or(0),
+                "tool_calls": s.as_ref().map(|s| s.total_tool_calls).unwrap_or(0),
             })
         })
         .collect();
@@ -6883,6 +6933,45 @@ pub async fn update_agent_budget(
 // ---------------------------------------------------------------------------
 
 /// GET /api/sessions — List all sessions with metadata.
+/// What to search for, and how many answers to bring back.
+#[derive(serde::Deserialize)]
+pub struct SessionSearchQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/sessions/search?q= — conversations that already cover a theme.
+///
+/// The assistant's job is to put a message where the work already lives, and it
+/// had no way to find out where that was: sessions could be listed but never
+/// searched, so everything became a new thread and related work scattered across
+/// agents. Each hit carries the agent's name, because "the Grant Q4 chat" means
+/// nothing to a person without knowing who they were talking to.
+pub async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SessionSearchQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(5).clamp(1, 25);
+    let mut hits = state
+        .kernel
+        .memory
+        .search_canonical_sessions(&q.q, limit)
+        .unwrap_or_default();
+    for hit in &mut hits {
+        let name = hit
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| id.parse::<AgentId>().ok())
+            .and_then(|id| state.kernel.registry.get(id).map(|e| e.name.clone()));
+        if let (Some(obj), Some(name)) = (hit.as_object_mut(), name) {
+            obj.insert("agent_name".to_string(), serde_json::json!(name));
+        }
+    }
+    // Threads whose agent no longer exists cannot be a destination.
+    hits.retain(|h| h.get("agent_name").is_some());
+    Json(serde_json::json!({"query": q.q, "results": hits}))
+}
+
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Include agent conversations. The `sessions` table is only written during
     // compaction, so listing it alone showed an empty or stale list however
@@ -7925,7 +8014,10 @@ pub async fn probe_and_register_models(state: &Arc<AppState>) -> ModelRefreshSum
         // vault.enc is invisible to std::env::var, so the provider would be
         // skipped here as unkeyed while the dashboard showed it configured --
         // and its models would keep their optimistic availability forever.
-        let key = state.kernel.resolve_credential(&env_var).unwrap_or_default();
+        let key = state
+            .kernel
+            .resolve_credential(&env_var)
+            .unwrap_or_default();
         if key.is_empty() {
             skipped.push(format!("{provider} (no key)"));
             continue;
@@ -7971,7 +8063,9 @@ pub async fn probe_and_register_models(state: &Arc<AppState>) -> ModelRefreshSum
         }
 
         for m in list {
-            let Some(raw_id) = m["id"].as_str() else { continue };
+            let Some(raw_id) = m["id"].as_str() else {
+                continue;
+            };
             // Batch and free variants are addressing modes of a model already
             // listed; adding them triples the catalog without adding choice.
             if raw_id.contains(":batch") || raw_id.contains(":free") {
@@ -8530,108 +8624,11 @@ pub async fn a2a_external_task_status(
     }
 }
 
-// ── MCP HTTP Endpoint ───────────────────────────────────────────────────
-
-/// POST /mcp — Handle MCP JSON-RPC requests over HTTP.
-///
-/// Exposes the same MCP protocol normally served via stdio, allowing
-/// external MCP clients to connect over HTTP instead.
-pub async fn mcp_http(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    // Gather all available tools (builtin + skills + MCP)
-    let mut tools = builtin_tool_definitions();
-    {
-        let registry = state
-            .kernel
-            .skill_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        for skill_tool in registry.all_tool_definitions() {
-            tools.push(freeco_types::tool::ToolDefinition {
-                name: skill_tool.name.clone(),
-                description: skill_tool.description.clone(),
-                input_schema: skill_tool.input_schema.clone(),
-            });
-        }
-    }
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
-        tools.extend(mcp_tools.iter().cloned());
-    }
-
-    // Check if this is a tools/call that needs real execution
-    let method = request["method"].as_str().unwrap_or("");
-    if method == "tools/call" {
-        let tool_name = request["params"]["name"].as_str().unwrap_or("");
-        let arguments = request["params"]
-            .get("arguments")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-
-        // Verify the tool exists
-        if !tools.iter().any(|t| t.name == tool_name) {
-            return Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request.get("id").cloned(),
-                "error": {"code": -32602, "message": format!("Unknown tool: {tool_name}")}
-            }));
-        }
-
-        // Snapshot skill registry before async call (RwLockReadGuard is !Send)
-        let skill_snapshot = state
-            .kernel
-            .skill_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot();
-
-        // Execute the tool via the kernel's tool runner
-        let kernel_handle: Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle>;
-        let result = freeco_kernel_runtime::tool_runner::execute_tool(
-            "mcp-http",
-            tool_name,
-            &arguments,
-            Some(&kernel_handle),
-            None,
-            None,
-            Some(&skill_snapshot),
-            Some(&state.kernel.mcp_connections),
-            Some(&state.kernel.web_ctx),
-            Some(&state.kernel.browser_ctx),
-            None,
-            None,
-            Some(&state.kernel.media_engine),
-            None, // exec_policy
-            if state.kernel.config.tts.enabled {
-                Some(&state.kernel.tts_engine)
-            } else {
-                None
-            },
-            if state.kernel.config.docker.enabled {
-                Some(&state.kernel.config.docker)
-            } else {
-                None
-            },
-            Some(&*state.kernel.process_manager),
-        )
-        .await;
-
-        return Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request.get("id").cloned(),
-            "result": {
-                "content": [{"type": "text", "text": result.content}],
-                "isError": result.is_error,
-            }
-        }));
-    }
-
-    // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
-    let response = freeco_kernel_runtime::mcp_server::handle_mcp_request(&request, &tools).await;
-    Json(response)
-}
+// The old `POST /mcp` lived here. It ran any built-in tool -- shell_exec
+// included -- with no token and no capability check, so anything that could
+// reach the port could run commands on the host. It is replaced by
+// `crate::mcp_http`, which requires FREECO_MCP_TOKEN, acts as a named agent
+// with that agent's own tools, and runs commands only in its sandbox.
 
 // ── Multi-Session Endpoints ─────────────────────────────────────────────
 
@@ -8999,10 +8996,7 @@ pub async fn set_default_model(
                     },
                 }
             }
-            Err(_) => (
-                explicit.unwrap_or_default().to_string(),
-                model.to_string(),
-            ),
+            Err(_) => (explicit.unwrap_or_default().to_string(), model.to_string()),
         }
     };
 
@@ -10681,7 +10675,11 @@ fn atomic_write_toml(
 
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
-fn write_secret_env(path: &std::path::Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+pub(crate) fn write_secret_env(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), std::io::Error> {
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -15842,7 +15840,10 @@ mod upload_name_tests {
 
     #[test]
     fn keeps_an_ordinary_name() {
-        assert_eq!(safe_upload_name("CV Anna (2024).pdf", "id"), "CV Anna (2024).pdf");
+        assert_eq!(
+            safe_upload_name("CV Anna (2024).pdf", "id"),
+            "CV Anna (2024).pdf"
+        );
     }
 
     #[test]

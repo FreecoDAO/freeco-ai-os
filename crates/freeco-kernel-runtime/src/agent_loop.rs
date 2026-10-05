@@ -8,7 +8,9 @@ use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, C
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
 use crate::kernel_handle::KernelHandle;
-use crate::llm_driver::{CompletionRequest, DriverConfig, LlmDriver, LlmError, StreamEvent};
+use crate::llm_driver::{
+    CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
+};
 use crate::llm_errors;
 use crate::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::mcp::McpConnection;
@@ -68,6 +70,26 @@ fn env_timeout_secs_with_legacy(current: &str, legacy: &str) -> Option<u64> {
 /// to `0`. In that case the tool runs with no upper bound, which is what users
 /// on slow local inference (vLLM on old GPUs) want for Hands and inter-agent
 /// delegation (issue #1125).
+/// What to tell the model when a tool runs out of time.
+///
+/// "Tool 'agent_send' timed out after 600s" gave the sending agent nothing to
+/// act on, so it retried the same send and waited another ten minutes. The
+/// usual cause is that the other agent never got an answer from its own model -
+/// an exhausted balance, or a fallback naming a model that does not exist - so
+/// say that, and say what to do instead of waiting again.
+fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
+    match tool_name {
+        "agent_send" | "agent_spawn" => format!(
+            "Tool '{tool_name}' timed out after {timeout_secs}s: the other agent did not \
+             reply in time. The usual cause is that its model is not answering - an \
+             exhausted provider balance, or a fallback model that does not exist. Do not \
+             resend the same message and wait again. Tell the user which agent did not \
+             answer, and carry on with what you can do yourself."
+        ),
+        _ => format!("Tool '{tool_name}' timed out after {timeout_secs}s."),
+    }
+}
+
 fn tool_timeout_for(tool_name: &str) -> Option<Duration> {
     let secs = match tool_name {
         "agent_send" | "agent_spawn" => env_timeout_secs_with_legacy(
@@ -338,14 +360,21 @@ mod strip_provider_prefix_tests {
         }
     }
 
-    /// The user's key or credit is not fixed by spending on another provider,
-    /// and doing so silently turns a clear error into a surprise bill.
+    /// A subscription or quota limit hands over to the next configured model
+    /// instead of stopping the agent until the limit resets.
     #[test]
-    fn auth_and_billing_never_fall_back() {
+    fn limits_fall_back_to_the_configured_chain() {
         use llm_errors::LlmErrorCategory as C;
-        for c in [C::Auth, C::Billing] {
-            assert!(!should_try_fallback(c), "{c:?} must not fall back");
+        for c in [C::RateLimit, C::Billing] {
+            assert!(should_try_fallback(c), "{c:?} should fall back");
         }
+    }
+
+    /// A wrong or revoked key is the owner's to fix; working around it would
+    /// hide that it is broken.
+    #[test]
+    fn auth_never_falls_back() {
+        assert!(!should_try_fallback(llm_errors::LlmErrorCategory::Auth));
     }
 }
 
@@ -742,16 +771,8 @@ pub async fn run_agent_loop(
         )
         .await?;
 
-        // Restore the real values in the reply. Models echo their input, so
-        // without this the user reads their own data back as placeholders.
         if let Some(gw) = gateway.as_ref() {
-            for block in &mut response.content {
-                if let ContentBlock::Text { text, .. } = block {
-                    if let Ok(restored) = gw.process_inbound(text) {
-                        *text = restored;
-                    }
-                }
-            }
+            restore_response(gw, &mut response);
         }
 
         total_usage.input_tokens += response.usage.input_tokens;
@@ -997,7 +1018,7 @@ pub async fn run_agent_loop(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
-        served_by_fallback: None,
+                    served_by_fallback: None,
                 });
             }
             StopReason::ToolUse => {
@@ -1155,10 +1176,7 @@ pub async fn run_agent_loop(
                                     warn!(tool = %tool_call.name, "Tool execution timed out after {}s", timeout_secs);
                                     freeco_types::tool::ToolResult {
                                         tool_use_id: tool_call.id.clone(),
-                                        content: format!(
-                                            "Tool '{}' timed out after {}s.",
-                                            tool_call.name, timeout_secs
-                                        ),
+                                        content: timeout_message(&tool_call.name, timeout_secs),
                                         is_error: true,
                                     }
                                 }
@@ -1357,17 +1375,41 @@ fn mask_request(
         allowed: 0,
         kinds: Vec::new(),
     };
-    for message in &mut request.messages {
-        if let MessageContent::Text(text) = &message.content {
-            let (masked, report) = gw.process_outbound(text).map_err(|e| e.to_string())?;
-            if masked != *text {
-                message.content = MessageContent::Text(masked);
+    let mut mask = |text: &mut String| -> Result<(), String> {
+        let (masked, report) = gw.process_outbound(text).map_err(|e| e.to_string())?;
+        if masked != *text {
+            *text = masked;
+        }
+        total.masked += report.masked;
+        total.allowed += report.allowed;
+        for kind in report.kinds {
+            if !total.kinds.contains(&kind) {
+                total.kinds.push(kind);
             }
-            total.masked += report.masked;
-            total.allowed += report.allowed;
-            for kind in report.kinds {
-                if !total.kinds.contains(&kind) {
-                    total.kinds.push(kind);
+        }
+        Ok(())
+    };
+    // The system prompt carries injected context -- memory, the conversation
+    // summary -- so a key the user pasted earlier can reach it.
+    if let Some(system) = request.system.as_mut() {
+        mask(system)?;
+    }
+    for message in &mut request.messages {
+        match &mut message.content {
+            MessageContent::Text(text) => mask(text)?,
+            // Structured messages are where tool results and attachments live.
+            // Scanning only plain-text messages let a key read from a file, or
+            // returned by a tool, go out untouched.
+            MessageContent::Blocks(blocks) => {
+                for block in blocks.iter_mut() {
+                    match block {
+                        ContentBlock::Text { text, .. } => mask(text)?,
+                        ContentBlock::ToolResult { content, .. } => mask(content)?,
+                        ContentBlock::ToolUse { input, .. } => {
+                            for_each_json_string(input, &mut mask)?
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1375,12 +1417,74 @@ fn mask_request(
     Ok((request, total))
 }
 
+/// Apply `f` to every string inside a JSON value, keys excluded.
+///
+/// Walks the value rather than editing its serialised text: a restored value
+/// containing a quote or a backslash would otherwise produce invalid JSON.
+fn for_each_json_string(
+    value: &mut serde_json::Value,
+    f: &mut dyn FnMut(&mut String) -> Result<(), String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(s) => f(s),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                for_each_json_string(item, f)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                for_each_json_string(v, f)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Put the real values back into a provider's reply.
+///
+/// Text, because models echo their input and the user would otherwise read
+/// their own data back as placeholders. Tool-call arguments too: a model that
+/// was shown `FRECO_REDACTED_…` for an address or a key passes that placeholder
+/// to the tool, and the tool has to act on the real value or it fails.
+fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut CompletionResponse) {
+    fn restore_json(gw: &freeco_datagateway::DataGateway, input: &mut serde_json::Value) {
+        let _ = for_each_json_string(input, &mut |s: &mut String| -> Result<(), String> {
+            if let Ok(restored) = gw.process_inbound(s) {
+                *s = restored;
+            }
+            Ok(())
+        });
+    }
+    for block in &mut response.content {
+        match block {
+            ContentBlock::Text { text, .. } => {
+                if let Ok(restored) = gw.process_inbound(text) {
+                    *text = restored;
+                }
+            }
+            ContentBlock::ToolUse { input, .. } => restore_json(gw, input),
+            _ => {}
+        }
+    }
+    for call in &mut response.tool_calls {
+        restore_json(gw, &mut call.input);
+    }
+}
+
 /// Is this the kind of failure another model could plausibly succeed at?
 ///
-/// Auth and Billing are excluded on purpose: those are the user's key or credit
-/// problems, and silently spending on a different provider would be worse than
-/// failing loudly. The rest are properties of the model or the moment rather
-/// than of the request, so a different model is worth trying.
+/// A rate limit or a used-up allowance (RateLimit, Billing) moves down the
+/// chain. The chain only ever holds models the owner configured, and the case
+/// it exists for is exactly this one: a Claude subscription that has hit its
+/// limit for the next few hours should hand over to GLM or Nemotron, not stop
+/// the agent until the limit resets. Excluding these had made every
+/// subscription limit a hard failure.
+///
+/// Auth stays excluded: a wrong or revoked key is fixed by the owner, and
+/// working around it would hide that it is broken.
 ///
 /// Shared by the streaming and non-streaming paths so they cannot drift apart
 /// again -- they had, and the streaming one is the path the dashboard uses.
@@ -1391,6 +1495,8 @@ pub fn should_try_fallback(category: llm_errors::LlmErrorCategory) -> bool {
             | llm_errors::LlmErrorCategory::Timeout
             | llm_errors::LlmErrorCategory::Overloaded
             | llm_errors::LlmErrorCategory::ContextOverflow
+            | llm_errors::LlmErrorCategory::RateLimit
+            | llm_errors::LlmErrorCategory::Billing
     )
 }
 
@@ -1506,10 +1612,8 @@ async fn call_with_retry(
                 // overflows this model's context — failed hard and the user saw
                 // "I couldn't reach a language model" even though other working
                 // models were configured. Any error that another model could
-                // plausibly succeed at now triggers the chain. Auth and Billing
-                // are excluded on purpose: those are the user's key/credit
-                // problems and silently spending on a different provider would
-                // be worse than failing loudly.
+                // plausibly succeed at now triggers the chain, a reached limit
+                // included; only Auth does not (see `should_try_fallback`).
                 let should_fall_back = should_try_fallback(classified.category);
                 if should_fall_back && !fallback_models.is_empty() {
                     warn!(
@@ -2057,6 +2161,29 @@ pub async fn run_agent_loop_streaming(
             k.touch_agent(&agent_id_str);
         }
 
+        // Mask secrets before the request leaves this machine -- on this path
+        // too. The gateway was applied only to the non-streaming loop, and this
+        // is the one the dashboard chat and the popup use, so everything a user
+        // typed there went to the provider unscanned while the log showed the
+        // gateway busy masking background ticks.
+        let gateway = kernel.as_ref().and_then(|k| k.data_gateway());
+        let mut request = request;
+        if let Some(gw) = gateway.as_ref() {
+            match mask_request(gw, request) {
+                Ok((masked, report)) => {
+                    if report.masked > 0 {
+                        info!(
+                            masked = report.masked,
+                            kinds = ?report.kinds,
+                            "Data gateway masked values before the provider call (streaming)"
+                        );
+                    }
+                    request = masked;
+                }
+                Err(blocked) => return Err(FreecoError::LlmDriver(blocked)),
+            }
+        }
+
         // Stream LLM call with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
         let mut response = stream_with_retry(
@@ -2068,6 +2195,12 @@ pub async fn run_agent_loop_streaming(
             &manifest.fallback_models,
         )
         .await?;
+
+        // The streamed deltas already shown may carry placeholders; the final
+        // reply, which replaces them in the chat, carries the real values.
+        if let Some(gw) = gateway.as_ref() {
+            restore_response(gw, &mut response);
+        }
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -2284,7 +2417,7 @@ pub async fn run_agent_loop_streaming(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
-        served_by_fallback: None,
+                    served_by_fallback: None,
                 });
             }
             StopReason::ToolUse => {
@@ -2435,10 +2568,7 @@ pub async fn run_agent_loop_streaming(
                                     warn!(tool = %tool_call.name, "Tool execution timed out after {}s (streaming)", timeout_secs);
                                     freeco_types::tool::ToolResult {
                                         tool_use_id: tool_call.id.clone(),
-                                        content: format!(
-                                            "Tool '{}' timed out after {}s.",
-                                            tool_call.name, timeout_secs
-                                        ),
+                                        content: timeout_message(&tool_call.name, timeout_secs),
                                         is_error: true,
                                     }
                                 }
@@ -2653,7 +2783,10 @@ pub async fn run_agent_loop_streaming(
 /// 14. `<function=tool><parameter=name>value</parameter></function>` — nested XML parameter style
 ///
 /// Validates tool names against available tools and returns synthetic `ToolCall` entries.
-fn recover_text_tool_calls(text: &str, available_tools: &[ToolDefinition]) -> Vec<ToolCall> {
+pub(crate) fn recover_text_tool_calls(
+    text: &str,
+    available_tools: &[ToolDefinition],
+) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     let tool_names: Vec<&str> = available_tools.iter().map(|t| t.name.as_str()).collect();
 
@@ -5814,15 +5947,17 @@ mod gateway_wiring_tests {
         assert_eq!(sent, original);
     }
 
-    /// Blocking has to surface as an error. A silently stripped card number
-    /// gives the user a wrong answer and no idea why.
+    /// A number that passes the card checksum must not stop the request: it
+    /// sits in history, so a refusal would refuse every later request too. A
+    /// phone number in a tool call did exactly that to the CEO's chat.
     #[test]
-    fn a_blocked_value_stops_the_request() {
+    fn a_card_like_number_is_masked_not_refused() {
         let g = gw();
-        let err = mask_request(&g, text_request("card 4242 4242 4242 4242")).unwrap_err();
-        assert!(
-            err.to_lowercase().contains("card"),
-            "unhelpful error: {err}"
-        );
+        let (masked, report) = mask_request(&g, text_request("card 4242 4242 4242 4242")).unwrap();
+        assert_eq!(report.masked, 1);
+        let MessageContent::Text(sent) = &masked.messages[0].content else {
+            panic!("expected text");
+        };
+        assert!(!sent.contains("4242 4242"), "card still present: {sent}");
     }
 }

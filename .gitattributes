@@ -1,0 +1,5 @@
+# Vendored libraries must be byte-identical on every platform: their
+# SHA-256 is recorded in vendor/SHA256SUMS and checked in CI.
+crates/freeco-api/static/vendor/*.js -text
+crates/freeco-api/static/vendor/*.css -text
+crates/freeco-api/static/vendor/SHA256SUMS -text

@@ -330,6 +330,28 @@ impl MemorySubstrate {
         self.sessions.canonical_len(agent_id)
     }
 
+    /// The agent's whole conversation, for archiving and forking.
+    pub fn load_canonical(
+        &self,
+        agent_id: AgentId,
+    ) -> FreecoResult<crate::session::CanonicalSession> {
+        self.sessions.load_canonical(agent_id)
+    }
+
+    /// Name the agent's conversation; `None` clears the name.
+    pub fn set_canonical_label(&self, agent_id: AgentId, label: Option<&str>) -> FreecoResult<()> {
+        self.sessions.set_canonical_label(agent_id, label)
+    }
+
+    /// Conversations that already discuss a theme, best match first.
+    pub fn search_canonical_sessions(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        self.sessions.search_canonical_sessions(query, limit)
+    }
+
     /// Store an LLM-generated summary, replacing older messages with the kept subset.
     ///
     /// Used by the compactor to replace text-truncation compaction with an

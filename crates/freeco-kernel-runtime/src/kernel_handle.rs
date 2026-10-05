@@ -269,7 +269,11 @@ pub trait KernelHandle: Send + Sync {
     /// create the company it was CEO of. Worse, `project_create` takes a
     /// `company_id` and the companies table was empty, so any id an agent
     /// supplied failed on the foreign key with nothing it could do about it.
-    async fn company_create(&self, name: &str, description: Option<&str>) -> Result<String, String> {
+    async fn company_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<String, String> {
         let _ = (name, description);
         Err("Organisation store not available".to_string())
     }

@@ -314,6 +314,22 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Set one key in an agent's metadata, such as its output style.
+    pub fn update_metadata(
+        &self,
+        id: AgentId,
+        key: String,
+        value: serde_json::Value,
+    ) -> FreecoResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| FreecoError::AgentNotFound(id.to_string()))?;
+        entry.manifest.metadata.insert(key, value);
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's LLM tuning settings.
     pub fn update_model_tuning(
         &self,

@@ -44,6 +44,8 @@
   --success-dim: #166B41;
   --success-subtle: rgba(30, 133, 82, 0.1);
   --error: #C1121F;
+  --danger: var(--error); /* used across the dashboard, never defined until now */
+  --bg-hover: var(--bg-secondary); /* referenced by hover states, never defined */
   --error-dim: #8F0D17;
   --error-subtle: rgba(193, 18, 31, 0.08);
   --warning: #8F6F1B;
@@ -146,6 +148,8 @@
   --success-dim: #248A5A;
   --success-subtle: rgba(51, 184, 121, 0.18);
   --error: #C1121F;
+  --danger: var(--error); /* used across the dashboard, never defined until now */
+  --bg-hover: var(--bg-secondary); /* referenced by hover states, never defined */
   --error-dim: #95131D;
   --error-subtle: rgba(210, 31, 43, 0.2);
   --warning: #B08D2F;

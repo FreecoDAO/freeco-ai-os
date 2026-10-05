@@ -388,7 +388,7 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
                     format!(
                         "'{base}' is an interpreter and is not allowed on the host, so \
                          nothing ran. Running arbitrary code outside the sandbox is exactly \
-                         what the sandbox exists to prevent: use docker_exec, which gives \
+                         what the sandbox exists to prevent: use sandbox_exec, which gives \
                          you a throwaway Linux container with no network. If the script \
                          genuinely must touch this machine, the user has to add '{base}' to \
                          allowed_commands in ~/.freeco-ai/config.toml themselves."
@@ -396,7 +396,7 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
                 } else {
                     format!(
                         "'{base}' is not in the exec allowlist, so nothing ran. Either run it \
-                         in the Docker sandbox via docker_exec (isolated, no network, nothing \
+                         in the sandbox via sandbox_exec (isolated, no network, nothing \
                          touches this machine), or ask the user to add '{base}' to \
                          allowed_commands in ~/.freeco-ai/config.toml. Note that git and gh \
                          can execute arbitrary code through hooks and aliases, so allowing \

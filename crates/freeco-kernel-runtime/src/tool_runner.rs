@@ -150,7 +150,13 @@ pub async fn execute_tool(
 
     // Capability enforcement: reject tools not in the allowed list
     if let Some(allowed) = allowed_tools {
-        if !allowed.iter().any(|t| t == tool_name) {
+        // Both sides normalized: a manifest naming `docker_exec` grants the
+        // tool now called `sandbox_exec`, so renaming a tool cannot silently
+        // strip a capability from agents that already list the old name.
+        if !allowed
+            .iter()
+            .any(|t| normalize_tool_name(t.as_str()) == tool_name)
+        {
             warn!(tool_name, "Capability denied: tool not in allowed list");
             return ToolResult {
                 tool_use_id: tool_use_id.to_string(),
@@ -324,9 +330,16 @@ pub async fn execute_tool(
             {
                 return ToolResult {
                     tool_use_id: tool_use_id.to_string(),
+                    // Say where the command CAN run, not only that it cannot run
+                    // here. The refusal alone left agents retrying variations on
+                    // the host, or asking the user for a looser policy, when the
+                    // sandbox accepts pipes, redirection and substitution
+                    // because nothing it does can reach this machine.
                     content: format!(
-                        "shell_exec blocked: command contains {reason}. \
-                         Shell metacharacters are never allowed."
+                        "shell_exec blocked: command contains {reason}. Shell \
+                         metacharacters are never allowed on the host. Run this with \
+                         sandbox_exec instead: it accepts pipes, redirection and \
+                         substitution, and runs isolated from this machine."
                     ),
                     is_error: true,
                 };
@@ -418,8 +431,8 @@ pub async fn execute_tool(
         "text_to_speech" => tool_text_to_speech(input, tts_engine, workspace_root).await,
         "speech_to_text" => tool_speech_to_text(input, media_engine, workspace_root).await,
 
-        // Docker sandbox tool
-        "docker_exec" => {
+        // Sandbox tool
+        "sandbox_exec" => {
             tool_docker_exec(
                 input,
                 docker_config,
@@ -429,6 +442,9 @@ pub async fn execute_tool(
             )
             .await
         }
+
+        // The CRM on this machine: one fixed address, key read from the vault.
+        "crm_api" => crate::crm_tool::crm_api(input).await,
 
         // Location tool
         "location_get" => tool_location_get().await,
@@ -528,7 +544,10 @@ pub async fn execute_tool(
         // clearly rather than renaming whatever session happens to be handy.
         "session_rename" => match (kernel, caller_agent_id) {
             (Some(kh), Some(aid)) => {
-                match kh.session_rename(aid, input["label"].as_str().unwrap_or("")).await {
+                match kh
+                    .session_rename(aid, input["label"].as_str().unwrap_or(""))
+                    .await
+                {
                     Ok(msg) => Ok(msg),
                     Err(e) => Err(e),
                 }
@@ -837,7 +856,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "shell_exec".to_string(),
             description: "Run a command directly on the user's machine, outside any sandbox. \
-                          This is a last resort: prefer `docker_exec`, which runs in the isolated \
+                          This is a last resort: prefer `sandbox_exec`, which runs in the isolated \
                           Linux sandbox and needs no approval. Use this only when the task cannot \
                           be done in the sandbox — because it needs the user's own files, their \
                           installed tools, or a service bound to their machine — and say which in \
@@ -1632,14 +1651,40 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
         },
+        // --- CRM tool ---
+        ToolDefinition {
+            name: "crm_api".to_string(),
+            description: "Read and change the owner's Twenty CRM on this machine: tasks \
+(with due dates - these are the owner's schedule), people, companies, notes and \
+opportunities. The CRM key is added by this tool; never ask for it. REST: GET \
+/rest/tasks?limit=20&orderBy=dueAt (list), GET /rest/tasks/{id}, POST /rest/tasks \
+with body {\"title\":\"…\",\"status\":\"TODO\",\"dueAt\":\"2026-10-01T09:00:00Z\"} \
+(create), PATCH /rest/tasks/{id} with {\"status\":\"DONE\"} (update). Status is \
+TODO, IN_PROGRESS or DONE. Same pattern for /rest/people, /rest/companies, \
+/rest/notes, /rest/opportunities; filter with \
+?filter=status[eq]:TODO. POST /graphql for anything REST does not cover.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "enum": ["GET","POST","PATCH","DELETE"], "description": "HTTP method (default GET)" },
+                    "path": { "type": "string", "description": "API path starting with /rest/ or /graphql, including any query string" },
+                    "body": { "type": "object", "description": "JSON body for POST/PATCH" }
+                },
+                "required": ["path"]
+            }),
+        },
         // --- Docker sandbox tool ---
         ToolDefinition {
-            name: "docker_exec".to_string(),
+            name: "sandbox_exec".to_string(),
             description: "Execute a command inside an isolated Linux container. \
 Use tier='workspace' to build, test or install dependencies: that gets 4 GB, a \
 30 minute timeout, a writable workspace and network access. The default \
 tier='exec' is a throwaway container with no network and a 60 second limit, for \
-running a single command. Works with Docker or Podman.".to_string(),
+running a single command. Works with Docker or Podman. The services installed on \
+this machine are reachable from tier='workspace' at http://127.0.0.1:<port> - by \
+default CRM 3200, voice API 8000 (health: /api/v1/health), voice UI 3010, speech \
+8010 (health: /health), accounting 8080. Use this, never a host shell, to reach \
+them.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1795,11 +1840,22 @@ fn validate_path(path: &str) -> Result<&str, String> {
 
 /// Resolve a file path through the workspace sandbox (if available) or legacy validation.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(root) = workspace_root {
-        crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
-    } else {
-        let _ = validate_path(raw_path)?;
-        Ok(PathBuf::from(raw_path))
+    match workspace_root {
+        Some(root) => crate::workspace_sandbox::resolve_sandbox_path(raw_path, root),
+        // No workspace means nothing to confine the path to, and the fallback
+        // here used to reject only `..` -- so any absolute path was readable
+        // and writable, `~/.freeco-ai/secrets.env` included, by any agent that
+        // happened to have no workspace set. Refusing is the only confinement
+        // available without one; every agent the kernel spawns gets a
+        // workspace, so this closes a gap rather than a working path.
+        None => {
+            let _ = validate_path(raw_path)?;
+            Err(format!(
+                "Access denied: '{raw_path}' cannot be reached because this agent has no \
+                 workspace to confine file access to. Give the agent a workspace, or use \
+                 sandbox_exec to work with files inside its container."
+            ))
+        }
     }
 }
 
@@ -3828,7 +3884,7 @@ async fn tool_speech_to_text(
 // Docker sandbox tool
 // ---------------------------------------------------------------------------
 
-async fn tool_docker_exec(
+pub async fn tool_docker_exec(
     input: &serde_json::Value,
     docker_config: Option<&freeco_types::config::DockerSandboxConfig>,
     workspace_root: Option<&Path>,
@@ -3867,7 +3923,7 @@ async fn tool_docker_exec(
     }
     if config.mode != freeco_types::config::DockerSandboxMode::All {
         return Err(
-            "docker_exec requires docker.mode = 'all'. The 'off' and 'non_main' modes do not grant this tool because it has no trusted main-agent identity context."
+            "sandbox_exec requires docker.mode = 'all'. The 'off' and 'non_main' modes do not grant this tool because it has no trusted main-agent identity context."
                 .into(),
         );
     }
@@ -4547,7 +4603,7 @@ mod tests {
         // 3 voice/docker tools
         assert!(names.contains(&"text_to_speech"));
         assert!(names.contains(&"speech_to_text"));
-        assert!(names.contains(&"docker_exec"));
+        assert!(names.contains(&"sandbox_exec"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
         // 3 skill introspection tools (issue #1038)
@@ -4977,16 +5033,25 @@ mod tests {
             None, // process_manager
         )
         .await;
-        // Should fail for file-not-found, NOT for permission denied
+        // Should fail for a reason other than the capability check. With no
+        // workspace the file tools now refuse outright -- the unconfined
+        // fallback let any absolute path through -- so that refusal is an
+        // expected outcome here, as long as it is not a capability denial.
         assert!(
             result.is_error,
             "Expected error but got: {}",
             result.content
         );
         assert!(
+            !result.content.contains("does not have capability"),
+            "An allowed tool must not be denied by capability: {}",
+            result.content
+        );
+        assert!(
             result.content.contains("Failed to read")
                 || result.content.contains("not found")
-                || result.content.contains("No such file"),
+                || result.content.contains("No such file")
+                || result.content.contains("no workspace to confine"),
             "Unexpected error: {}",
             result.content
         );
@@ -5781,8 +5846,14 @@ mod tests {
     #[test]
     fn global_scope_is_the_bare_key() {
         assert_eq!(scoped_memory_key(None, "priorities", None), "priorities");
-        assert_eq!(scoped_memory_key(Some("global"), "priorities", None), "priorities");
-        assert_eq!(scoped_memory_key(Some("  "), "priorities", None), "priorities");
+        assert_eq!(
+            scoped_memory_key(Some("global"), "priorities", None),
+            "priorities"
+        );
+        assert_eq!(
+            scoped_memory_key(Some("  "), "priorities", None),
+            "priorities"
+        );
     }
 
     /// The point of scopes: two teams can both store the obvious key without

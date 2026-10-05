@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 4] = b"OFB1";
 const KEY_NAME: &str = "freeco.backup.archive-key.v1";
-const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct BackupFile {
@@ -218,6 +218,7 @@ pub fn create_backup(
     retention: usize,
 ) -> Result<BackupResult, String> {
     let key = archive_key(home_dir)?;
+    checkpoint_wal(db_path);
     let files = collect_files(home_dir, data_dir, db_path)?;
     let content = serde_json::to_vec(&files).map_err(|e| e.to_string())?;
     let payload = BackupPayload {
@@ -243,6 +244,18 @@ pub fn create_backup(
     let mut archive = MAGIC.to_vec();
     archive.extend_from_slice(&nonce);
     archive.extend_from_slice(&ciphertext);
+    // Never write what restore would refuse. It used to be written anyway,
+    // reported as a success, and then pruning deleted the oldest archive to
+    // make room -- replacing a backup that could be restored with one that
+    // could not.
+    if archive.len() as u64 > MAX_ARCHIVE_BYTES {
+        return Err(format!(
+            "backup would be {} MB, over the {} MB a restore accepts; nothing was written \
+             and no older backup was removed",
+            archive.len() / (1024 * 1024),
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        ));
+    }
     fs::write(&path, &archive).map_err(|e| e.to_string())?;
     prune_backups(&backups, retention)?;
     Ok(BackupResult {
@@ -250,6 +263,35 @@ pub fn create_backup(
         files: payload.files.len(),
         bytes: archive.len() as u64,
     })
+}
+
+/// Fold the write-ahead log into the database before copying both.
+///
+/// Uncheckpointed, the log had grown to 106 MB beside a 24 MB database and
+/// took the archive past the size a restore accepts. Best effort: a reader
+/// holding an old snapshot can stop it finishing, and the backup is still
+/// correct without it, only larger.
+fn checkpoint_wal(db_path: &Path) {
+    if !db_path.exists() {
+        return;
+    }
+    match rusqlite::Connection::open(db_path) {
+        Ok(conn) => {
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
+            match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            }) {
+                Ok((busy, log, done)) if busy != 0 => tracing::warn!(
+                    log_pages = log,
+                    checkpointed = done,
+                    "WAL checkpoint before backup was blocked by an open reader; backing up the log as it is"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("WAL checkpoint before backup failed: {e}"),
+            }
+        }
+        Err(e) => tracing::warn!("could not open the database to checkpoint it: {e}"),
+    }
 }
 
 fn prune_backups(backups: &Path, retention: usize) -> Result<(), String> {

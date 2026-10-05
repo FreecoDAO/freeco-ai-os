@@ -895,7 +895,8 @@ impl LlmDriver for OpenAIDriver {
                 // A 500 is now retried as-is, unchanged: the same request may
                 // simply succeed, which is what a transient fault means.
                 let says_tools_unsupported = says_tools_unsupported(status, &body_lower);
-                if !oai_request.tools.is_empty() && attempt < max_retries && says_tools_unsupported {
+                if !oai_request.tools.is_empty() && attempt < max_retries && says_tools_unsupported
+                {
                     warn!(
                         model = %oai_request.model,
                         status,
@@ -1940,9 +1941,18 @@ mod effective_model_tests {
     /// for, and narrowing it must not break it.
     #[test]
     fn explicit_no_tool_support_still_strips() {
-        assert!(says_tools_unsupported(400, "this model does not support tools"));
-        assert!(says_tools_unsupported(400, "tools are not supported by this endpoint"));
-        assert!(says_tools_unsupported(400, "function calling is not supported"));
+        assert!(says_tools_unsupported(
+            400,
+            "this model does not support tools"
+        ));
+        assert!(says_tools_unsupported(
+            400,
+            "tools are not supported by this endpoint"
+        ));
+        assert!(says_tools_unsupported(
+            400,
+            "function calling is not supported"
+        ));
     }
 
     /// The catalog's `openrouter/` prefix is ours, not OpenRouter's, so it has

@@ -815,7 +815,13 @@ fn chromium_candidates() -> Vec<String> {
 /// Manages browser sessions for all agents.
 pub struct BrowserManager {
     sessions: DashMap<String, Arc<Mutex<BrowserSession>>>,
-    config: BrowserConfig,
+    /// Behind a lock so a config change can be applied to a running daemon.
+    ///
+    /// This was a plain field, so `[browser]` edits were detected by the config
+    /// watcher, queued as a hot action, and then applied by nobody -- turning
+    /// the browser visible, or changing its viewport, meant restarting the
+    /// daemon while the reload logged success.
+    config: std::sync::RwLock<BrowserConfig>,
 }
 
 impl BrowserManager {
@@ -823,8 +829,19 @@ impl BrowserManager {
     pub fn new(config: BrowserConfig) -> Self {
         Self {
             sessions: DashMap::new(),
-            config,
+            config: std::sync::RwLock::new(config),
         }
+    }
+
+    /// Replace the configuration used for browsers started from now on.
+    ///
+    /// Sessions already running keep the settings they were launched with: a
+    /// browser cannot become headless, or change its window size, without being
+    /// restarted, and killing an agent's browser mid-task to apply a preference
+    /// would lose its work. The next session gets the new settings.
+    pub fn set_config(&self, config: BrowserConfig) {
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
+        *guard = config;
     }
 
     /// Check whether an agent has an active browser session.
@@ -870,14 +887,19 @@ impl BrowserManager {
             return Ok(Arc::clone(entry.value()));
         }
 
-        if self.sessions.len() >= self.config.max_sessions {
+        let config = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if self.sessions.len() >= config.max_sessions {
             return Err(format!(
                 "Maximum browser sessions reached ({}). Close an existing session first.",
-                self.config.max_sessions
+                config.max_sessions
             ));
         }
 
-        let session = BrowserSession::launch(&self.config).await?;
+        let session = BrowserSession::launch(&config).await?;
         let arc = Arc::new(Mutex::new(session));
         self.sessions.insert(agent_id.to_string(), Arc::clone(&arc));
         info!(agent_id, "Browser session created (native CDP)");

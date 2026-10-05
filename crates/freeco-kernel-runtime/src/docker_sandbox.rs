@@ -348,6 +348,29 @@ pub async fn create_sandbox(
     cmd.arg("-e")
         .arg(format!("npm_config_cache={cache_root}/npm"));
     cmd.arg("-e").arg(format!("PIP_CACHE_DIR={cache_root}/pip"));
+
+    // Credentials the owner chose to make available inside the sandbox.
+    //
+    // Only the names listed in `docker.sandbox_env`, and only when the daemon
+    // actually has them. An unset name is skipped rather than passed empty, so
+    // a tool inside reports "not authenticated" instead of failing on a blank
+    // token. Values are never logged: the name is enough to see what was
+    // shared.
+    for name in &config.sandbox_env {
+        let clean = name.trim();
+        // A name only: anything else would let a config entry inject a second
+        // variable, or a value, into the container's environment.
+        if clean.is_empty() || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            tracing::warn!(entry = %name, "ignoring invalid sandbox_env name");
+            continue;
+        }
+        match std::env::var(clean) {
+            Ok(value) if !value.is_empty() => {
+                cmd.arg("-e").arg(format!("{clean}={value}"));
+            }
+            _ => tracing::debug!(name = %clean, "sandbox_env name is not set on the daemon"),
+        }
+    }
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
     }
@@ -397,6 +420,7 @@ pub async fn create_sandbox(
     } else {
         config.network.clone()
     };
+    let network = with_service_ports(runtime_bin, &network, &config.service_ports);
     cmd.arg("--network").arg(&network);
 
     // Publish ports, and ask Docker to keep the container alive, when this
@@ -1010,8 +1034,48 @@ pub fn config_hash(config: &DockerSandboxConfig) -> u64 {
     config.pids_limit.hash(&mut hasher);
     config.persistent_workspace.hash(&mut hasher);
     config.persistent_workspace_agents.hash(&mut hasher);
+    // Part of the fingerprint: a container started before a credential was
+    // shared does not have it, and reusing that one would leave the agent
+    // unauthenticated with no sign of why.
+    config.sandbox_env.hash(&mut hasher);
     config.blocked_mounts.hash(&mut hasher);
+    // A sandbox started before a service port was added cannot reach it.
+    config.service_ports.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Give a networked podman sandbox the local services, and only those.
+///
+/// The services FreEco.ai installs (CRM, voice, speech, accounting) listen on
+/// the VM's loopback interface. A sandbox on podman's default network has its
+/// own loopback and cannot reach them -- tested: every one of them refused --
+/// so an agent sent to use one had no way but to ask for a host shell, which
+/// is exactly what the sandbox exists to prevent.
+///
+/// `pasta -T <port>` forwards the sandbox's own `127.0.0.1:<port>` to the same
+/// port on the host, one port at a time. Host networking, or pasta's
+/// `--map-host-loopback`, would also work, but they open every port on the
+/// host, the services' databases included; this opens the listed service ports
+/// and nothing else, and leaves outbound internet as it was.
+///
+/// Docker has no equivalent, and "none" means no network, so both are left
+/// alone.
+pub(crate) fn with_service_ports(runtime_bin: &str, network: &str, ports: &[u16]) -> String {
+    // Split by hand: `Path` would not treat `\` as a separator on Linux.
+    let name = runtime_bin
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(runtime_bin);
+    let name = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    let podman = name.eq_ignore_ascii_case("podman");
+    if !podman || ports.is_empty() || !(network == "bridge" || network == "pasta") {
+        return network.to_string();
+    }
+    let forwards: Vec<String> = ports.iter().map(|p| format!("-T,{p}")).collect();
+    format!("pasta:{}", forwards.join(","))
 }
 
 #[cfg(test)]
@@ -1136,6 +1200,20 @@ mod tests {
         assert_eq!(config.reuse_cool_secs, 0);
         assert!(!config.persistent_workspace);
         assert!(config.persistent_workspace_agents.is_empty());
+        // Nothing from the daemon's environment reaches a sandbox by default.
+        assert!(config.sandbox_env.is_empty());
+    }
+
+    /// Sharing a credential changes what the container is, so a container
+    /// started before it was shared must not be reused afterwards.
+    #[test]
+    fn sandbox_env_changes_the_fingerprint() {
+        let mut a = freeco_types::config::DockerSandboxConfig::default();
+        let mut b = a.clone();
+        b.sandbox_env = vec!["GH_TOKEN".to_string()];
+        assert_ne!(config_hash(&a), config_hash(&b));
+        a.sandbox_env = vec!["GH_TOKEN".to_string()];
+        assert_eq!(config_hash(&a), config_hash(&b));
     }
 
     #[test]
@@ -1420,6 +1498,33 @@ mod tests {
         let c1 = DockerSandboxConfig::default();
         let mut c2 = c1.clone();
         c2.persistent_workspace_agents.push("agent-1".to_string());
+        assert_ne!(config_hash(&c1), config_hash(&c2));
+    }
+
+    /// The exact network string was tested by hand against the running VM:
+    /// all four services answered from inside the sandbox, the internet still
+    /// did, and database ports stayed closed.
+    #[test]
+    fn podman_sandboxes_get_only_the_service_ports() {
+        assert_eq!(
+            with_service_ports("podman", "bridge", &[3200, 8010]),
+            "pasta:-T,3200,-T,8010"
+        );
+        assert_eq!(
+            with_service_ports("C:\\bin\\podman.exe", "bridge", &[8010]),
+            "pasta:-T,8010"
+        );
+        // No network stays no network; docker has no pasta.
+        assert_eq!(with_service_ports("podman", "none", &[8010]), "none");
+        assert_eq!(with_service_ports("docker", "bridge", &[8010]), "bridge");
+        assert_eq!(with_service_ports("podman", "bridge", &[]), "bridge");
+    }
+
+    #[test]
+    fn test_config_hash_changes_when_service_ports_change() {
+        let c1 = DockerSandboxConfig::default();
+        let mut c2 = c1.clone();
+        c2.service_ports.push(9999);
         assert_ne!(config_hash(&c1), config_hash(&c2));
     }
 }

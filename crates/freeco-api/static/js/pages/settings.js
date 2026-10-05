@@ -4,6 +4,10 @@
 function settingsPage() {
   return {
     tab: 'providers',
+    // Dictation language. Empty means "follow the browser", which is what this
+    // used to do unconditionally -- and what fails when the browser's speech
+    // service does not offer the machine's locale.
+    sttLang: (window.FreecoVoiceCfg && window.FreecoVoiceCfg.savedLang()) || '',
     // People / accounts (RBAC)
     users: [],
     adminUsername: 'admin',
@@ -128,6 +132,26 @@ function settingsPage() {
       }
       this.vmFixing = '';
       await this.loadServices();
+    },
+
+    // Keys typed into the Connect field, per service. Cleared once stored, so
+    // the page never keeps a key around after it has gone to the vault.
+    svcKeys: {},
+    svcConnecting: '',
+
+    async connectService(id) {
+      var key = (this.svcKeys[id] || '').trim();
+      if (!key || this.svcConnecting) return;
+      this.svcConnecting = id;
+      try {
+        var res = await FreecoAPI.post('/api/services/' + encodeURIComponent(id) + '/connect', { key: key });
+        this.svcKeys[id] = '';
+        FreecoToast.success(res.message || 'Connected.');
+        await this.loadServices();
+      } catch(e) {
+        FreecoToast.error(e.message || 'The key was not accepted.');
+      }
+      this.svcConnecting = '';
     },
 
     async installService(id) {

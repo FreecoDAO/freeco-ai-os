@@ -117,8 +117,8 @@ pub const SERVICE_CATALOG: &[ServiceProfile] = &[
         mcp_url: None,
         approx_download_gb: 2.0,
         manual_step: Some(
-            "Open http://localhost:3200, create your workspace, then Settings → API & Webhooks → \
-             create an API key. Paste it when connecting the CRM tools.",
+            "Open http://localhost:3200, create your workspace, then Settings → APIs & Webhooks → \
+             create an API key and paste it in Connect below. Never paste it into a chat.",
         ),
     },
     ServiceProfile {
@@ -282,7 +282,9 @@ pub async fn list_services(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "manual_step": s.manual_step,
             "health_url": s.health_url,
             "running": running,
-            "connected": configured.contains(s.id),
+            // The CRM connects through a stored key, not an MCP entry.
+            "connected": configured.contains(s.id) || (s.id == "crm" && crate::crm::is_connected()),
+            "connect_with_key": s.id == "crm",
             "auto_connects": s.mcp_url.is_some(),
         }));
     }
@@ -393,7 +395,10 @@ pub async fn vm_fix(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if let Err((status, reason)) = same_origin_json(&headers) {
-        return (status, Json(serde_json::json!({ "ok": false, "error": reason })));
+        return (
+            status,
+            Json(serde_json::json!({ "ok": false, "error": reason })),
+        );
     }
     if freeco_hands::container::vm_fix_command(&id).is_none() {
         return (
@@ -710,7 +715,9 @@ mod tests {
     }
 
     fn rejected_with(pairs: &[(&'static str, &str)]) -> Option<axum::http::StatusCode> {
-        super::same_origin_json(&headers(pairs)).err().map(|(status, _)| status)
+        super::same_origin_json(&headers(pairs))
+            .err()
+            .map(|(status, _)| status)
     }
 
     #[test]
@@ -828,8 +835,14 @@ mod tests {
                 axum::routing::post(|| async { axum::http::StatusCode::IM_A_TEAPOT }),
             );
         for (path, expected) in [
-            ("/api/services/vm-fix/resolver", axum::http::StatusCode::IM_A_TEAPOT),
-            ("/api/services/dograh/install", axum::http::StatusCode::ACCEPTED),
+            (
+                "/api/services/vm-fix/resolver",
+                axum::http::StatusCode::IM_A_TEAPOT,
+            ),
+            (
+                "/api/services/dograh/install",
+                axum::http::StatusCode::ACCEPTED,
+            ),
         ] {
             let status = router
                 .clone()

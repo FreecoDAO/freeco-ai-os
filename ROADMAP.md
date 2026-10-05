@@ -97,6 +97,24 @@ recorded as such.
 
 ## Unreleased
 
+The current state of every feature, with how to check it, is in
+[`docs/feature-register.md`](docs/feature-register.md) (2026-09-30).
+
+### Found 2026-09-30 — open
+
+- ⬜ **Idle agents burn tokens.** Continuous-mode hands tick hourly with no work
+  and resend their whole history: ~15 M of 27.8 M input tokens since
+  2026-09-15. Next build: the tick loop honours pause, and projects, tasks,
+  schedules and CRM tasks wake agents instead of a timer; the CEO governs who
+  sleeps.
+- ⬜ **`pause_hand` is dead wiring** — the flag is set and nothing reads it.
+- ⬜ **The SQLite log grows unbounded while the daemon runs.** An open read keeps
+  the WAL from being checkpointed (106 MB beside a 24 MB database). Backups
+  now checkpoint first; the holder is not found.
+- ⬜ **Reactive agents with an `[autonomous]` block are flagged unresponsive**
+  (`freeco-shopping`).
+- ⬜ **Streamed text can show a gateway placeholder** until the reply completes.
+
 ### Chat, attachments and runtime recovery — verified 2026-09-23
 
 Checked against the running daemon on this machine, not against the commits.
@@ -624,8 +642,11 @@ Blocked work, reported by the assistant as not executed:
   against a copy of the real database - 1298 rows preserved, none left
   without a tenant - and live on `GET /api/tenancy` and
   `POST /api/tenancy/users`.
-- [ ] **Wire the data gateway into the LLM path.** Still called by nothing, so
-  prompts are not scanned for keys. Must land before social login.
+- 🟨 **Wire the data gateway into the LLM path.** Done in two steps: first the
+  non-streaming loop only (background ticks), then, on 2026-09-30, the
+  streaming loop the chat and popup use, plus system prompts, tool results and
+  tool arguments. Until then everything typed in the chat reached the provider
+  unscanned. See `docs/feature-register.md` §2.
 - [ ] **`users` and `tenants` tables.** No row can say who owns it.
 - 🟨 **Build the sandbox image and make it the default — built, not yet the
   default.** `localhost/freeco-sandbox:t1` (2026-08-22) predated the browser
@@ -774,6 +795,9 @@ on Windows and takes every call that probes it down with it.
 
 ## Found 2026-09-14/15 — scheduled, not done
 
+_Update 2026-09-30: the cross-site request fix (`csrf.rs`, verified live) and
+the `sandbox_exec` rename are done; the other items stand._
+
 - **Cross-site requests reach the API.** With no `api_key` and dashboard auth
   off, `middleware::auth` (`middleware.rs:141-143`) admits every loopback
   request, and nothing in `freeco-api` checks `Origin`. A page open in the
@@ -879,9 +903,11 @@ The rest, in priority order, with nothing here described as done:
   connected, and treating a daily-quota 429 as a reason to move down the chain
   rather than to fail. Mixing a top-tier paid model with free ones works the
   same way: the paid model leads, the free ones catch the overflow.
-- 📋 **AI gateway.** Not built — the crate is not in the tree and nothing in
-  the runtime or kernel references it. Until it exists, no claim can be made
-  about it preventing data leaving the machine.
+- 🟨 **AI gateway.** `freeco-datagateway` exists and is on every provider call
+  (see above). It masks known key formats, JWTs, announced secrets, cards,
+  IBANs, emails and IPv4 addresses. It is a filter on text, not a guarantee:
+  it cannot stop an agent composing a secret itself, and does not read binary
+  attachments.
 - 📋 Surface provider rate-limit errors (429) as themselves instead of a
   generic failure, with the remedy stated.
 - 📋 Unified inbox and contacts: API and UI over the existing schema.

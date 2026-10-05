@@ -62,25 +62,63 @@ pub async fn favicon_ico() -> impl IntoResponse {
 /// A fixed table rather than a directory read: the name in the URL only ever
 /// selects one of these compiled-in files, so no request can reach the disk.
 const FONT_FILES: &[(&str, &[u8])] = &[
-    ("geist-mono-cyrillic-ext.woff2", include_bytes!("../static/fonts/geist-mono-cyrillic-ext.woff2")),
-    ("geist-mono-cyrillic.woff2", include_bytes!("../static/fonts/geist-mono-cyrillic.woff2")),
-    ("geist-mono-latin-ext.woff2", include_bytes!("../static/fonts/geist-mono-latin-ext.woff2")),
-    ("geist-mono-latin.woff2", include_bytes!("../static/fonts/geist-mono-latin.woff2")),
-    ("geist-mono-vietnamese.woff2", include_bytes!("../static/fonts/geist-mono-vietnamese.woff2")),
-    ("inter-cyrillic-ext.woff2", include_bytes!("../static/fonts/inter-cyrillic-ext.woff2")),
-    ("inter-cyrillic.woff2", include_bytes!("../static/fonts/inter-cyrillic.woff2")),
-    ("inter-greek-ext.woff2", include_bytes!("../static/fonts/inter-greek-ext.woff2")),
-    ("inter-greek.woff2", include_bytes!("../static/fonts/inter-greek.woff2")),
-    ("inter-latin-ext.woff2", include_bytes!("../static/fonts/inter-latin-ext.woff2")),
-    ("inter-latin.woff2", include_bytes!("../static/fonts/inter-latin.woff2")),
-    ("inter-vietnamese.woff2", include_bytes!("../static/fonts/inter-vietnamese.woff2")),
+    (
+        "geist-mono-cyrillic-ext.woff2",
+        include_bytes!("../static/fonts/geist-mono-cyrillic-ext.woff2"),
+    ),
+    (
+        "geist-mono-cyrillic.woff2",
+        include_bytes!("../static/fonts/geist-mono-cyrillic.woff2"),
+    ),
+    (
+        "geist-mono-latin-ext.woff2",
+        include_bytes!("../static/fonts/geist-mono-latin-ext.woff2"),
+    ),
+    (
+        "geist-mono-latin.woff2",
+        include_bytes!("../static/fonts/geist-mono-latin.woff2"),
+    ),
+    (
+        "geist-mono-vietnamese.woff2",
+        include_bytes!("../static/fonts/geist-mono-vietnamese.woff2"),
+    ),
+    (
+        "inter-cyrillic-ext.woff2",
+        include_bytes!("../static/fonts/inter-cyrillic-ext.woff2"),
+    ),
+    (
+        "inter-cyrillic.woff2",
+        include_bytes!("../static/fonts/inter-cyrillic.woff2"),
+    ),
+    (
+        "inter-greek-ext.woff2",
+        include_bytes!("../static/fonts/inter-greek-ext.woff2"),
+    ),
+    (
+        "inter-greek.woff2",
+        include_bytes!("../static/fonts/inter-greek.woff2"),
+    ),
+    (
+        "inter-latin-ext.woff2",
+        include_bytes!("../static/fonts/inter-latin-ext.woff2"),
+    ),
+    (
+        "inter-latin.woff2",
+        include_bytes!("../static/fonts/inter-latin.woff2"),
+    ),
+    (
+        "inter-vietnamese.woff2",
+        include_bytes!("../static/fonts/inter-vietnamese.woff2"),
+    ),
 ];
 
 /// The @font-face rules pointing at the files above.
 const FONTS_CSS: &str = include_str!("../static/fonts/fonts.css");
 
 /// GET /fonts/{name} — serve one of the compiled-in font files.
-pub async fn font_file(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
+pub async fn font_file(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
     if name == "fonts.css" {
         return (
             [

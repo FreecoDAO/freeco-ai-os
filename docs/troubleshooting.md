@@ -68,7 +68,7 @@ RUST_LOG=freeco=debug freeco-ai start  # Only FreEco.ai debug, deps at info
 ```bash
 rustup update stable
 rustup default stable
-rustc --version  # Need 1.75+
+rustc --version  # Need 1.87+
 ```
 
 On Linux, you may also need:
@@ -621,7 +621,7 @@ FreEco.ai can import OpenClaw configs: `freeco-ai migrate --from openclaw`
 | Disk | 50 MB (binary) | 500 MB (with data) |
 | CPU | Any x86_64/ARM64 | 2+ cores |
 | OS | Linux, macOS, Windows | Any |
-| Rust | 1.75+ (build only) | Latest stable |
+| Rust | 1.87+ (build only) | Latest stable |
 
 ### How do I enable debug logging for a specific crate?
 

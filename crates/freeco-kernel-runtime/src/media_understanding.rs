@@ -151,7 +151,12 @@ You already have a {label} key ({env}). It speaks the                          s
         };
         let filename = format!("audio.{}", ext);
 
-        let model = default_audio_model(provider);
+        let model = self
+            .config
+            .audio_model
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| default_audio_model(provider));
 
         // Build API request.
         //
@@ -172,10 +177,19 @@ You already have a {label} key ({env}). It speaks the                          s
                     .unwrap_or_else(|| {
                         "https://api.groq.com/openai/v1/audio/transcriptions".to_string()
                     });
-                (
-                    url,
-                    std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
-                )
+                // As for OpenAI below: a custom endpoint never receives the
+                // provider's own key.
+                let custom = self.config.audio_base_url.is_some();
+                let key = match (custom, self.config.local_audio_api_key_env.as_deref()) {
+                    (true, Some(env)) => {
+                        std::env::var(env).map_err(|_| format!("{env} not set"))?
+                    }
+                    (true, None) => "local".to_string(),
+                    (false, _) => {
+                        std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?
+                    }
+                };
+                (url, key)
             }
             "openai" => {
                 let custom = self.config.audio_base_url.as_deref();
@@ -184,12 +198,17 @@ You already have a {label} key ({env}). It speaks the                          s
                     .unwrap_or_else(|| {
                         "https://api.openai.com/v1/audio/transcriptions".to_string()
                     });
-                // With a custom endpoint the key is optional — local Whisper
-                // servers accept any non-empty bearer token.
-                let key = match std::env::var("OPENAI_API_KEY") {
-                    Ok(k) => k,
-                    Err(_) if custom.is_some() => "local".to_string(),
-                    Err(_) => return Err("OPENAI_API_KEY not set".to_string()),
+                // A custom endpoint is a different service, so it gets its own
+                // key when one is configured -- never the OpenAI key, which
+                // belongs to OpenAI alone. Without a configured key, a local
+                // server that accepts any bearer still works.
+                let local_key = custom.and(self.config.local_audio_api_key_env.as_deref());
+                let key = if let Some(env) = local_key {
+                    std::env::var(env).map_err(|_| format!("{env} not set"))?
+                } else if custom.is_some() {
+                    "local".to_string()
+                } else {
+                    std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?
                 };
                 (url, key)
             }

@@ -343,16 +343,20 @@ const GLOBAL_GUIDELINES: &str = "\
 - If a task turns out larger than asked, do the part you are certain of, then say what remains. Proposing instead of starting is how nothing gets done.\n\n\
 ## Working Guidelines\n\
 - Make the smallest change that solves the problem. Do not rewrite what already works.\n\
-- Verify before claiming. A command that failed produced no data; say so rather than inferring what it would have returned.\n\
-- If a check did not run, report it as not run. Never round that up to a pass.\n\
-- Prefer the existing tool or process over one you invent. If an established path is failing, say so and ask rather than routing around it.\n\
-- State what you actually did, including the parts that did not work.\n\n\
+- Prefer the existing tool or process over one you invent. If an established path is failing, say so and ask rather than routing around it.\n\n\
+## Truth And Evidence\n\
+- Name what each claim rests on: a file and line, a command and its output, a real URL. If you cannot name it, you are guessing -- say that instead. A command that failed produced no data; a check that did not run is not a pass.\n\
+- Never invent a specific. A fabricated line number, citation, quotation or statistic is worse than silence: it reads as checked, so the user stops checking.\n\
+- Separate what you verified from what you inferred, and say which is which. An inference travelling as a finding is the error nobody catches downstream.\n\
+- \"I cannot verify this\" is a complete answer. Give it rather than guessing, and say when evidence is stale, partial, or contradicts itself instead of reporting the tidier half.\n\
+- Show the arithmetic and the load-bearing steps, so the user can check the conclusion without rebuilding it. State what you actually did, including the parts that did not work.\n\
+- Before you finish: can every important claim here be checked by someone else, and is its basis named? If not, verify it, or mark it unverified in the answer.\n\n\
 ## Handling Secrets\n\
 - Never print an API key, token or password. A name and a short prefix proves it exists.\n\
 - Never write a secret into a config file, a commit, a URL or a log line. Secrets belong in the key store the product already provides.\n\
 - If you find an exposed credential, report it and say it needs rotating. Do not rotate it yourself, and do not paste it anywhere to confirm it.\n\n\
 ## Installing Software\n\
-- Install what you need in your sandboxed container, with `docker_exec`. That is what it is for, it needs no approval, and nothing you do there can affect the user's system. Package managers, compilers, libraries -- all fine, in there.\n\
+- Install what you need in your sandboxed container, with `sandbox_exec`. That is what it is for, it needs no approval, and nothing you do there can affect the user's system. Package managers, compilers, libraries -- all fine, in there.\n\
 - Do not install on the user's own machine: no package managers, no installers, no downloading and running binaries, by any route. If something genuinely must go on the host, that is a question for the user, not a decision for you.\n\
 - If something genuinely must be installed on the host, stop and ask. Say what, why, and what it changes. Proceed only if the user tells you to.\n\
 - The same applies to changing system settings, services, PATH, or the registry: sandbox, or ask.\n\n\
@@ -361,7 +365,7 @@ const GLOBAL_GUIDELINES: &str = "\
 - Start one with `hand_activate`, check it with `hand_status`, stop it with `hand_deactivate`. Do not start containers with shell commands -- the hand records the instance, so a service started any other way is invisible to everything that reports on it.\n\
 - `hand_status` tells you whether a service is actually serving, not merely started. Report that distinction: a container that is up but answering nothing is the failure people waste hours on.\n\n\
 ## Asking Permission\n\
-- The sandbox is the default. `docker_exec` runs in an isolated Linux container and needs no approval; `shell_exec` runs on the user's own machine, unconfined, and interrupts them to ask. Reach for the sandbox first and use the host only when the task genuinely cannot be done there -- it needs the user's own files, their installed tools, or a service bound to their machine.\n\
+- The sandbox is the default. `sandbox_exec` runs in an isolated Linux container and needs no approval; `shell_exec` runs on the user's own machine, unconfined, and interrupts them to ask. Reach for the sandbox first and use the host only when the task genuinely cannot be done there -- it needs the user's own files, their installed tools, or a service bound to their machine.\n\
 - Every `shell_exec` call requires a `purpose`. Write the goal, not the command, in one sentence a non-programmer can act on, and say why the sandbox will not do: \"read your OmniRoute config to find why gpt-5.6 fails -- the file is on your machine, not in the sandbox\". Never \"run a command\" or \"execute cat\": the user can already see the command, and what they cannot see is what you are trying to achieve.\n\
 - The purpose is the entire basis on which someone allows or refuses. A vague one asks them to approve something nobody explained, and people faced with that approve everything or deny everything -- both of which defeat the point of asking.\n\n\
 ## Remembering\n\
@@ -653,7 +657,7 @@ pub fn tool_category(name: &str) -> &'static str {
 
         "image_describe" | "image_generate" | "audio_transcribe" | "tts_speak" => "Media",
 
-        "docker_exec" | "docker_build" | "docker_run" => "Docker",
+        "sandbox_exec" | "docker_build" => "Sandbox",
 
         "cron_create" | "cron_list" | "cron_delete" => "Scheduling",
 
@@ -722,7 +726,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         // Docker. Spelling out the isolation matters: an agent that does not
         // know it has a safe place to run code will either refuse work it
         // could do, or reach for shell on the user's own machine instead.
-        "docker_exec" => "run a command inside an isolated Linux sandbox. Pass tier=\"workspace\" to build or test - that gets 4 GB, a 30 minute timeout, a writable workspace and network access for package installs. The default tier=\"exec\" is a throwaway container with no network, for a single command. It has rust, cargo, clippy, git, python3, jq and ripgrep. Use this for ANY code, build, test or install. Do NOT use shell_exec on the host for work that belongs here - if a tool seems missing, say so rather than reaching for the host",
+        "sandbox_exec" => "run a command inside an isolated Linux sandbox. Pass tier=\"workspace\" to build or test - that gets 4 GB, a 30 minute timeout, a writable workspace and network access for package installs. The default tier=\"exec\" is a throwaway container with no network, for a single command. It has rust, cargo, clippy, git, python3, jq and ripgrep. Use this for ANY code, build, test or install. Do NOT use shell_exec on the host for work that belongs here - if a tool seems missing, say so rather than reaching for the host",
         "docker_build" => "build a Docker image",
         "docker_run" => "start a Docker container",
 
@@ -801,6 +805,23 @@ fn capitalize(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every agent gets the truthfulness rules, once. The section absorbed
+    /// three Working Guidelines bullets; this keeps them from creeping back
+    /// and stating the same rule twice.
+    #[test]
+    fn global_guidelines_carry_truth_and_evidence() {
+        assert!(GLOBAL_GUIDELINES.contains("## Truth And Evidence"));
+        assert!(GLOBAL_GUIDELINES.contains("Never invent a specific"));
+        assert!(GLOBAL_GUIDELINES.contains("I cannot verify this"));
+        assert!(GLOBAL_GUIDELINES.contains("can every important claim here be checked"));
+        assert!(GLOBAL_GUIDELINES.contains("a check that did not run is not a pass"));
+        assert!(!GLOBAL_GUIDELINES.contains("Verify before claiming"));
+        assert_eq!(
+            GLOBAL_GUIDELINES.matches("## Truth And Evidence").count(),
+            1
+        );
+    }
+
     /// The clock must stay behind the static prompt.
     ///
     /// Providers cache on a common prefix, so a value that changes every minute
@@ -814,7 +835,9 @@ mod tests {
         ctx.current_date = Some("Friday, August 28, 2026 (2026-08-28 14:03 CEST)".to_string());
         let prompt = build_system_prompt(&ctx);
 
-        let date_at = prompt.find("## Current Date").expect("date section present");
+        let date_at = prompt
+            .find("## Current Date")
+            .expect("date section present");
         let identity_at = prompt.find("## Who You Are").expect("identity present");
         assert!(
             date_at > identity_at,

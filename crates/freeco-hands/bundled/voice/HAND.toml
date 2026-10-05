@@ -7,6 +7,7 @@ icon = "\U0001F399"
 tools = [
     "web_fetch",
     "memory_store", "memory_recall",
+    "sandbox_exec",
 ]
 
 [container]
@@ -64,7 +65,10 @@ MINIO_API_CORS_ALLOW_ORIGIN = "*"
 
 [[container.services]]
 name = "api"
-image = "docker.io/dograhai/dograh-api:latest"
+# Built from FreecoDAO/dograh -- the audited fork -- by its own CI, and
+# pinned to that commit. Upstream's `latest` meant the running code was
+# neither the code that was read nor a version anyone could name.
+image = "ghcr.io/freecodao/dograh-api:99aabd9acfc9ef43e6e786b9a07d069cada4cb87"
 depends_on = ["postgres", "redis", "minio"]
 ports = ["8000:8000"]
 # Upstream checks this with Python's urllib rather than curl, because the api
@@ -94,7 +98,10 @@ ENVIRONMENT = "oss"
 
 [[container.services]]
 name = "ui"
-image = "docker.io/dograhai/dograh-ui:latest"
+# Built from FreecoDAO/dograh -- the audited fork -- by its own CI, and
+# pinned to that commit. Upstream's `latest` meant the running code was
+# neither the code that was read nor a version anyone could name.
+image = "ghcr.io/freecodao/dograh-ui:99aabd9acfc9ef43e6e786b9a07d069cada4cb87"
 depends_on = ["api"]
 ports = ["3010:3010"]
 health_cmd = ["wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3010"]
@@ -114,6 +121,8 @@ max_tokens = 4096
 temperature = 0.3
 max_iterations = 20
 system_prompt = """
+To check or call the service, use sandbox_exec with tier='workspace': from the sandbox the API is at http://127.0.0.1:8000 and the interface at http://127.0.0.1:3010 (for example: curl -s http://127.0.0.1:8000/api/v1/health). Never ask for a host shell.
+
 You look after a Dograh voice service running on the user's own machine: the \
 interface at http://localhost:3010 and its API at http://localhost:8000.
 

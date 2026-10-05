@@ -14,8 +14,8 @@ use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
 
 use freeco_kernel_runtime::agent_loop::{
-    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix,
-    strip_provider_prefix_known, AgentLoopResult,
+    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix, strip_provider_prefix_known,
+    AgentLoopResult,
 };
 use freeco_kernel_runtime::audit::AuditLog;
 use freeco_kernel_runtime::drivers;
@@ -1116,7 +1116,8 @@ impl FreecoKernel {
             .with_base_urls(
                 config.media.tts_openai_base_url.clone(),
                 config.media.tts_elevenlabs_base_url.clone(),
-            );
+            )
+            .with_local_api_key_env(config.media.local_audio_api_key_env.clone());
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
@@ -1724,7 +1725,9 @@ impl FreecoKernel {
                         &entry.provider,
                         // The catalog read lock is already held here.
                         |id| {
-                            catalog.find_model_for_provider(id, &entry.provider).is_some()
+                            catalog
+                                .find_model_for_provider(id, &entry.provider)
+                                .is_some()
                                 || catalog.find_model(id).is_some()
                         },
                     );
@@ -1757,8 +1760,7 @@ impl FreecoKernel {
         }
 
         // Normalize: strip provider prefix from model name if present
-        let normalized =
-            self.normalize_model_id(&manifest.model.model, &manifest.model.provider);
+        let normalized = self.normalize_model_id(&manifest.model.model, &manifest.model.provider);
         if normalized != manifest.model.model {
             manifest.model.model = normalized;
         }
@@ -2007,7 +2009,7 @@ impl FreecoKernel {
             )
             .await
             .map(|out| freeco_kernel_runtime::agent_loop::AgentLoopResult {
-            served_by_fallback: None,
+                served_by_fallback: None,
                 response: out.response,
                 total_usage: Default::default(),
                 iterations: 1,
@@ -2303,7 +2305,7 @@ impl FreecoKernel {
                     manifest.model.provider, manifest.model.model
                 )),
                 agent_description: manifest.description.clone(),
-                base_system_prompt: manifest.model.system_prompt.clone(),
+                base_system_prompt: system_prompt_with_output_style(&manifest),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
                 skill_summary: Self::build_skill_summary_from(&skill_snapshot, &manifest.skills),
@@ -2908,7 +2910,7 @@ impl FreecoKernel {
                     manifest.model.provider, manifest.model.model
                 )),
                 agent_description: manifest.description.clone(),
-                base_system_prompt: manifest.model.system_prompt.clone(),
+                base_system_prompt: system_prompt_with_output_style(&manifest),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
                 skill_summary: Self::build_skill_summary_from(&skill_snapshot, &manifest.skills),
@@ -3483,11 +3485,12 @@ impl FreecoKernel {
     /// the old folder goes to `archive/renamed-agents/` instead: never left
     /// where boot would spawn it, and never deleted.
     fn move_agent_dir(&self, old: &str, new: &str) {
-        let plain = |n: &str| {
-            !n.is_empty() && n != "." && n != ".." && !n.contains(['/', '\\'])
-        };
+        let plain = |n: &str| !n.is_empty() && n != "." && n != ".." && !n.contains(['/', '\\']);
         if !plain(old) || !plain(new) {
-            warn!(old, new, "agent name is not a plain folder name; not moving its folder");
+            warn!(
+                old,
+                new, "agent name is not a plain folder name; not moving its folder"
+            );
             return;
         }
         let agents = self.config.home_dir.join("agents");
@@ -3502,13 +3505,20 @@ impl FreecoKernel {
                 warn!(error = %e, "cannot create archive for renamed agent folder");
                 return;
             }
-            archive.join(format!("{old}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%S")))
+            archive.join(format!(
+                "{old}-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+            ))
         } else {
             to
         };
         match std::fs::rename(&from, &dest) {
-            Ok(()) => info!(from = %from.display(), to = %dest.display(), "moved agent folder after rename"),
-            Err(e) => warn!(error = %e, from = %from.display(), "could not move agent folder after rename"),
+            Ok(()) => {
+                info!(from = %from.display(), to = %dest.display(), "moved agent folder after rename")
+            }
+            Err(e) => {
+                warn!(error = %e, from = %from.display(), "could not move agent folder after rename")
+            }
         }
     }
 
@@ -4117,12 +4127,9 @@ impl FreecoKernel {
             .hand_registry
             .get_instance(*instance_id)
             .and_then(|i| i.tenant_id);
-        let name = freeco_hands::container::start(
-            &spec,
-            hand_id,
-            tenant.as_deref(),
-            |k| std::env::var(k).ok(),
-        )
+        let name = freeco_hands::container::start(&spec, hand_id, tenant.as_deref(), |k| {
+            std::env::var(k).ok()
+        })
         .await
         .map_err(|e| e.to_string())?;
         Ok(Some(name))
@@ -4212,13 +4219,9 @@ impl FreecoKernel {
                 .hand_registry
                 .get_instance(*instance_id)
                 .and_then(|i| i.tenant_id);
-            return freeco_hands::container::stop_native_stack(
-                &spec,
-                hand_id,
-                tenant.as_deref(),
-            )
-            .await
-            .map_err(|e| e.to_string());
+            return freeco_hands::container::stop_native_stack(&spec, hand_id, tenant.as_deref())
+                .await
+                .map_err(|e| e.to_string());
         }
         let tenant = self
             .hand_registry
@@ -4539,18 +4542,43 @@ impl FreecoKernel {
         }
     }
 
-    /// Pause a hand (marks it paused; agent stays alive but won't receive new work).
+    /// Pause a hand: its agent stops waking itself, and stays paused across a
+    /// restart. A service hand's container keeps running -- pausing stops the
+    /// agent's model calls, not the service it looks after.
+    ///
+    /// This only set a flag before, and nothing read it: a "paused" hand kept
+    /// ticking every hour, spending tokens, while the dashboard said Paused.
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::Freeco(FreecoError::Internal(e.to_string())))
+            .map_err(|e| KernelError::Freeco(FreecoError::Internal(e.to_string())))?;
+        if let Some(agent_id) = self
+            .hand_registry
+            .get_instance(instance_id)
+            .and_then(|i| i.agent_id)
+        {
+            self.background.stop_agent(agent_id);
+        }
+        self.persist_hand_state();
+        Ok(())
     }
 
-    /// Resume a paused hand.
+    /// Resume a paused hand: its agent's background loop starts again.
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::Freeco(FreecoError::Internal(e.to_string())))
+            .map_err(|e| KernelError::Freeco(FreecoError::Internal(e.to_string())))?;
+        let agent = self
+            .hand_registry
+            .get_instance(instance_id)
+            .and_then(|i| i.agent_id)
+            .and_then(|id| self.registry.get(id));
+        let kernel = self.self_handle.get().and_then(|w| w.upgrade());
+        if let (Some(entry), Some(kernel)) = (agent, kernel) {
+            kernel.start_background_for_agent(entry.id, &entry.name, &entry.manifest.schedule);
+        }
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Set the weak self-reference for trigger dispatch.
@@ -4642,6 +4670,15 @@ impl FreecoKernel {
                     );
                     self.cron_scheduler
                         .set_max_total_jobs(new_config.max_cron_jobs);
+                }
+                HotAction::ReloadBrowserConfig => {
+                    info!(
+                        "Hot-reload: applying browser config (headless={}, {}x{})",
+                        new_config.browser.headless,
+                        new_config.browser.viewport_width,
+                        new_config.browser.viewport_height,
+                    );
+                    self.browser_ctx.set_config(new_config.browser.clone());
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
@@ -4877,13 +4914,20 @@ impl FreecoKernel {
     pub fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
-        let saved_hands = freeco_hands::registry::HandRegistry::load_state(&state_path);
+        let saved_hands = freeco_hands::registry::HandRegistry::load_state_with_pause(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id) in saved_hands {
+            for (hand_id, config, old_agent_id, paused) in saved_hands {
                 match self.activate_hand(&hand_id, config, None) {
                     Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                        info!(hand = %hand_id, instance = %inst.instance_id, paused, "Hand restored");
+                        // Restored paused: the service comes back, the agent
+                        // does not start waking itself again.
+                        if paused {
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(hand = %hand_id, error = %e, "Could not re-pause restored hand");
+                            }
+                        }
                         // Reassign cron jobs and triggers from the pre-restart
                         // agent ID to the newly spawned agent so scheduled tasks
                         // and event triggers survive daemon restarts (issues
@@ -4935,6 +4979,17 @@ impl FreecoKernel {
 
         for entry in &agents {
             if matches!(entry.manifest.schedule, ScheduleMode::Reactive) {
+                continue;
+            }
+            // A hand restored paused keeps its agent asleep. Without this the
+            // restore re-paused it and this loop started it again a moment
+            // later, so "paused" lasted until the next restart.
+            if self
+                .hand_registry
+                .find_by_agent(entry.id)
+                .is_some_and(|inst| inst.status == freeco_hands::HandStatus::Paused)
+            {
+                info!(agent = %entry.name, "Not starting background loop: its hand is paused");
                 continue;
             }
             bg_agents.push((
@@ -6686,7 +6741,16 @@ impl FreecoKernel {
             // Agent declares specific tools — only include matching builtins
             all_builtins
                 .into_iter()
-                .filter(|t| declared_tools.iter().any(|d| d == &t.name))
+                // Normalized on both sides, as the tool runner does: a manifest
+                // naming `docker_exec` must still be shown `sandbox_exec`, or the
+                // rename silently takes the sandbox away from every agent that
+                // lists the old name (the Developer agent does).
+                .filter(|t| {
+                    declared_tools.iter().any(|d| {
+                        freeco_types::tool_compat::normalize_tool_name(d)
+                            == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                    })
+                })
                 .collect()
         } else {
             // No specific tools declared — fall back to profile or all builtins
@@ -6697,7 +6761,13 @@ impl FreecoKernel {
                     let allowed = profile.tools();
                     all_builtins
                         .into_iter()
-                        .filter(|t| allowed.iter().any(|a| a == "*" || a == &t.name))
+                        .filter(|t| {
+                            allowed.iter().any(|a| {
+                                a == "*"
+                                    || freeco_types::tool_compat::normalize_tool_name(a)
+                                        == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                            })
+                        })
                         .collect()
                 }
                 _ if has_tool_all => all_builtins,
@@ -8195,7 +8265,10 @@ impl KernelHandle for FreecoKernel {
         // once the container answers its health check, and rolls the instance
         // back if it does not. An agent told "Active" then reporting a working
         // service to the user is worse than an agent told why it failed.
-        let container = match self.start_hand_service(hand_id, &instance.instance_id).await {
+        let container = match self
+            .start_hand_service(hand_id, &instance.instance_id)
+            .await
+        {
             Ok(name) => name,
             Err(e) => {
                 let _ = self.deactivate_hand(instance.instance_id);
@@ -8289,7 +8362,9 @@ impl KernelHandle for FreecoKernel {
         // Checked before writing: a membership row pointing at an agent that
         // does not exist is worse than a refusal, because it reads as structure
         // and delegates to nothing.
-        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let aid: AgentId = agent_id
+            .parse()
+            .map_err(|_| "Invalid agent ID".to_string())?;
         let entry = self
             .registry
             .get(aid)
@@ -8315,7 +8390,11 @@ impl KernelHandle for FreecoKernel {
         Ok(serde_json::json!({ "teams": teams }))
     }
 
-    async fn company_create(&self, name: &str, description: Option<&str>) -> Result<String, String> {
+    async fn company_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<String, String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("A company name is required".to_string());
@@ -8374,20 +8453,32 @@ impl KernelHandle for FreecoKernel {
             let Some(def) = self.hand_registry.get_definition(&inst.hand_id) else {
                 continue;
             };
-            let Some(spec) = def.container.as_ref() else { continue };
+            let Some(spec) = def.container.as_ref() else {
+                continue;
+            };
             let tenant = inst.tenant_id.clone();
             let names: Vec<String> = if spec.is_native_stack() {
                 spec.services
                     .iter()
                     .map(|s| {
-                        freeco_hands::container::service_container_name(&inst.hand_id, tenant.as_deref(), &s.name)
+                        freeco_hands::container::service_container_name(
+                            &inst.hand_id,
+                            tenant.as_deref(),
+                            &s.name,
+                        )
                     })
                     .collect()
             } else {
-                vec![freeco_hands::container::container_name(&inst.hand_id, tenant.as_deref())]
+                vec![freeco_hands::container::container_name(
+                    &inst.hand_id,
+                    tenant.as_deref(),
+                )]
             };
             for n in &names {
-                if !listing.lines().any(|l| l.split('\t').next() == Some(n.as_str())) {
+                if !listing
+                    .lines()
+                    .any(|l| l.split('\t').next() == Some(n.as_str()))
+                {
                     missing.push(serde_json::json!({ "hand": inst.hand_id, "container": n }));
                 }
             }
@@ -8428,7 +8519,9 @@ impl KernelHandle for FreecoKernel {
     }
 
     async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
-        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let aid: AgentId = agent_id
+            .parse()
+            .map_err(|_| "Invalid agent ID".to_string())?;
         let label = label.trim();
         if label.is_empty() {
             return Err("A name is required".to_string());
@@ -8449,7 +8542,9 @@ impl KernelHandle for FreecoKernel {
         label: &str,
         carry_history: bool,
     ) -> Result<String, String> {
-        let aid: AgentId = agent_id.parse().map_err(|_| "Invalid agent ID".to_string())?;
+        let aid: AgentId = agent_id
+            .parse()
+            .map_err(|_| "Invalid agent ID".to_string())?;
         let label = label.trim();
         if label.is_empty() {
             return Err("A name is required".to_string());
@@ -8475,8 +8570,7 @@ impl KernelHandle for FreecoKernel {
         }
         Ok(format!(
             "Started a new conversation \"{}\" ({}). The current one is unchanged.",
-            label,
-            session.id
+            label, session.id
         ))
     }
 
@@ -8886,7 +8980,7 @@ impl freeco_wire::peer::PeerHandle for FreecoKernel {
 fn describe_tool_intent(tool_name: &str) -> String {
     match tool_name {
         "shell_exec" => "run a command directly on your machine, outside the sandbox",
-        "docker_exec" => "run a command inside the isolated Linux sandbox",
+        "sandbox_exec" => "run a command inside the isolated Linux sandbox",
         "file_write" | "file_edit" => "change a file on disk",
         "file_delete" => "delete a file from disk",
         "web_fetch" => "fetch a URL over the network",
@@ -8909,7 +9003,7 @@ fn describe_tool_consequences(tool_name: &str) -> String {
             "The command runs with your account's privileges and can touch anything you can. \
              Nothing confines it."
         }
-        "docker_exec" => {
+        "sandbox_exec" => {
             "Runs in a throwaway container with no network. Nothing reaches your machine, \
              and the container is discarded afterwards."
         }
@@ -8936,9 +9030,55 @@ fn describe_tool_consequences(tool_name: &str) -> String {
 
 /// Whether the effect can be undone. `None` means unknown, which the interface
 /// presents as "treat as if it cannot be undone" -- never as safe.
+/// Output styles a person can pick for an agent from the chat.
+///
+/// Style is a question of how an agent talks, not what it knows, so it lives
+/// beside the system prompt rather than in it: switching style leaves the
+/// agent's own instructions untouched and is undone by switching back.
+pub const OUTPUT_STYLES: &[(&str, &str)] = &[
+    ("default", ""),
+    (
+        "concise",
+        "Output style: concise. Lead with the answer. Use the fewest words that \
+         are still clear. No preamble, no recap, no closing summary.",
+    ),
+    (
+        "explanatory",
+        "Output style: explanatory. Say why, not only what: name the reasoning \
+         and the trade-off behind each choice, briefly, where it helps the reader \
+         understand the result.",
+    ),
+    (
+        "learning",
+        "Output style: learning. The user wants to understand, not only to get a \
+         result. Explain steps as you take them and point out what is worth \
+         remembering. Where a small piece is a good exercise, suggest they try it.",
+    ),
+    (
+        "proactive",
+        "Output style: proactive. Act on reasonable assumptions instead of asking \
+         about routine choices, and say which assumptions you made. Still stop and \
+         ask before anything destructive or irreversible.",
+    ),
+];
+
+/// The agent's system prompt with its chosen output style appended.
+fn system_prompt_with_output_style(manifest: &freeco_types::agent::AgentManifest) -> String {
+    let base = manifest.model.system_prompt.clone();
+    let style = manifest
+        .metadata
+        .get("output_style")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+    match OUTPUT_STYLES.iter().find(|(id, _)| *id == style) {
+        Some((_, text)) if !text.is_empty() => format!("{base}\n\n{text}"),
+        _ => base,
+    }
+}
+
 fn tool_is_reversible(tool_name: &str) -> Option<bool> {
     match tool_name {
-        "docker_exec" => Some(true),
+        "sandbox_exec" => Some(true),
         "file_delete" | "git_push" | "email_send" | "channel_send" | "agent_kill" => Some(false),
         // Deliberately unknown rather than guessed. A shell command may do
         // anything, and claiming it is reversible would be a lie the user acts on.
