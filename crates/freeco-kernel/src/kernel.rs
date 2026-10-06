@@ -14,8 +14,8 @@ use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
 use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
 
 use freeco_kernel_runtime::agent_loop::{
-    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix,
-    strip_provider_prefix_known, AgentLoopResult,
+    run_agent_loop, run_agent_loop_streaming, strip_provider_prefix, strip_provider_prefix_known,
+    AgentLoopResult,
 };
 use freeco_kernel_runtime::audit::AuditLog;
 use freeco_kernel_runtime::drivers;
@@ -1710,7 +1710,9 @@ impl FreecoKernel {
                         &entry.provider,
                         // The catalog read lock is already held here.
                         |id| {
-                            catalog.find_model_for_provider(id, &entry.provider).is_some()
+                            catalog
+                                .find_model_for_provider(id, &entry.provider)
+                                .is_some()
                                 || catalog.find_model(id).is_some()
                         },
                     );
@@ -1730,8 +1732,7 @@ impl FreecoKernel {
         }
 
         // Normalize: strip provider prefix from model name if present
-        let normalized =
-            self.normalize_model_id(&manifest.model.model, &manifest.model.provider);
+        let normalized = self.normalize_model_id(&manifest.model.model, &manifest.model.provider);
         if normalized != manifest.model.model {
             manifest.model.model = normalized;
         }
@@ -2125,6 +2126,8 @@ impl FreecoKernel {
         }
 
         // LLM agent: true streaming via agent loop
+        self.check_spend_limits(agent_id, &entry.manifest.resources)?;
+
         let mut session = self
             .memory
             .get_session(entry.session_id)
@@ -2694,6 +2697,18 @@ impl FreecoKernel {
         })
     }
 
+    /// Refuse an LLM call when the agent's cost quota or the global `[budget]`
+    /// limit has already been reached. Both the streaming and non-streaming
+    /// paths must call this before contacting the provider.
+    fn check_spend_limits(&self, agent_id: AgentId, resources: &ResourceQuota) -> KernelResult<()> {
+        self.metering
+            .check_quota(agent_id, resources)
+            .map_err(KernelError::Freeco)?;
+        self.metering
+            .check_global_budget(&self.config.budget)
+            .map_err(KernelError::Freeco)
+    }
+
     /// Execute the default LLM-based agent loop.
     #[allow(clippy::too_many_arguments)]
     async fn execute_llm_agent(
@@ -2706,10 +2721,7 @@ impl FreecoKernel {
         sender_id: Option<String>,
         sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
-        // Check metering quota before starting
-        self.metering
-            .check_quota(agent_id, &entry.manifest.resources)
-            .map_err(KernelError::Freeco)?;
+        self.check_spend_limits(agent_id, &entry.manifest.resources)?;
 
         let mut session = self
             .memory

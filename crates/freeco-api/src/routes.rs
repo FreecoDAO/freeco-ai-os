@@ -3145,8 +3145,13 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
+                let status = if e.kind() == std::io::ErrorKind::InvalidInput {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status,
                     Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
                 );
             }
@@ -7585,7 +7590,9 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         checked.push(format!("{provider}: {} served", list.len()));
 
         for m in list {
-            let Some(raw_id) = m["id"].as_str() else { continue };
+            let Some(raw_id) = m["id"].as_str() else {
+                continue;
+            };
             // Batch and free variants are addressing modes of a model already
             // listed; adding them triples the catalog without adding choice.
             if raw_id.contains(":batch") || raw_id.contains(":free") {
@@ -8814,6 +8821,13 @@ pub async fn set_provider_key(
             })
     };
 
+    if let Err(e) = validate_secret_env_entry(&env_var, &key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
+
     // Store in vault (best-effort — no-op if vault not initialized)
     state.kernel.store_credential(&env_var, &key);
 
@@ -9838,9 +9852,30 @@ fn atomic_write_toml(
 
 // ── Helper functions for secrets.env management ────────────────────────
 
+/// Reject a secrets.env entry that could break out of its own line.
+///
+/// secrets.env is loaded into the process environment at startup, so a value
+/// containing a newline would let the caller define arbitrary extra variables
+/// (e.g. `LD_PRELOAD`) that every child process then inherits. Keys must be a
+/// plain env var name; `std::env::set_var` also panics on `=` or NUL in a key.
+fn validate_secret_env_entry(key: &str, value: &str) -> Result<(), String> {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "Invalid variable name '{key}': only letters, digits and '_' are allowed"
+        ));
+    }
+    if value.contains(['\n', '\r', '\0']) {
+        return Err("Value must not contain line breaks or NUL characters".to_string());
+    }
+    Ok(())
+}
+
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
 fn write_secret_env(path: &std::path::Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+    validate_secret_env_entry(key, value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -14965,5 +15000,36 @@ mod role_resolution_tests {
     fn unrecognized_role_string_defaults_to_user() {
         let users = vec![user("dave", "wizard", true)];
         assert_eq!(role_for("dave", "admin", &users), "user");
+    }
+}
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_newline_injection_in_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        let err =
+            write_secret_env(&path, "GROQ_API_KEY", "sk-x\nLD_PRELOAD=/tmp/evil.so").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_invalid_key_names() {
+        for key in ["", "A=B", "A\nB", "A B", "A\0B"] {
+            assert!(validate_secret_env_entry(key, "v").is_err(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_normal_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        write_secret_env(&path, "MY_PROVIDER_API_KEY", "sk-abc=123").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "MY_PROVIDER_API_KEY=sk-abc=123\n");
     }
 }
