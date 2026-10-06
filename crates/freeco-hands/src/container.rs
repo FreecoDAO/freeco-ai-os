@@ -69,10 +69,18 @@ pub async fn is_running(name: &str) -> bool {
         return false;
     };
     let out = tokio::process::Command::new(rt)
-        .args(["ps", "--filter", &format!("name={name}"), "--format", "{{.Names}}"])
+        .args([
+            "ps",
+            "--filter",
+            &format!("name={name}"),
+            "--format",
+            "{{.Names}}",
+        ])
         .output();
     match tokio::time::timeout(RUNTIME_TIMEOUT, out).await {
-        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == name),
+        Ok(Ok(o)) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.trim() == name),
         _ => false,
     }
 }
@@ -165,7 +173,9 @@ pub async fn stop(hand_id: &str, instance_id: &str) -> Result<(), HandError> {
     let name = container_name(hand_id, instance_id);
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
-        tokio::process::Command::new(rt).args(["stop", &name]).status(),
+        tokio::process::Command::new(rt)
+            .args(["stop", &name])
+            .status(),
     )
     .await;
     Ok(())

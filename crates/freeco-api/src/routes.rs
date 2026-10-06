@@ -7561,7 +7561,7 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     let mut checked: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for (provider, url, vendor_prefixed) in sources {
+    for (provider, url, _vendor_prefixed) in sources {
         let env_var = state.kernel.config.resolve_api_key_env(provider);
         let key = std::env::var(&env_var).unwrap_or_default();
         if key.is_empty() {
@@ -7600,11 +7600,7 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
             }
             // Store the id the provider itself answers to. OpenRouter prefixes
             // with the vendor; the direct APIs do not.
-            let id = if vendor_prefixed {
-                raw_id.to_string()
-            } else {
-                raw_id.to_string()
-            };
+            let id = raw_id.to_string();
             {
                 let catalog = state
                     .kernel
