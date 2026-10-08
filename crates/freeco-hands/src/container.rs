@@ -69,9 +69,12 @@ async fn ensure_image(rt: &str, image: &str) -> Result<(), HandError> {
 }
 
 /// When the daemon last restarted WSL, in seconds since the Unix epoch.
+/// Windows-only, like the one function that uses it.
+#[cfg(windows)]
 static LAST_WSL_RESTART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Minimum spacing between two WSL restarts.
+#[cfg(windows)]
 const WSL_RESTART_SPACING_SECS: u64 = 600;
 
 /// Last resort when the Podman VM will not come back: restart WSL itself.
