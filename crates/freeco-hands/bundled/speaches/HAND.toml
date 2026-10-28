@@ -1,0 +1,81 @@
+id = "speaches"
+name = "Speaches — local speech"
+description = "Speech-to-text and text-to-speech on this machine. Dictation, voice calls and spoken replies stay off cloud services."
+category = "productivity"
+icon = "\U0001F399"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+    "sandbox_exec",
+]
+
+[container]
+# Built from FreecoDAO/speaches, the audited fork, by its own CI, with the GPU
+# dependencies swapped for CPU ones (.github/freeco/cpu_only.py): 0.9 GB rather
+# than 4.9 GB of NVIDIA libraries this machine cannot use and could not finish
+# downloading. Not upstream's image: what runs traces to a commit that was read.
+image = "ghcr.io/freecodao/speaches:b811b36edc2b1cc4f53a4cfba02433d3c5e84856-cpu"
+
+# Downloaded models. Whisper small is ~460 MB; without this volume every
+# restart would fetch it again before the first dictation could be answered.
+volumes = ["models:/home/ubuntu/.cache/huggingface/hub"]
+
+# Host networking, as for every service here: rootless podman's default
+# `pasta` accepts `-p` mappings and forwards nothing.
+host_network = true
+health_path = "/health"
+# The first start downloads the speech model before it answers.
+health_timeout_secs = 600
+restart = "unless-stopped"
+
+[container.env]
+# 8010, not upstream's 8000: dograh's API already listens on 8000.
+UVICORN_PORT = "8010"
+# Speaches reads UVICORN_PORT; FreEco.ai finds a service's port from PORT, and
+# without it the health check has nothing to probe and the service is never
+# reported healthy. Speaches ignores this variable.
+PORT = "8010"
+UVICORN_HOST = "0.0.0.0"
+
+# Upstream leaves authentication off. Anything that can reach the port could
+# otherwise transcribe or synthesise at will. Generated on first start and
+# never written into this file.
+API_KEY = "secret:SPEACHES_API_KEY"
+
+# The bundled web UI is a demo. It is not needed to serve FreEco.ai or dograh,
+# and switching it off removes a page that would otherwise be served here.
+ENABLE_UI = "false"
+
+# Multilingual Whisper, loaded at start so the first dictation is not also a
+# download. `small` rather than `base`: noticeably better on Ukrainian, German,
+# French and Italian, and still practical on a CPU.
+PRELOAD_MODELS = '["Systran/faster-whisper-small"]'
+# Keep the speech model loaded; unloading it after five idle minutes (the
+# default) made the next dictation wait for a reload.
+STT_MODEL_TTL = "-1"
+
+# Belt and braces: upstream's image already sets these.
+DO_NOT_TRACK = "1"
+HF_HUB_DISABLE_TELEMETRY = "1"
+GRADIO_ANALYTICS_ENABLED = "False"
+
+[agent]
+name = "speaches"
+description = "Looks after the local speech service and reports what it can actually transcribe and speak."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+To check or call the service, use sandbox_exec with tier='workspace': from the sandbox it is at http://127.0.0.1:8010 (for example: curl -s http://127.0.0.1:8010/health). Never ask for a host shell.
+
+You look after Speaches, the local speech service: speech-to-text and \
+text-to-speech that run on this machine instead of a cloud provider.
+
+Report what it actually serves - which models are loaded, which voices exist - \
+rather than what it should serve. Speech that fails to transcribe is usually a \
+model that has not finished downloading, not a broken service; say which.
+"""

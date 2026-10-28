@@ -15,6 +15,9 @@ function freecoAssistant() {
     noAgents: false,      // true when the workspace has no agents yet
     input: '',
     sending: false,
+    // True from the moment Enter is pressed until `sending` takes over, so the
+    // awaited work in between cannot be started twice.
+    _starting: false,
     messages: [],         // { id, role: 'user'|'freeco'|'system', html, ts }
     // voice
     recording: false,
@@ -60,7 +63,7 @@ function freecoAssistant() {
     // live progress — what Freeco is doing right now, so a misheard request can
     // be caught and stopped instead of running to completion in silence
     steps: [],             // { text, kind: 'phase'|'tool'|'note' }
-    showSteps: true,
+    showSteps: false,     // opens while the agent works, collapses when it is done
     _wsAgentId: null,
     awaitingConfirm: false,  // voice transcript is in the box, waiting for review
     queued: [],              // messages typed while a reply was still streaming
@@ -87,9 +90,20 @@ function freecoAssistant() {
 
     init: function() {
       var self = this;
+      // The working log follows the work: open while the agent is running, so
+      // the current step is visible, and collapsed once it is done, so a
+      // finished task leaves the conversation rather than its tool output on
+      // screen. It was open permanently, and every task's steps stayed
+      // between the user and the previous message. Still toggleable by hand.
+      this.$watch('sending', function(busy) { self.showSteps = !!busy; });
       // Re-resolve the concierge agent whenever the shared agent list changes.
-      this.$watch('$store.app.agents', function() { self._resolveAgent(); });
+      // The local guess keeps the widget usable before the server answers; the
+      // server's answer then replaces it, and is the one that decides.
+      this.$watch('$store.app.agents', function() {
+        if (!self._agentFromServer) self._resolveAgent();
+      });
       this._resolveAgent();
+      this._resolveAgentFromServer().then(function(ok) { self._agentFromServer = ok; });
       // Launcher and STOP were fixed to their corners and could not be moved.
       this.initDraggableWidgets();
       // A widget parked off the edge of a resized window becomes unreachable,
@@ -103,6 +117,9 @@ function freecoAssistant() {
       // Surface permission requests in this chat, where the user already is.
       this.loadApprovals();
       setInterval(function() { self.loadApprovals(); }, 5000);
+      // The model list was only fetched by a toggle that nothing rendered, so
+      // it was always empty. The picker in the input row needs it up front.
+      this.loadModels();
       // Browsers load TTS voices asynchronously — grab them now and again when
       // the list becomes available, so the first spoken reply already has a
       // good male voice picked.
@@ -113,16 +130,51 @@ function freecoAssistant() {
       this.booted = true;
     },
 
+    // Ask the server which agent is the assistant.
+    //
+    // This is a question about roles, and the browser only has names to go on.
+    // Guessing from names is what sent this chat to the shopping agent, so the
+    // answer now comes from /api/assistant and the local guess below is only a
+    // fallback for when that call cannot be made at all.
+    _resolveAgentFromServer: async function() {
+      try {
+        var res = await FreecoAPI.get('/api/assistant');
+        if (res && res.id) {
+          this.agent = { id: res.id, name: res.name };
+          this.noAgents = false;
+          return true;
+        }
+      } catch (e) { /* fall through to the local guess */ }
+      return false;
+    },
+
     _resolveAgent: function() {
       var agents = (window.Alpine && Alpine.store('app') && Alpine.store('app').agents) || [];
       if (!agents.length) { this.agent = null; this.noAgents = true; return; }
       this.noAgents = false;
       // Prefer an agent that is clearly the concierge; else fall back to the first.
-      var pick = agents.find(function(a) {
+      //
+      // "freeco" is NOT a signal: it is the product name, so `freeco-shopping`,
+      // `freeco-collector` and every other bundled agent contain it. Matching on
+      // it sent the concierge's chat to whichever such agent happened to sort
+      // first -- shopping, in a list where it preceded the assistant -- so
+      // messages typed to Freeco were answered by the shopping agent.
+      //
+      // Ranked rather than first-match, because `find` returns whatever comes
+      // first in registry order and the concierge is not reliably first.
+      var rank = function(a) {
         var n = (a.name || '').toLowerCase();
-        return n.indexOf('freeco') !== -1 || n.indexOf('concierge') !== -1 || n.indexOf('assistant') !== -1;
+        if (n === 'freeco.ai assistant') return 3;
+        if (n.indexOf('concierge') !== -1) return 2;
+        if (n.indexOf('assistant') !== -1) return 1;
+        return 0;
+      };
+      var best = null, bestRank = 0;
+      agents.forEach(function(a) {
+        var r = rank(a);
+        if (r > bestRank) { bestRank = r; best = a; }
       });
-      this.agent = pick || agents[0];
+      this.agent = best || agents[0];
     },
 
     // Freeco should work the moment you open it. If the workspace has no
@@ -215,21 +267,74 @@ function freecoAssistant() {
     showModels: false,
     models: [],
     currentModel: '',
+    currentProvider: '',
 
+    // Only models that can actually answer here, labelled with who serves them
+    // and what they cost.
+    //
+    // This read `/api/models/catalog`, which lists every model the product
+    // knows of whether or not a key is configured, and showed a bare id. Two
+    // things follow from that, and both have already cost real time: a model
+    // whose provider has no key is offered and fails at send, and a model that
+    // does not support tools is offered to an agent that always sends tools,
+    // which fails with "No endpoints found that support tool use". Neither is
+    // recoverable by the user from a list of bare names.
+    //
+    // `/api/models` carries `available` (the provider is configured) and
+    // `supports_tools`, so both are filtered here rather than discovered on the
+    // first message.
     async loadModels() {
       try {
-        var status = await FreecoAPI.get('/api/status');
-        this.currentModel = status.default_model || '';
-        var data = await FreecoAPI.get('/api/models/catalog').catch(function () { return null; });
-        var list = (data && (data.models || data.catalog)) || [];
-        this.models = list.map(function (m) {
-          return typeof m === 'string'
-            ? { id: m, provider: '', label: m }
-            : { id: m.id || m.model, provider: m.provider || '', label: m.display_name || m.id || m.model };
-        }).filter(function (m) { return m.id; });
-        // Always offer what is configured, even if no catalogue came back.
+        // The assistant's own model, not the system default.
+        //
+        // This read `status.default_model`, which is the model new agents are
+        // created with -- so the widget showed one model while the assistant
+        // it talks to was running another, and the same assistant appeared to
+        // be two different agents depending on which surface you looked at.
+        // The agent is the authority on what the agent is using.
+        var agentId = this.agent && this.agent.id;
+        var agent = agentId
+          ? await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId)).catch(function () { return null; })
+          : null;
+        if (agent && agent.model_name) {
+          this.currentModel = agent.model_name;
+          this.currentProvider = agent.model_provider || '';
+        } else {
+          var status = await FreecoAPI.get('/api/status').catch(function () { return {}; });
+          this.currentModel = (status && status.default_model) || this.currentModel || '';
+        }
+        var data = await FreecoAPI.get('/api/models').catch(function () { return null; });
+        var list = (data && (data.models || data)) || [];
+        if (!Array.isArray(list)) list = [];
+
+        this.models = list.filter(function (m) {
+          // `supports_tools` missing means unknown, not false: an older
+          // catalogue entry should not be hidden on a field it never had.
+          return m && m.id && m.available !== false && m.supports_tools !== false;
+        }).map(function (m) {
+          var inC = Number(m.input_cost_per_m || 0), outC = Number(m.output_cost_per_m || 0);
+          var price = (!inC && !outC) ? 'free'
+            : '$' + inC + '/$' + outC + ' per M';
+          var name = m.display_name || m.id;
+          return {
+            id: m.id,
+            provider: m.provider || '',
+            free: (!inC && !outC),
+            label: name + ' — ' + (m.provider || 'unknown') + ' · ' + price
+          };
+        });
+
+        // Free first, then by provider and name: the list is long, and the
+        // models a newcomer should reach for are the ones that cost nothing.
+        this.models.sort(function (a, b) {
+          if (a.free !== b.free) return a.free ? -1 : 1;
+          return (a.provider + a.label).localeCompare(b.provider + b.label);
+        });
+
+        // Keep whatever is configured selectable even if it was filtered out,
+        // or the dropdown would silently show a different model as current.
         if (this.currentModel && !this.models.some(function (m) { return m.id === this.currentModel; }.bind(this))) {
-          this.models.unshift({ id: this.currentModel, provider: '', label: this.currentModel + ' (current)' });
+          this.models.unshift({ id: this.currentModel, provider: '', free: false, label: this.currentModel + ' (current)' });
         }
       } catch (e) { this.models = []; }
       return this.models;
@@ -240,18 +345,32 @@ function freecoAssistant() {
       if (this.showModels && !this.models.length) this.loadModels();
     },
 
+    modelNote: '',
+
     async chooseModel(m) {
       this.showModels = false;
       if (!this.agent) this._resolveAgent();
       if (!this.agent) { FreecoToast.error('No agent to switch.'); return; }
       try {
-        await FreecoAPI.put('/api/agents/' + this.agent + '/model',
+        // `this.agent` is {id, name}; the id is what the route wants. Building
+        // the URL from the object produced /api/agents/[object Object]/model,
+        // so switching model from here could never have worked.
+        await FreecoAPI.put('/api/agents/' + this.agent.id + '/model',
           { provider: m.provider || undefined, model: m.id });
         this.currentModel = m.id;
+        this.currentProvider = m.provider || '';
+        this.modelNote = 'Now using ' + (m.label || m.id);
         FreecoToast.success('Now using ' + (m.label || m.id) + '.');
       } catch (e) {
+        this.modelNote = '';
         FreecoToast.error('Could not switch model: ' + e.message);
       }
+    },
+
+    // Called by the model dropdown in the input row, which hands back an id.
+    setModel: function (id) {
+      var m = this.models.find(function (x) { return x.id === id; });
+      return this.chooseModel(m || { id: id, provider: '', label: id });
     },
 
     // ---- Conversation ergonomics -------------------------------------
@@ -307,6 +426,57 @@ function freecoAssistant() {
       this.sessionId = null;
       this.showHistory = false;
       this._scroll();
+    },
+
+    // Start a fresh session for a new task, keeping what the user typed.
+    //
+    // `newChat` clears the input because the user pressed a button and is
+    // starting over. Here they are mid-send, so the text must survive: the
+    // caller is about to render and send it.
+    sessionTitle: '',
+    async startNewSession(title) {
+      var keepInput = this.input;
+      var keepAtts = this.attachments.slice();
+      var previous = this.sessionId;
+      this.messages = [];
+      this.steps = [];
+      this.sessionId = null;
+      this.sessionTitle = title || '';
+      this.input = keepInput;
+      this.attachments = keepAtts;
+      if (title) {
+        this.messages.push({
+          id: ++mId, role: 'system', ts: Date.now(),
+          html: 'New task: <strong>' + this._escape(title) + '</strong>' +
+                (previous ? ' <span class="text-dim">(the previous conversation is kept in history)</span>' : '')
+        });
+      }
+      this._scroll();
+    },
+
+    // Name the session once it exists.
+    //
+    // The title is decided before sending, but the session is only created by
+    // the send itself, so it cannot be applied until a reply comes back. The id
+    // comes from the agent record rather than the message response, which does
+    // not carry one. Runs once per new task; failure leaves the session unnamed
+    // rather than interrupting the user.
+    async _applySessionTitle() {
+      if (!this.sessionTitle || !this.agent) return;
+      var title = this.sessionTitle;
+      this.sessionTitle = '';
+      try {
+        var a = await FreecoAPI.get('/api/agents/' + this.agent.id);
+        var sid = (a && (a.session_id || (a.agent && a.agent.session_id))) || null;
+        if (sid) await FreecoAPI.put('/api/sessions/' + sid + '/label', { label: title });
+      } catch (e) { /* an unnamed session is still a usable session */ }
+    },
+
+    // Rendered HTML down to the words, for anything that needs plain text.
+    _strip: function (html) {
+      var d = document.createElement('div');
+      d.innerHTML = html || '';
+      return (d.textContent || '').trim();
     },
 
     // ---- Message actions ------------------------------------------------
@@ -424,6 +594,9 @@ function freecoAssistant() {
       try {
         var data = await FreecoAPI.get('/api/sessions/' + encodeURIComponent(id));
         var msgs = (data && (data.messages || data.session && data.session.messages)) || [];
+        // Anything typed but not yet answered is not in the stored session, so
+        // replacing the thread outright would discard it.
+        var stillPending = this.messages.filter(function (m) { return m.pending || m.thinking; });
         this.messages = msgs.map(function (m) {
           var text = typeof m.content === 'string' ? m.content
                    : (m.content && m.content.text) || '';
@@ -435,6 +608,17 @@ function freecoAssistant() {
             raw: text
           };
         }.bind(this));
+        // Only the ones the stored session really lacks. A message that did
+        // reach the server before the reload is already in `msgs`, and adding
+        // it again would show it twice.
+        var restoredText = {};
+        this.messages.forEach(function (m) { if (m.raw) restoredText[m.raw.trim()] = true; });
+        var missing = stillPending.filter(function (m) {
+          return m.thinking || !m.raw || !restoredText[m.raw.trim()];
+        });
+        if (missing.length) {
+          this.messages = this.messages.concat(missing);
+        }
         this.sessionId = id;
         this._scroll();
       } catch (e) {
@@ -530,11 +714,29 @@ function freecoAssistant() {
       var text = (this.input || '').trim();
       var atts = this.attachments.slice();
       if (!text && !atts.length) return;
+      // A key in the message goes to the vault, not to the model -- checked
+      // before queueing too, so a queued message cannot carry one either.
+      // Null means the user went back to edit: the text stays in the box.
+      // `_guarding` keeps a second Enter during the check from sending twice.
+      if (this._guarding) return;
+      this._guarding = true;
+      var guarded;
+      try { guarded = await window.FreecoSecretGuard.check(text); } finally { this._guarding = false; }
+      if (guarded === null) return;
+      text = guarded;
       // A reply in flight must never block the user. Queue the message and send
       // it as soon as the current run finishes — being unable to correct or add
       // to a request while the agent works is how a misunderstood task runs to
       // completion unchallenged.
-      if (this.sending) {
+      // `_starting` closes the gap between pressing Enter and `sending`
+      // becoming true.
+      //
+      // `sending` was only set further down, after an awaited call to the
+      // session router -- so for as long as that request took, this guard saw
+      // `sending === false` and a second Enter ran the whole path again. Every
+      // extra press sent another copy of the message to the agent, and the
+      // pause that invited those presses was the router call itself.
+      if (this.sending || this._starting) {
         this.queued.push({ text: text, atts: atts });
         this.messages.push({
           id: ++mId, role: 'system', ts: Date.now(),
@@ -545,24 +747,297 @@ function freecoAssistant() {
         this._scroll();
         return;
       }
+      this._starting = true;
       if (!this.agent) { this._resolveAgent(); }
       if (!this.agent) {
+        this._starting = false;
         this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
           html: 'You don’t have any agents yet. <a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-navigate\',{detail:\'agents\'}));return false;">Create your Freeco concierge agent</a> to get started.' });
         this.input = ''; this._scroll(); return;
       }
-      var bubble = this._escape(text);
+
+      // Show what was typed before anything is awaited.
+      //
+      // The bubble used to be pushed after the session router answered, so the
+      // window sat unchanged for as long as that call took and the message
+      // looked lost -- which is what prompted pressing Enter again.
+      var bubbleHtml = this._escape(text);
       if (atts.length) {
-        bubble += '<div class="freeco-att-row">' + atts.map(function(a) {
+        bubbleHtml += '<div class="freeco-att-row">' + atts.map(function(a) {
           return '<span class="freeco-att">📎 ' + a.name.replace(/</g, '&lt;') + '</span>';
         }).join('') + '</div>';
       }
-      // Keep the raw text: retry and edit need the original, not the escaped
-      // HTML that was rendered from it.
-      this.messages.push({ id: ++mId, role: 'user', ts: Date.now(), html: bubble, raw: text, atts: atts.slice() });
+      // `pending` marks a message the server's history does not contain yet, so
+      // reloading or switching model cannot drop it.
+      var sentMsg = { id: ++mId, role: 'user', ts: Date.now(), html: bubbleHtml, raw: text, atts: atts.slice(), pending: true };
+      this.messages.push(sentMsg);
       this.input = '';
       this.attachments = [];
+      this._scroll();
+      // A new task gets its own session, named for the task.
+      //
+      // Everything used to land in one endless thread, so unrelated work piled
+      // up together: the model carried irrelevant history into every answer and
+      // nothing could be found again afterwards. Relatedness is judged by the
+      // model rather than by a timer, because a follow-up seconds later belongs
+      // to the same task while a fresh request right after an answer does not.
+      // Failures here are silent and continue the current session, since a
+      // housekeeping call must never stop a message being sent.
+      // Keyed on the transcript, not on sessionId: that is only set when a past
+      // conversation is opened from history, so it is null through all normal
+      // chatting and a check on it would never fire.
+      var verdict = null;
+      var candidates = [];
+      // Only when a new topic is plausible: the router is a model call that
+      // took 3-11 s, and asking it before every message made each one hang.
+      // A short message, or one within three minutes of the last, is a
+      // follow-up and goes straight through.
+      var lastTs = 0;
+      for (var li = this.messages.length - 1; li >= 0; li--) {
+        if (this.messages[li].ts) { lastTs = this.messages[li].ts; break; }
+      }
+      var maybeNewTopic = this.messages.length && text.trim().length >= 25 &&
+        (!lastTs || Date.now() - lastTs > 3 * 60 * 1000);
+      if (maybeNewTopic) {
+        try {
+          var recent = this.messages.slice(-6).map(function (m) {
+            return (m.role === 'user' ? 'User: ' : 'Assistant: ') + (m.raw || this._strip(m.html || ''));
+          }.bind(this)).join('\n').slice(-2000);
+          // Both questions at once: is this a new task, and does a conversation
+          // about it already exist somewhere. They are independent, and asking
+          // them in sequence doubles the pause before anything happens.
+          // Capped at three seconds: past that, it is sent here.
+          var answers = await Promise.race([
+            Promise.all([
+              FreecoAPI.post('/api/sessions/route', { message: text, context: recent }).catch(function () { return null; }),
+              FreecoAPI.get('/api/sessions/search?limit=3&q=' + encodeURIComponent(text)).catch(function () { return null; })
+            ]),
+            new Promise(function (resolve) { setTimeout(function () { resolve([null, null]); }, 3000); })
+          ]);
+          verdict = answers[0];
+          candidates = ((answers[1] && answers[1].results) || []).filter(function (c) {
+            // A thread this same agent already owns is "here", not elsewhere.
+            return !this.agent || c.agent_id !== this.agent.id;
+          }.bind(this));
+        } catch (e) { /* stay in this session */ }
+      }
+
+      // Where the work already lives is the user's decision, not a guess made
+      // on their behalf. Ask only when there is a real alternative: an existing
+      // conversation on the subject, or a task unrelated to this thread. A
+      // plain follow-up goes where it already was, with no interruption.
+      if (candidates.length || (verdict && verdict.new_session)) {
+        this._proposeDestination(sentMsg, text, atts, verdict, candidates);
+        this._starting = false;
+        return;
+      }
+
+      // Starting a new session clears the thread, which would take the message
+      // with it: put it back so the user always sees what they just sent.
+      if (this.messages.indexOf(sentMsg) === -1) {
+        this.messages.push(sentMsg);
+      }
+      await this._deliverHere(text, atts);
+    },
+
+    // Carry an action out of this window: drag it, or copy it.
+    //
+    // The assistant is only reachable from its own window, so anything it can
+    // do stops at the edge of the page. These build the same request in every
+    // form another place understands -- a terminal wants a command, a browser
+    // or phone wants a link, a document wants a labelled anchor -- and a drag
+    // carries all of them at once, letting the destination pick.
+    //
+    // The link only ever prefills the box. A link that sent on open would let
+    // any page put words in the user's mouth.
+    _actionText: function (kind) {
+      var t = (this.input || '').trim();
+      if (!t && this.messages.length) {
+        for (var i = this.messages.length - 1; i >= 0; i--) {
+          if (this.messages[i].role === 'user' && this.messages[i].raw) { t = this.messages[i].raw; break; }
+        }
+      }
+      if (kind === 'translate') {
+        return 'Translate this and reply with the translation only:\n\n' + (t || '<paste text here>');
+      }
+      return t || 'Ask FreEco.ai: ';
+    },
+
+    actionLink: function (kind) {
+      var base = window.location.origin + window.location.pathname;
+      var q = 'ask=' + encodeURIComponent(this._actionText(kind));
+      if (this.agent && this.agent.id) q += '&agent=' + encodeURIComponent(this.agent.id);
+      return base + '?' + q;
+    },
+
+    actionShell: function (kind) {
+      var id = (this.agent && this.agent.id) || '<agent-id>';
+      var body = JSON.stringify({ message: this._actionText(kind) });
+      // Single-quoted for a POSIX shell, with embedded quotes closed and
+      // reopened, so it survives copy-paste into a terminal unedited.
+      return "curl -s -X POST " + window.location.origin + "/api/agents/" + id + "/message" +
+             " -H 'Content-Type: application/json'" +
+             " -d '" + body.replace(/'/g, "'\\''") + "'";
+    },
+
+    onActionDrag: function (ev, kind) {
+      if (!ev || !ev.dataTransfer) return;
+      var label = kind === 'translate' ? 'Translate with FreEco.ai'
+                : kind === 'shell' ? 'Run via FreEco.ai'
+                : 'Ask FreEco.ai';
+      var link = this.actionLink(kind);
+      try {
+        // Every flavour at once; the destination keeps whichever it understands.
+        ev.dataTransfer.setData('text/uri-list', link);
+        ev.dataTransfer.setData('text/html', '<a href="' + link + '">' + label + '</a>');
+        ev.dataTransfer.setData('text/plain', kind === 'shell' ? this.actionShell(kind) : link);
+        ev.dataTransfer.effectAllowed = 'copyLink';
+      } catch (e) { /* some targets refuse extra flavours */ }
+    },
+
+    copyAction: async function (kind) {
+      var text = kind === 'shell' ? this.actionShell(kind) : this.actionLink(kind);
+      try {
+        await navigator.clipboard.writeText(text);
+        if (typeof FreecoToast !== 'undefined') {
+          FreecoToast.success(kind === 'shell' ? 'Command copied' : 'Link copied');
+        }
+      } catch (e) {
+        if (typeof FreecoToast !== 'undefined') FreecoToast.error('Could not copy');
+      }
+    },
+
+    // A message waiting for the user to say where it should go.
+    //
+    // The popup's job is to put work where that work already lives, and only
+    // the user can settle that: a message about the grant may belong in the
+    // grant thread, in a new one, or right here. Nothing is delivered, and no
+    // project or company is created, until one of these is clicked.
+    pendingRoute: null,
+
+    _proposeDestination: function (sentMsg, text, atts, verdict, candidates) {
+      this.pendingRoute = {
+        text: text,
+        atts: atts,
+        msg: sentMsg,
+        title: (verdict && verdict.title) || '',
+        newTask: !!(verdict && verdict.new_session),
+        candidates: candidates.slice(0, 3)
+      };
+      this._scroll();
+    },
+
+    // Deliver where it already was.
+    routeHere: async function () {
+      var r = this.pendingRoute;
+      if (!r) return;
+      this.pendingRoute = null;
+      if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
       this.sending = true;
+      await this._deliverHere(r.text, r.atts);
+    },
+
+    // A new task: on the task board for this agent, worked on in a fresh
+    // session named for it -- the same thing "New task" means in the main chat.
+    routeNewTask: async function () {
+      var r = this.pendingRoute;
+      if (!r) return;
+      this.pendingRoute = null;
+      if (this.agent && this.agent.id) {
+        var title = r.title || r.text.split('\n')[0].slice(0, 80);
+        try {
+          await FreecoAPI.post('/api/agents/' + this.agent.id + '/tasks', { title: title, description: r.text });
+        } catch (e) { /* the conversation still starts; the board is a bonus */ }
+      }
+      try { await this.startNewSession(r.title || ''); } catch (e) { /* stay put */ }
+      if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
+      this.sending = true;
+      await this._deliverHere(r.text, r.atts);
+    },
+
+    // Put the message back in the box rather than losing what was typed.
+    routeCancel: function () {
+      var r = this.pendingRoute;
+      if (!r) return;
+      this.pendingRoute = null;
+      this.messages = this.messages.filter(function (m) { return m !== r.msg; });
+      this.input = r.text;
+      this.attachments = r.atts || [];
+      this._scroll();
+    },
+
+    // Create a project or a company, then carry the message into it.
+    //
+    // The agent holds `project_create` and `company_create`; this asks for the
+    // name and instructs it, rather than inventing a second path to the same
+    // tools. Named explicitly by the user, because a wrongly created company is
+    // tedious to undo and nothing here should guess at one.
+    routeNewProject: function () { this._routeNewContainer('project'); },
+    routeNewCompany: function () { this._routeNewContainer('company'); },
+
+    _routeNewContainer: async function (kind) {
+      var r = this.pendingRoute;
+      if (!r) return;
+      var suggested = r.title || '';
+      var name = window.prompt('Name for the new ' + kind + ':', suggested);
+      if (name === null) return;            // cancelled: leave the card open
+      name = String(name).trim();
+      if (!name) return;
+      this.pendingRoute = null;
+      if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
+      this.sending = true;
+      var instruction =
+        'Create a ' + kind + ' named "' + name + '" using your ' + kind +
+        '_create tool, then carry out the request below inside it. Tell me the ' +
+        kind + ' id you created.\n\n' + r.text;
+      await this._deliverHere(instruction, r.atts);
+    },
+
+    // Deliver into another agent's conversation, and leave a way to follow it.
+    routeToThread: async function (c) {
+      var r = this.pendingRoute;
+      if (!r) return;
+      this.pendingRoute = null;
+      var self = this;
+      var where = this._escape((c.label || 'conversation') + ' — ' + (c.agent_name || 'agent'));
+      var thinking = { id: ++mId, role: 'system', ts: Date.now(), thinking: true,
+                       html: 'Sending to ' + where + ' <span class="freeco-typing">• • •</span>' };
+      this.messages.push(thinking);
+      this._scroll();
+      try {
+        var payload = { message: r.text || '(see attached)' };
+        if (r.atts && r.atts.length) payload.attachments = r.atts.map(function (a) { return a.name; });
+        var res = await FreecoAPI.post('/api/agents/' + c.agent_id + '/message', payload);
+        this.messages = this.messages.filter(function (m) { return m !== thinking; });
+        if (r.msg) r.msg.pending = false;
+        var reply = (res && res.response) ? String(res.response) : '';
+        this.messages.push({
+          id: ++mId, role: 'system', ts: Date.now(),
+          html: 'Sent to <strong>' + where + '</strong>. ' +
+                '<a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-open-agent\',{detail:' +
+                JSON.stringify(c.agent_id) + '}));return false;">Open that chat</a>'
+        });
+        if (reply) {
+          this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(reply) });
+          if (this.voiceOut) this.speak(reply);
+        }
+      } catch (e) {
+        this.messages = this.messages.filter(function (m) { return m !== thinking; });
+        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
+          html: 'Could not send to ' + where + ': ' + self._escape(e.message || 'request failed') });
+      }
+      this._scroll();
+      this.$nextTick(function () { var el = document.getElementById('freeco-input'); if (el) el.focus(); });
+    },
+
+    // Send to the agent this popup is talking to, and render the reply.
+    //
+    // Split out of `send` so choosing a destination and delivering a message
+    // are separate steps: the proposal buttons deliver exactly the way an
+    // uninterrupted message does, rather than repeating the logic.
+    _deliverHere: async function(text, atts) {
+      this.sending = true;
+      this._starting = false;
       this.awaitingConfirm = false;
       this.steps = [];
       var thinking = { id: ++mId, role: 'freeco', ts: Date.now(), html: '<span class="freeco-typing">• • •</span>', thinking: true };
@@ -582,6 +1057,7 @@ function freecoAssistant() {
         var reply = res.response || '(no reply)';
         this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(reply) });
         if (this.voiceOut) this.speak(reply);
+        this._applySessionTitle();
       } catch (e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         var msg = (e.message || 'request failed').toLowerCase();
@@ -682,6 +1158,10 @@ function freecoAssistant() {
         this.sending = false;
         this.steps = [];
         if (this.voiceOut && full) this.speak(full);
+        // The streaming path is the one that normally runs -- send() returns
+        // early when the socket opens -- so naming a new session has to happen
+        // here too, not only in the POST fallback.
+        this._applySessionTitle();
         this._scroll();
         this._drainQueue();
         return;
@@ -771,11 +1251,16 @@ function freecoAssistant() {
       // box. Only if it is unavailable do we fall back to record-and-upload,
       // which requires a speech-to-text service to be configured.
       var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (SR) {
+      var cfg = window.FreecoVoiceCfg;
+      // Skip the recogniser entirely once it has failed for a reason that will
+      // not change on the next press. Brave ships the object and removed the
+      // service behind it, so without this the widget fails identically every
+      // time and never reaches the path that would have worked.
+      if (SR && !(cfg && cfg.browserSttBroken())) {
         var self = this;
         try {
           var recog = new SR();
-          recog.lang = navigator.language || 'en-US';
+          recog.lang = (cfg && cfg.lang()) || navigator.language || 'en-US';
           // continuous: keep listening across natural pauses. With it off the
           // recogniser stops at the first silence, which chopped requests
           // mid-sentence. interimResults lets the text appear while speaking so
@@ -836,7 +1321,22 @@ function freecoAssistant() {
           recog.onerror = function(ev) {
             self.recording = false;
             var why = (ev && ev.error) || 'unknown';
-            if (why === 'not-allowed' || why === 'service-not-allowed') {
+            var vc = window.FreecoVoiceCfg;
+            if (vc && vc.isPermanentSttError(why)) {
+              // Not a passing failure: this browser will answer the same way
+              // every time. Remember it and say what happens next, rather than
+              // printing an error code the user can do nothing with.
+              vc.markBrowserSttBroken();
+              self.messages.push({
+                id: ++mId, role: 'system', ts: Date.now(),
+                html: 'This browser cannot transcribe ' +
+                      self._escape(recog.lang) + ' itself (' + self._escape(why) + '). ' +
+                      'Press the microphone again and the recording will be sent to ' +
+                      'FreEco.ai to transcribe instead. Set a different dictation ' +
+                      'language in Settings if that is the problem.'
+              });
+              self._scroll();
+            } else if (why === 'not-allowed') {
               if (typeof FreecoToast !== 'undefined') FreecoToast.error('Microphone access denied');
             } else if (why !== 'aborted' && why !== 'no-speech') {
               self.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
@@ -1067,12 +1567,9 @@ function freecoAssistant() {
 
     speak: function(text) {
       if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
-      var clean = String(text || '')
-        .replace(/```[\s\S]*?```/g, ' code block ')  // don't read code aloud
-        .replace(/[*_`#>|]/g, '')
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')      // links -> link text
-        .replace(/\s+/g, ' ')
-        .trim();
+      // One cleaner for both chats, so they read a reply the same way.
+      var clean = window.FreecoVoiceCfg ? window.FreecoVoiceCfg.cleanForSpeech(text)
+                                        : String(text || '').replace(/[*_`#>|]/g, '').trim();
       if (!clean) return;
       try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
       if (!this._voice) this._voice = this._pickVoice();

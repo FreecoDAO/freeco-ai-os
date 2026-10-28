@@ -3,7 +3,10 @@
 
 function chatPage() {
   var msgId = 0;
-  return {
+  // Messages drawn at first, and added per "Show earlier" click. The whole
+  // conversation is loaded; this only limits how much is rendered at once.
+  var HISTORY_WINDOW = 200;
+  var page = {
     currentAgent: null,
     messages: [],
     inputText: '',
@@ -21,6 +24,298 @@ function chatPage() {
     // Multi-session state
     sessions: [],
     sessionsOpen: false,
+    // ── Conversation menu and working panel ─────────────────────────────
+    //
+    // Everything around a conversation besides its messages: rename it, copy
+    // it into a fork, put it away, choose how the agent writes, and look at
+    // what the agent actually did -- its files, what changed, what it made,
+    // its sandbox, its browser, and what it runs in the background. Before,
+    // all of that was reachable only by asking the agent, or not at all.
+    convMenuOpen: false,
+    panelOpen: false,
+    panelTab: 'files',
+    filesPath: '',
+    filesEntries: [],
+    fileView: null,
+    changesList: [],
+    changesHours: 24,
+    artifactsList: [],
+    termInput: '',
+    termLines: [],
+    termBusy: false,
+    termTier: 'exec',
+    browserShot: null,
+    browserMsg: '',
+    backgroundInfo: { processes: [], scheduled: [] },
+    archivesList: [],
+    outputStyles: [],
+    // Transcript view, per browser. Tool steps shown collapsed by default.
+    viewShowTools: (function () { try { return localStorage.getItem('freeco-view-tools') !== 'off'; } catch (e) { return true; } })(),
+    viewTimestamps: (function () { try { return localStorage.getItem('freeco-view-ts') !== 'off'; } catch (e) { return true; } })(),
+    viewCompact: (function () { try { return localStorage.getItem('freeco-view-compact') === 'on'; } catch (e) { return false; } })(),
+
+    setView(key, on) {
+      this[key] = !!on;
+      var store = { viewShowTools: 'freeco-view-tools', viewTimestamps: 'freeco-view-ts', viewCompact: 'freeco-view-compact' };
+      try { localStorage.setItem(store[key], on ? 'on' : 'off'); } catch (e) { /* ignore */ }
+    },
+
+    _agentUrl(path) {
+      return '/api/agents/' + encodeURIComponent(this.currentAgent.id) + path;
+    },
+
+    openInNewWindow() {
+      if (!this.currentAgent) return;
+      window.open(window.location.origin + window.location.pathname + '?agent=' +
+                  encodeURIComponent(this.currentAgent.id), '_blank', 'noopener');
+      this.convMenuOpen = false;
+    },
+
+    async renameConversation() {
+      this.convMenuOpen = false;
+      if (!this.currentAgent) return;
+      var name = window.prompt('Name this conversation:', '');
+      if (name === null) return;
+      try {
+        await FreecoAPI.put(this._agentUrl('/conversation/label'), { label: name });
+        FreecoToast.success(name.trim() ? 'Renamed' : 'Name cleared');
+        this.loadSessions(this.currentAgent.id);
+      } catch (e) { FreecoToast.error('Could not rename: ' + e.message); }
+    },
+
+    async forkConversation() {
+      this.convMenuOpen = false;
+      if (!this.currentAgent) return;
+      var name = window.prompt('Name for the fork (a copy of this agent that continues from here):',
+                               this.currentAgent.name + ' (fork)');
+      if (name === null) return;
+      try {
+        var res = await FreecoAPI.post(this._agentUrl('/conversation/fork'), { name: name });
+        FreecoToast.success('Forked to "' + res.name + '"');
+        await Alpine.store('app').refreshAgents();
+        var fork = (Alpine.store('app').agents || []).filter(function (a) { return a.id === res.agent_id; })[0];
+        if (fork) this.selectAgent(fork);
+      } catch (e) { FreecoToast.error('Could not fork: ' + e.message); }
+    },
+
+    archiveConversation() {
+      this.convMenuOpen = false;
+      if (!this.currentAgent) return;
+      var self = this;
+      FreecoToast.confirm('Archive conversation',
+        'Put this conversation away and start fresh? It stays in the archive and can be restored.',
+        async function () {
+          try {
+            await FreecoAPI.post(self._agentUrl('/conversation/archive'), {});
+            self.messages = [];
+            FreecoToast.success('Archived');
+            self.loadHistory(self.currentAgent.id);
+          } catch (e) { FreecoToast.error('Could not archive: ' + e.message); }
+        });
+    },
+
+    deleteConversation() {
+      this.convMenuOpen = false;
+      if (!this.currentAgent) return;
+      var self = this;
+      FreecoToast.confirm('Delete conversation',
+        'Clear this conversation? A copy is kept in the archive in case you change your mind.',
+        async function () {
+          try {
+            await FreecoAPI.del(self._agentUrl('/conversation'));
+            self.messages = [];
+            FreecoToast.success('Deleted — a copy is in the archive');
+            self.loadHistory(self.currentAgent.id);
+          } catch (e) { FreecoToast.error('Could not delete: ' + e.message); }
+        });
+    },
+
+    async loadArchives() {
+      if (!this.currentAgent) return;
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/conversation/archives'));
+        this.archivesList = res.archives || [];
+      } catch (e) { this.archivesList = []; }
+    },
+
+    restoreArchive(a) {
+      var self = this;
+      FreecoToast.confirm('Restore conversation',
+        'Bring back "' + (a.label || a.file) + '"? The current conversation is archived first.',
+        async function () {
+          try {
+            await FreecoAPI.post(self._agentUrl('/conversation/archives/' + encodeURIComponent(a.file) + '/restore'), {});
+            self.messages = [];
+            FreecoToast.success('Restored');
+            self.loadHistory(self.currentAgent.id);
+            self.loadArchives();
+          } catch (e) { FreecoToast.error('Could not restore: ' + e.message); }
+        });
+    },
+
+    async loadOutputStyles() {
+      if (this.outputStyles.length) return;
+      try {
+        var res = await FreecoAPI.get('/api/output-styles');
+        this.outputStyles = res.styles || [];
+      } catch (e) { this.outputStyles = []; }
+    },
+
+    currentOutputStyle() {
+      return (this.currentAgent && this.currentAgent.output_style) || 'default';
+    },
+
+    async setOutputStyle(style) {
+      if (!this.currentAgent) return;
+      try {
+        await FreecoAPI.put(this._agentUrl('/output-style'), { style: style });
+        this.currentAgent.output_style = style;
+        FreecoToast.success('Output style: ' + style);
+      } catch (e) { FreecoToast.error('Could not set style: ' + e.message); }
+    },
+
+    openPanel(tab) {
+      this.panelOpen = true;
+      this.panelTab = tab || this.panelTab;
+      this.convMenuOpen = false;
+      this.refreshPanel();
+    },
+
+    refreshPanel() {
+      if (!this.currentAgent) return;
+      var t = this.panelTab;
+      if (t === 'files') this.loadFiles(this.filesPath);
+      else if (t === 'changes') this.loadChanges();
+      else if (t === 'artifacts') this.loadArtifacts();
+      else if (t === 'browser') this.loadBrowser();
+      else if (t === 'background') this.loadBackground();
+      else if (t === 'archive') this.loadArchives();
+    },
+
+    async loadFiles(path) {
+      this.fileView = null;
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/workspace/tree?path=' + encodeURIComponent(path || '')));
+        this.filesPath = res.path === '.' ? '' : (res.path || '');
+        this.filesEntries = res.entries || [];
+      } catch (e) { this.filesEntries = []; FreecoToast.error(e.message); }
+    },
+
+    filesUp() {
+      var p = (this.filesPath || '').split('/').filter(Boolean);
+      p.pop();
+      this.loadFiles(p.join('/'));
+    },
+
+    async openFile(path) {
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/workspace/file?path=' + encodeURIComponent(path)));
+        this.fileView = { path: path, content: res.content, size: res.size };
+      } catch (e) {
+        // Not text: offer it as a download rather than failing.
+        this.fileView = { path: path, content: null };
+      }
+    },
+
+    fileDownloadUrl(path) {
+      return this._agentUrl('/workspace/file?download=true&path=' + encodeURIComponent(path));
+    },
+
+    async loadChanges() {
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/workspace/changes?hours=' + this.changesHours));
+        this.changesList = res.changes || [];
+      } catch (e) { this.changesList = []; }
+    },
+
+    async loadArtifacts() {
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/artifacts'));
+        this.artifactsList = res.artifacts || [];
+      } catch (e) { this.artifactsList = []; }
+    },
+
+    async runTerminal() {
+      var cmd = (this.termInput || '').trim();
+      if (!cmd || this.termBusy || !this.currentAgent) return;
+      this.termBusy = true;
+      this.termLines.push({ kind: 'cmd', text: '$ ' + cmd });
+      this.termInput = '';
+      try {
+        var res = await FreecoAPI.post(this._agentUrl('/terminal'), { command: cmd, tier: this.termTier });
+        this.termLines.push({ kind: res.ok ? 'out' : 'err', text: res.output || '' });
+      } catch (e) {
+        this.termLines.push({ kind: 'err', text: e.message });
+      }
+      if (this.termLines.length > 200) this.termLines.splice(0, this.termLines.length - 200);
+      this.termBusy = false;
+      this.$nextTick(function () {
+        var el = document.getElementById('chat-terminal-out');
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    async loadBrowser() {
+      this.browserShot = null;
+      this.browserMsg = 'Loading…';
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/browser/screenshot'));
+        if (!res.active) { this.browserMsg = res.message || 'No browser open.'; return; }
+        var d = res.data || {};
+        var b64 = d.image || d.screenshot || d.data || (typeof d === 'string' ? d : '');
+        this.browserShot = b64 ? ('data:image/png;base64,' + b64.replace(/^data:image\/\w+;base64,/, '')) : null;
+        this.browserMsg = b64 ? '' : 'The browser answered without an image.';
+      } catch (e) { this.browserMsg = 'Could not reach the browser: ' + e.message; }
+    },
+
+    async loadBackground() {
+      try {
+        this.backgroundInfo = await FreecoAPI.get(this._agentUrl('/background'));
+      } catch (e) { this.backgroundInfo = { processes: [], scheduled: [] }; }
+    },
+
+    fmtBytes(n) {
+      if (!n) return '0 B';
+      var u = ['B', 'KB', 'MB', 'GB'], i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return (i ? n.toFixed(1) : n) + ' ' + u[i];
+    },
+
+    fmtAgo(secs) {
+      if (!secs) return '';
+      var d = Math.max(0, Date.now() / 1000 - secs);
+      if (d < 60) return 'just now';
+      if (d < 3600) return Math.floor(d / 60) + ' min ago';
+      if (d < 86400) return Math.floor(d / 3600) + ' h ago';
+      return Math.floor(d / 86400) + ' d ago';
+    },
+
+    // Read replies aloud, off by default per message but on as a mode.
+    //
+    // The popup had this and the main chat did not, so the same conversation
+    // spoke or stayed silent depending on which window it was in. Same storage
+    // key as the popup, so the choice is one setting rather than two.
+    voiceOut: (function () {
+      try { return localStorage.getItem('freeco-voice-out') === 'on'; } catch (e) { return false; }
+    })(),
+    toggleVoiceOut: function () {
+      this.voiceOut = !this.voiceOut;
+      try { localStorage.setItem('freeco-voice-out', this.voiceOut ? 'on' : 'off'); } catch (e) { /* private mode */ }
+      if (!this.voiceOut && window.speechSynthesis) {
+        try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
+      }
+    },
+    // Conversation history paging. `_historyGen` rises on every load so a
+    // slow reply for an agent the user has already left cannot overwrite the
+    // thread they are now looking at.
+    _historyGen: 0,
+    _historyLimit: 0,
+    historyTotal: 0,
+    sessionLabel: '',
+    _allHistory: [],
+    _historyWindow: 200,
+    historyHasMore: false,
+    historyLoading: false,
     searchOpen: false,
     searchQuery: '',
     // Voice recording state
@@ -137,6 +432,10 @@ function chatPage() {
       // Initialize slash commands with i18n
       this.initSlashCommands();
 
+      // Permission requests appear in this window too, so a task blocked on one
+      // is visible where the user is working rather than on another page.
+      if (this.startApprovalPolling) this.startApprovalPolling(5000);
+
       // Start tip cycle
       this.startTipCycle();
 
@@ -185,10 +484,17 @@ function chatPage() {
         }
       });
 
-      // Load session + session list when agent changes
+      // Load the session list when the agent changes.
+      //
+      // `loadSession` used to run here too, and it also assigned
+      // `self.messages`. So did `loadHistory`, from `selectAgent`, against a
+      // different store -- `sessions` versus `canonical_sessions`. Two async
+      // loads racing for one array is why the thread sometimes came back
+      // whole, sometimes truncated and sometimes empty. `canonical_sessions`
+      // is what the agent itself is given, so that is the one the view must
+      // show: anything else displays a conversation the model does not have.
       this.$watch('currentAgent', function(agent) {
         if (agent) {
-          self.loadSession(agent.id);
           self.loadSessions(agent.id);
         }
       });
@@ -299,7 +605,13 @@ function chatPage() {
       var self = this;
       this.modelSwitching = true;
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
-      FreecoAPI.put('/api/agents/' + this.currentAgent.id + '/model', { model: model.id }).then(function(resp) {
+      // Send the provider too. The server resolves a bare id through the whole
+      // catalog and prefers Custom-tier entries, so `gpt-5.6-sol` could land on
+      // the OpenRouter duplicate `openai/gpt-5.6-sol` and then look for
+      // OPENROUTER_API_KEY -- the agent reporting a local model needing no key.
+      // set_agent_model already takes an explicit provider for exactly this
+      // reason (#833); the picker had it in hand and dropped it.
+      FreecoAPI.put('/api/agents/' + this.currentAgent.id + '/model', { model: model.id, provider: model.provider }).then(function(resp) {
         // Use server-resolved model/provider to stay in sync (fixes #387/#466)
         self.currentAgent.model_name = (resp && resp.model) || model.id;
         self.currentAgent.model_provider = (resp && resp.provider) || model.provider;
@@ -426,6 +738,13 @@ function chatPage() {
         // Auto-clear stuck typing indicators
         self.messages = self.messages.filter(function(m) { return !m.thinking; });
         self.sending = false;
+        // Drain here too. Anything typed while a reply was in flight is sitting
+        // in the queue, and every other place that clears `sending` drains it
+        // -- these two did not. A message that lands in the queue at the wrong
+        // moment stays there silently: the user presses send, the box empties,
+        // and nothing ever happens. That is the worst possible failure for a
+        // chat, because it is indistinguishable from being ignored.
+        self._processQueue();
       }, 120000);
     },
 
@@ -471,8 +790,16 @@ function chatPage() {
             FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/stop', {}).then(function(res) {
               self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [] });
               self.sending = false;
+              self._processQueue();
               self.scrollToBottom();
-            }).catch(function(e) { FreecoToast.error('Stop failed: ' + e.message); });
+            }).catch(function(e) {
+              // Stopping failed, so the run may still be going -- but leaving
+              // `sending` true here strands every queued message behind a run
+              // the user already tried to cancel.
+              self.sending = false;
+              self._processQueue();
+              FreecoToast.error('Stop failed: ' + e.message);
+            });
           }
           break;
         case '/usage':
@@ -615,20 +942,352 @@ function chatPage() {
       }
     },
 
+    // Render an agent reply exactly once.
+    //
+    // The same answer can arrive twice: the HTTP fallback renders a reply, and
+    // a WebSocket that reconnects mid-turn then delivers the completion for the
+    // same run. Both paths are individually correct, which is why this is
+    // deduplicated where they meet rather than in either of them.
+    //
+    // Matching is on the text: two different runs producing identical text in
+    // the same second are the same answer as far as a reader is concerned, and
+    // showing it twice is worse than dropping a genuine repeat.
+    _pushAgentReply: function (text, meta, tools, ts) {
+      var body = (text || '').trim();
+      if (this.voiceOut && body) { this.speak(body); }
+      // The turn produced an answer, so the user's message is now part of the
+      // server's history and no longer needs carrying across a reload.
+      this.messages.forEach(function(m) { if (m.pending) m.pending = false; });
+      for (var i = this.messages.length - 1; i >= 0 && i >= this.messages.length - 4; i--) {
+        var m = this.messages[i];
+        if (m.role !== 'agent' || m.thinking || m.streaming) continue;
+        if ((m.text || '').trim() === body && body !== '') {
+          // Keep the richer metadata if this copy has it.
+          if (!m.meta && meta) m.meta = meta;
+          if ((!m.tools || !m.tools.length) && tools && tools.length) m.tools = tools;
+          return m;
+        }
+        break;
+      }
+      var msg = {
+        id: ++msgId, role: 'agent', text: text, meta: meta || '',
+        tools: tools || [], ts: ts || Date.now()
+      };
+      this.messages.push(msg);
+      return msg;
+    },
+
+    // --- Per-message actions ---
+
+    // Read an answer aloud. Toggles, so a long reply can be stopped.
+    speakMessage: function (m) {
+      if (!window.speechSynthesis) { FreecoToast.error('This browser cannot speak.'); return; }
+      if (window.speechSynthesis.speaking) { window.speechSynthesis.cancel(); return; }
+      this.speak(this.plainText(m));
+    },
+
+    copyMessage: function (m) {
+      var t = this.plainText(m);
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(t).then(function () { FreecoToast.success('Copied'); },
+                                              function () { FreecoToast.error('Copy failed'); });
+      }
+    },
+
+    // Save the answer as a file. Markdown, because that is what it is written
+    // in -- saving rendered HTML would lose the source the user can edit.
+    saveMessage: function (m) {
+      try {
+        var name = 'freeco-' + new Date(m.ts || Date.now()).toISOString().replace(/[:.]/g, '-') + '.md';
+        var blob = new Blob([this.plainText(m)], { type: 'text/markdown' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      } catch (e) { FreecoToast.error('Could not save the file.'); }
+    },
+
+    // Hand this answer to another agent, with a line saying where it came from
+    // -- an excerpt arriving with no provenance is a puzzle for the receiver.
+    sendMessageTo: function (m) {
+      this.sendToText = this.plainText(m);
+      this.sendToOpen = true;
+    },
+    sendToOpen: false,
+    sendToText: '',
+    sendToBusy: false,
+
+    confirmSendTo: async function (agentId) {
+      if (!agentId || this.sendToBusy) return;
+      this.sendToBusy = true;
+      try {
+        var from = (this.currentAgent && this.currentAgent.name) || 'another agent';
+        await FreecoAPI.post('/api/agents/' + encodeURIComponent(agentId) + '/message',
+                             { message: 'Forwarded from ' + from + ':\n\n' + this.sendToText });
+        FreecoToast.success('Sent');
+        this.sendToOpen = false;
+      } catch (e) {
+        FreecoToast.error('Could not send: ' + (e.message || 'unknown error'));
+      }
+      this.sendToBusy = false;
+    },
+
+    // The text as written, not as rendered.
+    plainText: function (m) {
+      return String((m && m.text) || '');
+    },
+
+    // --- Enter behaviour: one Enter is a newline, two in a row send ---
+    //
+    // A single Enter used to send, which makes a multi-line message impossible
+    // to write: every paragraph break fires the message half-written. Shift+Enter
+    // was the only way to get a newline, which is a convention people who write
+    // code know and people who write sentences do not.
+    //
+    // The rule now: Enter inserts a newline, and a second Enter immediately
+    // after sends. The window is deliberate -- a pause between them means the
+    // user is composing, not finishing.
+    _lastEnterAt: 0,
+
+    enterSends: function (ev) {
+      var now = Date.now();
+      var doubled = (now - this._lastEnterAt) < 1200;
+      this._lastEnterAt = now;
+      if (!doubled) return false;
+      // The first Enter already inserted a newline; drop it so the sent text
+      // does not end in a blank line.
+      this.inputText = (this.inputText || '').replace(/\n[ \t]*$/, '');
+      this._lastEnterAt = 0;
+      return true;
+    },
+
+    // --- Voice, matching the floating assistant ---
+    //
+    // The chat page markup already referenced `recording`, so the controls were
+    // designed for and never implemented here: dictation existed in the
+    // floating widget only, and the same product behaved differently depending
+    // on which window you happened to be in.
+    //
+    // Transcribed speech lands in the input for review rather than sending
+    // itself. Recognition mishears, and a misheard message sent automatically
+    // is one the user has to notice, retract and correct.
+    recording: false,
+    _recognition: null,
+
+    toggleVoice: function () {
+      var Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+      var cfg = window.FreecoVoiceCfg;
+      // No recogniser, or one already proven unusable here: record and let the
+      // server transcribe instead of refusing outright. Brave defines the
+      // object and removed the service behind it, so "has speech recognition"
+      // was true while dictation could never work.
+      if (!Rec || (cfg && cfg.browserSttBroken())) {
+        this.startRecording();
+        return;
+      }
+      if (this.recording) { this.stopVoice(); return; }
+
+      var self = this;
+      var rec = new Rec();
+      rec.lang = (cfg && cfg.lang()) || navigator.language || 'en-US';
+      rec.interimResults = true;
+      rec.continuous = true;
+
+      var settled = '';
+      rec.onresult = function (ev) {
+        var interim = '';
+        for (var i = ev.resultIndex; i < ev.results.length; i++) {
+          var chunk = ev.results[i][0].transcript;
+          if (ev.results[i].isFinal) { settled += chunk; } else { interim += chunk; }
+        }
+        // Shown live so the user can see it being heard, and correct it before
+        // anything is sent.
+        self.inputText = (settled + interim).trim();
+      };
+      rec.onerror = function (e) {
+        self.recording = false;
+        var why = (e && e.error) || 'unknown';
+        var vc = window.FreecoVoiceCfg;
+        if (vc && vc.isPermanentSttError(why)) {
+          // The same failure would repeat on every press, so switch paths and
+          // do the thing the user asked for rather than reporting a code.
+          vc.markBrowserSttBroken();
+          FreecoToast.info('This browser cannot transcribe ' + rec.lang +
+            ' itself — recording instead, and FreEco.ai will transcribe it.');
+          self.startRecording();
+          return;
+        }
+        if (why !== 'aborted') FreecoToast.error('Voice input failed: ' + why);
+      };
+      rec.onend = function () { self.recording = false; };
+
+      this._recognition = rec;
+      this.recording = true;
+      try { rec.start(); } catch (e) { this.recording = false; }
+    },
+
+    stopVoice: function () {
+      this.recording = false;
+      if (this._recognition) {
+        try { this._recognition.stop(); } catch (e) { /* already stopped */ }
+        this._recognition = null;
+      }
+    },
+
+    // Read a reply aloud, as the floating widget does.
+    speak: function (text) {
+      if (!window.speechSynthesis || !text) return;
+      var cfg = window.FreecoVoiceCfg;
+      // Markdown stripped first: read raw, "**" was spoken as "asterisk asterisk".
+      var clean = cfg ? cfg.cleanForSpeech(text) : String(text);
+      if (!clean) return;
+      try {
+        window.speechSynthesis.cancel();
+        // Same language as dictation: a reply read in the wrong language is
+        // unintelligible even when the text is right.
+        var lang = (cfg && cfg.lang()) || navigator.language || 'en-US';
+        // The voice chosen in the assistant, or the best local one -- not the
+        // browser default, which is the metallic one.
+        var voice = cfg ? cfg.pickVoice() : null;
+        // Sentence-sized pieces: Chrome stops one long utterance after ~15 s.
+        var chunks = clean.slice(0, 8000).match(/[^.!?]{1,180}([.!?]+|$)\s*/g) || [clean];
+        chunks.forEach(function (part) {
+          var u = new SpeechSynthesisUtterance(part.trim());
+          u.lang = lang;
+          if (voice) u.voice = voice;
+          window.speechSynthesis.speak(u);
+        });
+      } catch (e) { /* speaking is optional, never fatal */ }
+    },
+
+    // Load what the agent still remembers, so the view matches the model's.
+    //
+    // The summary line is deliberate: once a conversation outgrows the replay
+    // window the older turns are compacted rather than kept verbatim, and
+    // saying so is the difference between "it forgot" and "it summarised".
+    // Load the conversation the agent is actually in -- its current session,
+    // the store every message is written to -- with tool steps and images.
+    //
+    // This read `/history` (the agent's compact cross-channel memory) and
+    // built messages with `html` and role `assistant`, while the template
+    // draws `text` with role `agent`. So the history arrived and was never
+    // drawn: whole conversations looked empty, and "load earlier" fetched more
+    // of the wrong store. The session is the conversation; it is what is shown.
+    //
+    // Everything is fetched once and the last HISTORY_WINDOW messages drawn;
+    // "Show earlier" reveals more from memory, with no request that can fail.
+    async loadHistory(agentId) {
+      var gen = ++this._historyGen;
+      this.historyLoading = true;
+      try {
+        var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/session');
+        // A newer load started while this one was in flight -- that agent or
+        // session is what the user is looking at now.
+        if (gen !== this._historyGen || !data) return;
+        var self = this;
+        var all = (data.messages || [])
+          .filter(function(m) { return m && m.role !== 'System' && m.role !== 'system'; })
+          .map(function(m) { return self._fromStored(m); })
+          .filter(function(m) { return (m.text && m.text.trim()) || m.tools.length || m.images.length; });
+        this._allHistory = all;
+        this.sessionLabel = data.label || '';
+        this.historyTotal = all.length;
+        this._historyWindow = HISTORY_WINDOW;
+        this._showHistoryWindow();
+        this.$nextTick(function() { self.scrollToBottom(true); });
+      } catch (e) {
+        if (gen === this._historyGen) {
+          FreecoToast.error('Could not load this conversation: ' + (e.message || 'error'));
+        }
+      } finally {
+        if (gen === this._historyGen) this.historyLoading = false;
+      }
+    },
+
+    // Draw the newest `_historyWindow` stored messages, keeping anything typed
+    // but not yet answered: it is not stored until its turn finishes, and
+    // replacing the list outright is what made a just-sent message vanish.
+    _showHistoryWindow() {
+      var all = this._allHistory || [];
+      var start = Math.max(0, all.length - this._historyWindow);
+      this.historyHasMore = start > 0;
+      var pending = this.messages.filter(function(m) {
+        return m.pending || m.streaming || m.thinking;
+      });
+      this.messages = all.slice(start).concat(pending);
+    },
+
+    // One mapping from a stored message to what the template draws, used by
+    // every loader, so two loaders can never disagree about the shape again.
+    _fromStored(m) {
+      var role = (m.role === 'User' || m.role === 'user') ? 'user'
+        : (m.role === 'System' || m.role === 'system') ? 'system' : 'agent';
+      var text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '');
+      text = this.sanitizeToolText(text);
+      var tools = (m.tools || []).map(function(t, idx) {
+        return {
+          id: (t.name || 'tool') + '-hist-' + (++msgId) + '-' + idx,
+          name: t.name || 'unknown',
+          running: false,
+          // Finished work from history loads collapsed; click to open.
+          expanded: false,
+          input: t.input || '',
+          result: t.result || '',
+          is_error: !!t.is_error
+        };
+      });
+      var images = (m.images || []).map(function(img) {
+        return { file_id: img.file_id, filename: img.filename || 'image' };
+      });
+      return { id: ++msgId, role: role, text: text, meta: '', tools: tools, images: images };
+    },
+
+    // Show more of the conversation. Instant: it is already loaded.
+    loadEarlierHistory() {
+      if (!this.currentAgent || this.historyLoading) return;
+      var el = document.getElementById('messages');
+      var before = el ? el.scrollHeight - el.scrollTop : 0;
+      this._historyWindow += HISTORY_WINDOW;
+      this._showHistoryWindow();
+      // Keep the message the user was reading where it was.
+      this.$nextTick(function() { if (el) el.scrollTop = el.scrollHeight - before; });
+    },
+
     selectAgent(agent) {
       this.currentAgent = agent;
       this.messages = [];
       try { localStorage.setItem('of-active-agent', agent.id); } catch(e) { /* ignore */ }
+      // Put the conversation back.
+      //
+      // Clearing the view without reloading it is why messages "vanished"
+      // after switching agent or model: the backend still held every one of
+      // them, and `/api/agents/{id}/history` had existed all along with nothing
+      // calling it. The user saw an empty thread and reasonably concluded the
+      // history was gone, while the agent still had it -- the two disagreeing
+      // about what was said is worse than either being empty.
+      var historyLoaded = this.loadHistory(agent.id);
       this.connectWs(agent.id);
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
-      // Show welcome tips on first use
-      if (!localStorage.getItem('of-chat-tips-seen')) {
-        this.messages.push({
-          id: ++msgId,
-          role: 'system',
-          text: t('chat.welcome_message'),
-          meta: '',
-          tools: []
+      // Show welcome tips on first use.
+      //
+      // These are appended after the history resolves, not before it. Pushing
+      // them first made the thread non-empty, and the old restore only ran
+      // `if (!this.messages.length)` -- so on the one chat where the tips
+      // appear, the entire conversation was skipped, and the flag was set so
+      // it never recurred and never got explained.
+      // An untranslated key is not a tip: it was shown raw ("chat.welcome_message").
+      if (!localStorage.getItem('of-chat-tips-seen') && t('chat.welcome_message') !== 'chat.welcome_message') {
+        var self0 = this;
+        Promise.resolve(historyLoaded).then(function() {
+          self0.messages.push({
+            id: ++msgId,
+            role: 'system',
+            text: t('chat.welcome_message'),
+            meta: '',
+            tools: []
+          });
+          self0.scrollToBottom();
         });
         localStorage.setItem('of-chat-tips-seen', 'true');
       }
@@ -640,43 +1299,9 @@ function chatPage() {
       });
     },
 
+    // The current session, through the one loader the chat uses.
     async loadSession(agentId) {
-      var self = this;
-      try {
-        var data = await FreecoAPI.get('/api/agents/' + agentId + '/session');
-        if (data.messages && data.messages.length) {
-          // Defense-in-depth (#935): never render system-role messages in the
-          // conversation history view, even if the backend somehow returns
-          // one. The server already filters these out by default, but we
-          // guard here too so a regression cannot leak the system prompt.
-          var visible = data.messages.filter(function(m) {
-            return m && m.role !== 'System' && m.role !== 'system';
-          });
-          self.messages = visible.map(function(m) {
-            var role = m.role === 'User' ? 'user' : (m.role === 'System' ? 'system' : 'agent');
-            var text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-            // Sanitize any raw function-call text from history
-            text = self.sanitizeToolText(text);
-            // Build tool cards from historical tool data
-            var tools = (m.tools || []).map(function(t, idx) {
-              return {
-                id: (t.name || 'tool') + '-hist-' + idx,
-                name: t.name || 'unknown',
-                running: false,
-                expanded: true,
-                input: t.input || '',
-                result: t.result || '',
-                is_error: !!t.is_error
-              };
-            });
-            var images = (m.images || []).map(function(img) {
-              return { file_id: img.file_id, filename: img.filename || 'image' };
-            });
-            return { id: ++msgId, role: role, text: text, meta: '', tools: tools, images: images };
-          });
-          self.$nextTick(function() { self.scrollToBottom(); });
-        }
-      } catch(e) { /* silent */ }
+      return this.loadHistory(agentId);
     },
 
     // Multi-session: load session list for current agent
@@ -908,6 +1533,11 @@ function chatPage() {
             for (var ri = lastMsg3.tools.length - 1; ri >= 0; ri--) {
               if (lastMsg3.tools[ri].name === data.tool && lastMsg3.tools[ri].running) {
                 lastMsg3.tools[ri].running = false;
+                // Collapse once finished. Only the step still running stays
+                // open: a long task leaves dozens of these behind, and with
+                // every one expanded the conversation became a scroll through
+                // tool output to find what anyone actually said.
+                lastMsg3.tools[ri].expanded = false;
                 lastMsg3.tools[ri].result = data.result || '';
                 lastMsg3.tools[ri].is_error = !!data.is_error;
                 // Extract image URLs from image_generate or browser_screenshot results
@@ -954,6 +1584,7 @@ function chatPage() {
           });
           streamedTools.forEach(function(t) {
             t.running = false;
+            t.expanded = false;
             // Text-detected tool calls (model leaked as text) — mark as not executed
             if (t.id && t.id.indexOf('-txt-') !== -1 && !t.result) {
               t.result = 'Model attempted this call as text (not executed via tool system)';
@@ -973,7 +1604,7 @@ function chatPage() {
           if (!finalText.trim() && streamedTools.length) {
             finalText = '';
           }
-          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now() });
+          this._pushAgentReply(finalText, meta, streamedTools, Date.now());
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -1010,9 +1641,11 @@ function chatPage() {
           break;
 
         case 'agents_updated':
+          // Refetch through the store rather than assigning the pushed list
+          // straight in: the store is what puts the agent you talk to first,
+          // and overwriting it here undid that on every agent change.
           if (data.agents) {
-            Alpine.store('app').agents = data.agents;
-            Alpine.store('app').agentCount = data.agents.length;
+            Alpine.store('app').refreshAgents();
           }
           break;
 
@@ -1083,6 +1716,20 @@ function chatPage() {
         }
       }
 
+      // A key in the message goes to the vault, not to the model. Null means
+      // the user went back to edit: the text stays in the box.
+      // `_guarding` keeps a second Enter during the check from sending twice.
+      if (this._guarding) return;
+      this._guarding = true;
+      var guarded;
+      try { guarded = await window.FreecoSecretGuard.check(text); } finally { this._guarding = false; }
+      if (guarded === null) return;
+      text = guarded;
+
+      // No routing here: the main chat sends to the conversation on screen.
+      // Deciding where a message belongs is the popup's job (owner's
+      // decision, 2026-10-04); asking a router here made every send wait.
+
       this.inputText = '';
 
       // Reset textarea height to single line
@@ -1122,9 +1769,10 @@ function chatPage() {
       // Collect image references for inline rendering
       var msgImages = uploadedFiles.filter(function(f) { return f.content_type && f.content_type.startsWith('image/'); });
 
-      // Always show user message immediately
-      this.messages.push({ id: ++msgId, role: 'user', text: finalText, meta: '', tools: [], images: msgImages, ts: Date.now() });
-      this.scrollToBottom();
+      // Always show user message immediately, and mark it pending until the
+      // server's own history contains it, so a reload cannot drop it.
+      this.messages.push({ id: ++msgId, role: 'user', text: finalText, meta: '', tools: [], images: msgImages, ts: Date.now(), pending: true });
+      this.scrollToBottom(true);
       localStorage.setItem('of-first-msg', 'true');
 
       // If already streaming, queue this message
@@ -1164,7 +1812,7 @@ function chatPage() {
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
-        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now() });
+        this._pushAgentReply(res.response, httpMeta, [], Date.now());
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + e.message, meta: '', tools: [], ts: Date.now() });
@@ -1244,10 +1892,41 @@ function chatPage() {
     },
 
     _latexTimer: null,
-    scrollToBottom() {
+    // Follow the conversation only while the reader is already at the end.
+    //
+    // Every streamed token called this, and it moved the view to the bottom
+    // unconditionally -- so anyone who scrolled up to reread an earlier message
+    // while the agent was writing was dragged back down on the next token and
+    // could not read anything until the reply finished. Now the view follows
+    // only when it was already at the bottom; otherwise it stays put and
+    // `hasUnseenBelow` offers a way back. `force` is for the user's own actions
+    // -- sending, opening a chat -- where they expect to see the end.
+    _stickToBottom: true,
+    hasUnseenBelow: false,
+    _nearBottom(el) {
+      return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    },
+    onMessagesScroll() {
+      var el = document.getElementById('messages');
+      if (!el) return;
+      this._stickToBottom = this._nearBottom(el);
+      if (this._stickToBottom) this.hasUnseenBelow = false;
+    },
+    jumpToBottom() {
+      this._stickToBottom = true;
+      this.hasUnseenBelow = false;
+      this.scrollToBottom(true);
+    },
+    scrollToBottom(force) {
       var self = this;
       var el = document.getElementById('messages');
-      if (el) self.$nextTick(function() {
+      if (!el) return;
+      if (!force && !self._stickToBottom) {
+        self.hasUnseenBelow = true;
+        return;
+      }
+      if (force) { self._stickToBottom = true; self.hasUnseenBelow = false; }
+      self.$nextTick(function() {
         el.scrollTop = el.scrollHeight;
         // Debounce LaTeX rendering to avoid running on every streaming token
         if (self._latexTimer) clearTimeout(self._latexTimer);
@@ -1446,4 +2125,23 @@ function chatPage() {
     renderMarkdown: renderMarkdown,
     escapeHtml: escapeHtml
   };
+
+  // Permission requests are answered here too, not only in the floating
+  // assistant, mixed in from one place so the two chat surfaces cannot drift
+  // apart again.
+  //
+  // Copied onto the page object rather than the page object being copied onto
+  // the extras: `Object.assign` reads a getter and writes its *value*, so
+  // spreading this object would evaluate all ten of its computed properties
+  // once at creation and freeze them. `filteredSwitcherModels` and
+  // `filteredModelPicker` became empty arrays that never recomputed -- the
+  // model list read "No models found" and no conversation would open.
+  //
+  // Existing keys are never overwritten, so the page always wins over a shared
+  // default.
+  var extras = window.FreecoInlineApprovals ? window.FreecoInlineApprovals() : {};
+  Object.keys(extras).forEach(function (k) {
+    if (!(k in page)) page[k] = extras[k];
+  });
+  return page;
 }

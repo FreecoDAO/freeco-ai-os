@@ -377,7 +377,39 @@ pub(crate) fn copy_dir_all(
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandContainer {
     /// Image reference, digest-pinned where the upstream publishes one.
+    ///
+    /// Empty when `compose` is set: a stack has no single image.
+    #[serde(default)]
     pub image: String,
+
+    /// The containers making up a multi-container service.
+    ///
+    /// Run natively with `run`, `exec` and `network create` -- the three verbs
+    /// docker and podman both implement themselves. Compose is deliberately not
+    /// used: `podman compose` has no native implementation and shells out to
+    /// Docker's `docker-compose.exe`, so a stack defined in compose stops
+    /// working the moment Docker Desktop is uninstalled, while every
+    /// single-container hand keeps running. A service the user activated should
+    /// not depend on a different runtime being installed alongside.
+    ///
+    /// This is not a compose reimplementation. These stack definitions ship
+    /// with the product, so only the features they actually use exist here.
+    #[serde(default)]
+    pub services: Vec<HandService>,
+
+    /// A full compose file, for services that are a stack rather than one
+    /// container.
+    ///
+    /// A CRM is an application plus its database; accounting is the same shape.
+    /// Modelling those as a single image would mean either baking a database
+    /// into the app image or asking the user to run one themselves, and the
+    /// whole point of a service hand is that activating it is the only step.
+    ///
+    /// Written to the instance directory at start and brought up with
+    /// `compose up -d` under a per-instance project name, so two tenants
+    /// running the same hand get separate stacks rather than fighting over one.
+    #[serde(default)]
+    pub compose: Option<String>,
 
     /// Ports to publish, as `host:container`.
     ///
@@ -417,6 +449,69 @@ pub struct HandContainer {
     /// Restart policy passed to the runtime.
     #[serde(default = "default_restart_policy")]
     pub restart: String,
+
+    /// MCP endpoint to register once the service is healthy.
+    ///
+    /// Set only for services that speak MCP without a wrapper or a key. The
+    /// registration happens after the health check passes, because an endpoint
+    /// registered against a service that is not serving looks connected and is
+    /// dead -- and an agent that believes it has a working tool will keep
+    /// trying rather than reporting the service down.
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+}
+
+/// One container within a multi-container service hand.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HandService {
+    /// Name within the stack. Becomes the DNS alias other containers use, so
+    /// `db` is reachable as `db` from the application container.
+    pub name: String,
+
+    /// Image reference.
+    pub image: String,
+
+    /// Environment variables. `secret:NAME` resolves from the key store.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+
+    /// Ports to publish, as `host:container`. Usually only the entry point
+    /// publishes anything -- a database reachable from the host is a database
+    /// reachable from anything else on the host.
+    #[serde(default)]
+    pub ports: Vec<String>,
+
+    /// Named volumes or host paths, as `source:destination`.
+    #[serde(default)]
+    pub volumes: Vec<String>,
+
+    /// Overrides the image's default command.
+    #[serde(default)]
+    pub command: Vec<String>,
+
+    /// Command run inside the container to decide it is ready.
+    ///
+    /// Dependents wait for this to succeed. Without it "started" means the
+    /// process launched, and an application that connects to a database still
+    /// initialising its data directory crashes on first boot.
+    #[serde(default)]
+    pub health_cmd: Vec<String>,
+
+    /// Services that must be healthy before this one starts.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+impl HandContainer {
+    /// Is this a multi-container service rather than a single container?
+    pub fn is_stack(&self) -> bool {
+        !self.services.is_empty() || self.compose.is_some()
+    }
+
+    /// Is it defined natively, rather than as a compose file?
+    pub fn is_native_stack(&self) -> bool {
+        !self.services.is_empty()
+    }
 }
 
 fn default_health_timeout() -> u64 {

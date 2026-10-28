@@ -1,0 +1,12 @@
+{
+  "name": "freeco",
+  "displayName": "FreEco.ai team",
+  "version": "0.1.0",
+  "description": "Work as a member of your FreEco.ai agent team: read and claim tasks on the shared board, post to agents' chats, ask agents, and run commands in a FreEco sandbox container.",
+  "author": {
+    "name": "FreecoDAO"
+  },
+  "repository": "https://github.com/FreecoDAO/freeco-ai-os",
+  "license": "Apache-2.0 OR MIT",
+  "keywords": ["freeco", "agents", "mcp", "task-board", "sandbox"]
+}

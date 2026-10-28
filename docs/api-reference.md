@@ -1293,40 +1293,15 @@ List configured and connected MCP servers with their available tools.
 
 ### POST /mcp
 
-MCP HTTP transport endpoint. Accepts JSON-RPC 2.0 requests and exposes FreEco.ai tools via the MCP protocol to external clients.
+MCP endpoint (JSON-RPC 2.0, MCP streamable HTTP) through which Claude Code,
+Codex and other MCP clients join the FreEco team as a named agent. Requires
+`Authorization: Bearer <FREECO_MCP_TOKEN>` and refuses everything while that
+token is unset; `X-Freeco-As-Agent` names the agent, whose own tool
+permissions apply. Ten tools: task board, agent conversations, asking an
+agent, the agent's sandbox, the CRM. Full reference:
+[`mcp-endpoint.md`](mcp-endpoint.md).
 
-**Request Body** (JSON-RPC 2.0):
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/list",
-  "id": 1
-}
-```
-
-**Response** `200 OK`:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "tools": [
-      {
-        "name": "file_read",
-        "description": "Read a file's contents",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "path": {"type": "string"}
-          }
-        }
-      }
-    ]
-  },
-  "id": 1
-}
-```
+The previous `/mcp`, which ran any built-in tool with no token, is removed.
 
 ### GET /.well-known/agent.json
 
@@ -2357,7 +2332,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/clawhub/install` | Install from ClawHub |
 | **MCP & A2A** | | |
 | GET | `/api/mcp/servers` | MCP server connections |
-| POST | `/mcp` | MCP HTTP transport (JSON-RPC 2.0) |
+| POST | `/mcp` | MCP endpoint for Claude Code / Codex (token required) |
 | GET | `/.well-known/agent.json` | A2A agent card |
 | GET | `/a2a/agents` | A2A agent list |
 | POST | `/a2a/tasks/send` | Send A2A task |

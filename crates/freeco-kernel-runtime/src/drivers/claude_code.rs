@@ -61,7 +61,27 @@ pub struct ClaudeCodeDriver {
     active_pids: Arc<DashMap<String, u32>>,
     /// Message timeout in seconds. CLI subprocesses that exceed this are killed.
     message_timeout_secs: u64,
+    /// Run the CLI inside a container instead of on the host:
+    /// `(runtime binary, container name)`, from a CLI path such as
+    /// `podman:freeco-claude`. The container has the CLI installed and the
+    /// owner's token is passed per call, never stored in it.
+    container: Option<(String, String)>,
 }
+
+/// Claude Code's own tools, switched off for every call.
+///
+/// FreEco runs the tools: the agent's sandbox, the CRM, the task board, each
+/// with its capability checks and approvals. The CLI's built-ins would act on
+/// whatever machine the CLI runs on, outside all of that.
+const BUILTIN_TOOLS: &str = "Bash,BashOutput,KillShell,Edit,MultiEdit,Write,Read,Glob,Grep,LS,\
+NotebookEdit,NotebookRead,WebFetch,WebSearch,Task,TodoWrite,ExitPlanMode,SlashCommand";
+
+/// The CLI's own system prompt is replaced with this; the agent's real
+/// instructions travel in the input, where they have no length limit.
+const DRIVER_SYSTEM_PROMPT: &str = "You are the reasoning engine of an agent in FreEco.ai. \
+The input holds three sections: <system> (the agent's instructions - follow them as your \
+system prompt), <tools> (the tools you may call, if any) and <conversation>. Reply as the \
+Assistant to the last message of the conversation.";
 
 impl ClaudeCodeDriver {
     /// Create a new Claude Code driver.
@@ -78,14 +98,184 @@ impl ClaudeCodeDriver {
             );
         }
 
+        let cli_path = cli_path
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "claude".to_string());
+        let container = Self::parse_container(&cli_path);
         Self {
-            cli_path: cli_path
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "claude".to_string()),
+            cli_path,
             skip_permissions,
             active_pids: Arc::new(DashMap::new()),
             message_timeout_secs: DEFAULT_MESSAGE_TIMEOUT_SECS,
+            container,
         }
+    }
+
+    /// `podman:<name>` or `docker:<name>` — run the CLI in that container.
+    fn parse_container(cli_path: &str) -> Option<(String, String)> {
+        let (runtime, name) = cli_path.split_once(':')?;
+        let runtime = runtime.trim();
+        let name = name.trim();
+        let valid_name = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+        if (runtime == "podman" || runtime == "docker") && valid_name {
+            Some((runtime.to_string(), name.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// The command for one call, and the text to write to its stdin.
+    ///
+    /// The conversation goes through stdin, not `-p <prompt>`: a Windows
+    /// command line is capped near 32,000 characters, so passing the history
+    /// as an argument failed on any real conversation.
+    fn build_command(
+        &self,
+        request: &CompletionRequest,
+        streaming: bool,
+    ) -> (tokio::process::Command, String) {
+        let mut cmd = match &self.container {
+            Some((runtime, name)) => {
+                let mut c = tokio::process::Command::new(runtime);
+                // `-e NAME` without a value copies it from this process, so
+                // the token reaches the CLI without being written into the
+                // container's configuration.
+                c.args([
+                    "exec",
+                    "-i",
+                    "-e",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                    name,
+                    "claude",
+                ]);
+                c
+            }
+            None => tokio::process::Command::new(&self.cli_path),
+        };
+        cmd.arg("-p").arg("--output-format");
+        if streaming {
+            cmd.arg("stream-json").arg("--verbose");
+        } else {
+            cmd.arg("json");
+        }
+        cmd.arg("--system-prompt").arg(DRIVER_SYSTEM_PROMPT);
+        cmd.arg("--disallowedTools").arg(BUILTIN_TOOLS);
+        if self.skip_permissions {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        if let Some(model) = Self::model_flag(&request.model) {
+            cmd.arg("--model").arg(model);
+        }
+        Self::apply_env_filter(&mut cmd);
+        if self.container.is_none() {
+            // Inject HOME so the CLI can find its credentials (~/.claude/)
+            // when Freeco runs as a service without a login shell.
+            if let Some(home) = home_dir() {
+                cmd.env("HOME", &home);
+            }
+        }
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        (cmd, Self::build_input(request))
+    }
+
+    /// Write the input and close stdin, so the CLI sees end of input.
+    ///
+    /// On its own task: a large input written while the child is also
+    /// writing could otherwise fill both pipes and stall.
+    fn feed_stdin(child: &mut tokio::process::Child, input: String) {
+        if let Some(mut stdin) = child.stdin.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(input.as_bytes()).await;
+                let _ = stdin.shutdown().await;
+            });
+        }
+    }
+
+    /// The whole input for one call: instructions, tools, conversation.
+    fn build_input(request: &CompletionRequest) -> String {
+        let mut out = String::new();
+        if let Some(sys) = request.system.as_deref().filter(|s| !s.trim().is_empty()) {
+            out.push_str("<system>\n");
+            out.push_str(sys);
+            out.push_str("\n</system>\n\n");
+        }
+        if !request.tools.is_empty() {
+            out.push_str("<tools>\n");
+            out.push_str(
+                "You can call the tools below. To call one, write exactly\n\
+                 <function=TOOL_NAME>{\"parameter\": \"value\"}</function>\n\
+                 with the input as JSON matching the tool's schema. You may call several in one \
+                 reply. After your calls, stop: the results arrive in the next message, and only \
+                 then continue. These are your only tools. Never say you ran a tool you did not \
+                 call, and never invent a result.\n\n",
+            );
+            for tool in &request.tools {
+                out.push_str(&format!(
+                    "- {}: {}\n  input schema: {}\n",
+                    tool.name, tool.description, tool.input_schema
+                ));
+            }
+            out.push_str("</tools>\n\n");
+        }
+        out.push_str("<conversation>\n");
+        out.push_str(&Self::build_prompt(request));
+        out.push_str("\n</conversation>\n");
+        out
+    }
+
+    /// Turn `<function=…>` calls in a reply into real tool calls.
+    ///
+    /// Uses the same parser the agent loop falls back on, so the format the
+    /// tools section teaches is the one that is read back.
+    fn extract_tool_calls(
+        text: String,
+        request: &CompletionRequest,
+    ) -> (
+        Vec<ContentBlock>,
+        Vec<freeco_types::tool::ToolCall>,
+        StopReason,
+    ) {
+        let calls = if request.tools.is_empty() {
+            Vec::new()
+        } else {
+            crate::agent_loop::recover_text_tool_calls(&text, &request.tools)
+        };
+        if calls.is_empty() {
+            return (
+                vec![ContentBlock::Text {
+                    text,
+                    provider_metadata: None,
+                }],
+                Vec::new(),
+                StopReason::EndTurn,
+            );
+        }
+        let mut blocks = Vec::new();
+        let preamble = text
+            .find("<function=")
+            .map(|i| text[..i].trim())
+            .unwrap_or("");
+        if !preamble.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: preamble.to_string(),
+                provider_metadata: None,
+            });
+        }
+        for call in &calls {
+            blocks.push(ContentBlock::ToolUse {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: call.input.clone(),
+                provider_metadata: None,
+            });
+        }
+        (blocks, calls, StopReason::ToolUse)
     }
 
     /// Create a new Claude Code driver with a custom timeout.
@@ -161,8 +351,8 @@ impl ClaudeCodeDriver {
     /// Text blocks pass through verbatim. Image blocks are rendered as
     /// `[attachment: <media_type> image, ~N KB — not viewable on this
     /// provider]` so the model receives a positive signal that an
-    /// attachment arrived. ToolUse/ToolResult/Thinking are omitted —
-    /// the CLI manages its own tool loop.
+    /// attachment arrived. Tool calls and results are rendered as text;
+    /// thinking is omitted.
     fn render_content(content: &MessageContent) -> String {
         match content {
             MessageContent::Text(s) => s.clone(),
@@ -183,9 +373,27 @@ impl ClaudeCodeDriver {
                             "[attachment: {media_type} image, ~{approx_kb} KB — not viewable on this provider]"
                         ))
                     }
-                    ContentBlock::ToolUse { .. }
-                    | ContentBlock::ToolResult { .. }
-                    | ContentBlock::Thinking { .. }
+                    // Earlier tool calls and their results, in the form the
+                    // tools section teaches. Dropping them left the model
+                    // blind to every result and calling the same tool again.
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        Some(format!("<function={name}>{input}</function>"))
+                    }
+                    ContentBlock::ToolResult {
+                        tool_name,
+                        content,
+                        is_error,
+                        ..
+                    } => {
+                        let label = if tool_name.is_empty() {
+                            "tool"
+                        } else {
+                            tool_name.as_str()
+                        };
+                        let status = if *is_error { " (error)" } else { "" };
+                        Some(format!("[Result of {label}{status}]\n{content}"))
+                    }
+                    ContentBlock::Thinking { .. }
                     | ContentBlock::RedactedThinking { .. }
                     | ContentBlock::Unknown => None,
                 })
@@ -305,38 +513,7 @@ struct ClaudeStreamEvent {
 #[async_trait]
 impl LlmDriver for ClaudeCodeDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let prompt = Self::build_prompt(&request);
-        let model_flag = Self::model_flag(&request.model);
-
-        let mut cmd = tokio::process::Command::new(&self.cli_path);
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--output-format")
-            .arg("json");
-
-        if let Some(ref sys) = request.system {
-            cmd.arg("--system-prompt").arg(sys);
-        }
-
-        if self.skip_permissions {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-
-        if let Some(ref model) = model_flag {
-            cmd.arg("--model").arg(model);
-        }
-
-        Self::apply_env_filter(&mut cmd);
-
-        // Inject HOME so the CLI can find its credentials (~/.claude/) when
-        // Freeco runs as a service without a login shell.
-        if let Some(home) = home_dir() {
-            cmd.env("HOME", &home);
-        }
-        // Detach stdin so the CLI does not block waiting for interactive input.
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        let (mut cmd, input) = self.build_command(&request, false);
 
         debug!(cli = %self.cli_path, skip_permissions = self.skip_permissions, "Spawning Claude Code CLI");
 
@@ -348,6 +525,8 @@ impl LlmDriver for ClaudeCodeDriver {
                 e
             ))
         })?;
+
+        Self::feed_stdin(&mut child, input);
 
         // Track the PID using the model name as label (best identifier available)
         let pid_label = request.model.clone();
@@ -465,13 +644,11 @@ impl LlmDriver for ClaudeCodeDriver {
                 .or(parsed.text)
                 .unwrap_or_default();
             let usage = parsed.usage.unwrap_or_default();
+            let (content, tool_calls, stop_reason) = Self::extract_tool_calls(text, &request);
             return Ok(CompletionResponse {
-                content: vec![ContentBlock::Text {
-                    text: text.clone(),
-                    provider_metadata: None,
-                }],
-                stop_reason: StopReason::EndTurn,
-                tool_calls: Vec::new(),
+                content,
+                stop_reason,
+                tool_calls,
                 usage: TokenUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
@@ -481,13 +658,11 @@ impl LlmDriver for ClaudeCodeDriver {
 
         // Fallback: treat entire stdout as plain text
         let text = stdout.trim().to_string();
+        let (content, tool_calls, stop_reason) = Self::extract_tool_calls(text, &request);
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text,
-                provider_metadata: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            tool_calls: Vec::new(),
+            content,
+            stop_reason,
+            tool_calls,
             usage: TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -500,37 +675,7 @@ impl LlmDriver for ClaudeCodeDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let prompt = Self::build_prompt(&request);
-        let model_flag = Self::model_flag(&request.model);
-
-        let mut cmd = tokio::process::Command::new(&self.cli_path);
-        cmd.arg("-p")
-            .arg(&prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose");
-
-        if let Some(ref sys) = request.system {
-            cmd.arg("--system-prompt").arg(sys);
-        }
-
-        if self.skip_permissions {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-
-        if let Some(ref model) = model_flag {
-            cmd.arg("--model").arg(model);
-        }
-
-        Self::apply_env_filter(&mut cmd);
-
-        // Same HOME and stdin hygiene as the non-streaming path.
-        if let Some(home) = home_dir() {
-            cmd.env("HOME", &home);
-        }
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
+        let (mut cmd, input) = self.build_command(&request, true);
 
         debug!(cli = %self.cli_path, "Spawning Claude Code CLI (streaming)");
 
@@ -543,6 +688,8 @@ impl LlmDriver for ClaudeCodeDriver {
         })?;
 
         // Track PID
+        Self::feed_stdin(&mut child, input);
+
         let pid_label = format!("{}-stream", request.model);
         if let Some(pid) = child.id() {
             self.active_pids.insert(pid_label.clone(), pid);
@@ -698,13 +845,11 @@ impl LlmDriver for ClaudeCodeDriver {
             })
             .await;
 
+        let (content, tool_calls, stop_reason) = Self::extract_tool_calls(full_text, &request);
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text: full_text,
-                provider_metadata: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            tool_calls: Vec::new(),
+            content,
+            stop_reason,
+            tool_calls,
             usage: final_usage,
         })
     }
@@ -910,5 +1055,101 @@ mod tests {
         assert!(SENSITIVE_ENV_EXACT.contains(&"GEMINI_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"GROQ_API_KEY"));
         assert!(SENSITIVE_ENV_EXACT.contains(&"DEEPSEEK_API_KEY"));
+    }
+
+    fn tool_request() -> CompletionRequest {
+        use freeco_types::message::Message;
+        use freeco_types::tool::ToolDefinition;
+        CompletionRequest {
+            model: "claude-code/sonnet".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: MessageContent::text("List my CRM tasks"),
+                    ..Default::default()
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "crm_api".into(),
+                        input: serde_json::json!({"path": "/rest/tasks"}),
+                        provider_metadata: None,
+                    }]),
+                    ..Default::default()
+                },
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "t1".into(),
+                        tool_name: "crm_api".into(),
+                        content: "{\"tasks\":[]}".into(),
+                        is_error: false,
+                    }]),
+                    ..Default::default()
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "crm_api".into(),
+                description: "Read and change the CRM".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: Some("You are the CRM agent.".to_string()),
+            thinking: None,
+        }
+    }
+
+    /// The model is told the tools and sees what earlier calls returned;
+    /// both were missing, so a Claude-backed agent could not use FreEco's
+    /// tools and could not see results if it had.
+    #[test]
+    fn input_carries_instructions_tools_and_tool_history() {
+        let input = ClaudeCodeDriver::build_input(&tool_request());
+        assert!(input.contains("<system>\nYou are the CRM agent."));
+        assert!(input.contains("- crm_api: Read and change the CRM"));
+        assert!(input.contains("<function=TOOL_NAME>"));
+        assert!(input.contains(r#"<function=crm_api>{"path":"/rest/tasks"}</function>"#));
+        assert!(input.contains("[Result of crm_api]\n{\"tasks\":[]}"));
+    }
+
+    #[test]
+    fn tool_calls_in_a_reply_become_real_calls() {
+        let req = tool_request();
+        let (content, calls, stop) = ClaudeCodeDriver::extract_tool_calls(
+            r#"Checking. <function=crm_api>{"path": "/rest/tasks?limit=5"}</function>"#.to_string(),
+            &req,
+        );
+        assert_eq!(stop, StopReason::ToolUse);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "crm_api");
+        assert_eq!(calls[0].input["path"], "/rest/tasks?limit=5");
+        assert!(matches!(&content[0], ContentBlock::Text { text, .. } if text == "Checking."));
+
+        // A tool the agent does not hold is not called.
+        let (_, calls, stop) = ClaudeCodeDriver::extract_tool_calls(
+            r#"<function=shell_exec>{"command": "rm -rf /"}</function>"#.to_string(),
+            &req,
+        );
+        assert!(calls.is_empty());
+        assert_eq!(stop, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn container_mode_is_parsed_from_the_cli_path() {
+        assert_eq!(
+            ClaudeCodeDriver::parse_container("podman:freeco-claude"),
+            Some(("podman".into(), "freeco-claude".into()))
+        );
+        assert_eq!(ClaudeCodeDriver::parse_container("claude"), None);
+        assert_eq!(
+            ClaudeCodeDriver::parse_container("C:\\bin\\claude.exe"),
+            None
+        );
+        assert_eq!(
+            ClaudeCodeDriver::parse_container("podman:bad name;rm"),
+            None
+        );
     }
 }

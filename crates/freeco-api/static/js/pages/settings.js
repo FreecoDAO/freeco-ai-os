@@ -4,6 +4,10 @@
 function settingsPage() {
   return {
     tab: 'providers',
+    // Dictation language. Empty means "follow the browser", which is what this
+    // used to do unconditionally -- and what fails when the browser's speech
+    // service does not offer the machine's locale.
+    sttLang: (window.FreecoVoiceCfg && window.FreecoVoiceCfg.savedLang()) || '',
     // People / accounts (RBAC)
     users: [],
     adminUsername: 'admin',
@@ -81,6 +85,12 @@ function settingsPage() {
     services: [],
     servicesLoaded: false,
     dockerReady: false,
+    containerRuntime: null,   // "docker" | "podman" | null when neither answers
+    runtimeStatus: null,      // { state: running|stopped|not_installed, fix }
+    // Podman VM problems whose fix runs sudo inside the VM. Shown with the
+    // literal command and fixed only when the user presses the button.
+    vmIssues: [],
+    vmFixing: '',
     svc: { phase: 'idle', detail: '', percent: -1, service: '', running: false },
     svcPoll: null,
 
@@ -89,6 +99,13 @@ function settingsPage() {
         var data = await FreecoAPI.get('/api/services');
         this.services = data.services || [];
         this.dockerReady = !!data.docker_ready;
+        // Which of docker/podman was found, so the page can name it instead of
+        // making the user guess which one it decided to use.
+        this.containerRuntime = data.runtime || null;
+        // Full state: running / stopped / not_installed. "Stopped" has a
+        // one-line fix and used to be reported as "install Docker Desktop".
+        this.runtimeStatus = data.runtime_status || null;
+        this.vmIssues = data.vm_issues || [];
         this.servicesLoaded = true;
       } catch(e) {
         this.servicesLoaded = true;
@@ -100,6 +117,41 @@ function settingsPage() {
         this.svc = st;
         if (st.running) this.pollServices();
       } catch(e) { /* silent */ }
+    },
+
+    // The only route by which a Podman VM fix runs: the user presses Fix on an
+    // issue whose command is shown right beside the button.
+    async fixVmIssue(issue) {
+      if (this.vmFixing) return;
+      this.vmFixing = issue.id;
+      try {
+        var res = await FreecoAPI.post('/api/services/vm-fix/' + encodeURIComponent(issue.id), {});
+        FreecoToast.success(res.message || 'Fixed.');
+      } catch(e) {
+        FreecoToast.error('Fix did not work: ' + (e.message || 'error'));
+      }
+      this.vmFixing = '';
+      await this.loadServices();
+    },
+
+    // Keys typed into the Connect field, per service. Cleared once stored, so
+    // the page never keeps a key around after it has gone to the vault.
+    svcKeys: {},
+    svcConnecting: '',
+
+    async connectService(id) {
+      var key = (this.svcKeys[id] || '').trim();
+      if (!key || this.svcConnecting) return;
+      this.svcConnecting = id;
+      try {
+        var res = await FreecoAPI.post('/api/services/' + encodeURIComponent(id) + '/connect', { key: key });
+        this.svcKeys[id] = '';
+        FreecoToast.success(res.message || 'Connected.');
+        await this.loadServices();
+      } catch(e) {
+        FreecoToast.error(e.message || 'The key was not accepted.');
+      }
+      this.svcConnecting = '';
     },
 
     async installService(id) {

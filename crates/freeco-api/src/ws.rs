@@ -648,11 +648,18 @@ async fn handle_text_message(
             // Resolve file attachments into image content blocks
             let mut has_images = false;
             let mut ws_content_blocks: Option<Vec<freeco_types::message::ContentBlock>> = None;
+            let mut content = content;
             if let Some(attachments) = parsed["attachments"].as_array() {
                 let refs: Vec<crate::types::AttachmentRef> = attachments
                     .iter()
                     .filter_map(|a| serde_json::from_value(a.clone()).ok())
                     .collect();
+                // Every attachment, not only images, goes into the agent's
+                // workspace, and the message says where.
+                if let Some(note) = crate::routes::stage_attachments(&state.kernel, agent_id, &refs)
+                {
+                    content.push_str(&note);
+                }
                 if !refs.is_empty() {
                     let image_blocks = crate::routes::resolve_attachments(&refs);
                     if !image_blocks.is_empty() {

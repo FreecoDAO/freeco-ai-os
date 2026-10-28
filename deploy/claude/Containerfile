@@ -1,0 +1,29 @@
+# Claude Code CLI for FreEco.ai agents, in a container instead of on the host.
+#
+# FreEco's `claude-code` provider runs the CLI as an agent's model. Installed
+# on Windows, the CLI and its built-in tools would run with the owner's full
+# account; here it runs as the unprivileged `agent` user, and the driver
+# switches its built-in tools off anyway — FreEco executes the tools itself.
+#
+# Built on the sandbox image, which already carries Node 22, so the only
+# download is the CLI package.
+#
+#   podman build -t localhost/freeco-claude:1 -f deploy/claude/Containerfile deploy/claude
+#   podman run -d --name freeco-claude --restart unless-stopped localhost/freeco-claude:1
+#
+# The owner's token is never stored in the image or the container: the
+# driver passes CLAUDE_CODE_OAUTH_TOKEN on each `podman exec`. Create it once
+# with `claude setup-token` and save it in the FreEco vault under that name.
+#
+# Agent config:  provider = "claude-code", base_url = "podman:freeco-claude"
+FROM localhost/freeco-sandbox:t3
+
+USER root
+RUN npm install -g @anthropic-ai/claude-code \
+    && npm cache clean --force \
+    && claude --version
+
+USER agent
+WORKDIR /workspace
+# Kept alive so each call is a quick `exec` rather than a container start.
+CMD ["sleep", "infinity"]

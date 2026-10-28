@@ -65,18 +65,21 @@ pub struct Policy {
 }
 
 impl Default for Policy {
-    /// Masks by default, blocks what has no legitimate reason to reach a model.
+    /// Masks everything it finds; blocks nothing by default.
     ///
-    /// Private keys and card numbers are blocked rather than masked because
-    /// there is no prompt that is improved by containing them, and a mask still
-    /// means the value was written into a request body on its way out.
-    /// Addresses and emails are masked, not blocked, because ordinary work
-    /// legitimately involves them and blocking would make the product refuse
-    /// normal tasks.
+    /// Card numbers and private keys used to be blocked, on the reasoning that
+    /// no prompt is improved by containing them. But a block refuses the whole
+    /// request, and the offending text stays in the conversation history, so
+    /// every later request is refused too: one false positive bricks the
+    /// conversation for good. That happened -- a phone number in a tool call
+    /// passed the card checksum and the CEO's chat stopped answering. A mask
+    /// still keeps the real value away from the provider, and a false positive
+    /// costs nothing because the value is restored in the reply and in tool
+    /// arguments. `Action::Block` stays available for a stricter policy.
     fn default() -> Self {
         let mut rules = HashMap::new();
-        rules.insert(DataKind::PrivateKey.as_str().to_string(), Action::Block);
-        rules.insert(DataKind::CreditCard.as_str().to_string(), Action::Block);
+        rules.insert(DataKind::PrivateKey.as_str().to_string(), Action::Mask);
+        rules.insert(DataKind::CreditCard.as_str().to_string(), Action::Mask);
         rules.insert(DataKind::ApiKey.as_str().to_string(), Action::Mask);
         rules.insert(DataKind::Iban.as_str().to_string(), Action::Mask);
         rules.insert(DataKind::Email.as_str().to_string(), Action::Mask);
@@ -327,9 +330,25 @@ mod tests {
         assert_eq!(ta, tb);
     }
 
+    /// A card number is masked, not refused. A refusal bricks the conversation:
+    /// the text stays in history and every later request is refused with it.
     #[test]
-    fn blocks_what_has_no_business_leaving() {
+    fn a_card_is_masked_and_restored_not_refused() {
         let g = gw();
+        let original = "card 4242 4242 4242 4242";
+        let (sent, report) = g.process_outbound(original).unwrap();
+        assert!(!sent.contains("4242 4242"), "card still present: {sent}");
+        assert_eq!(report.masked, 1);
+        assert_eq!(g.process_inbound(&sent).unwrap(), original);
+    }
+
+    /// A stricter policy can still refuse; the mechanism is kept.
+    #[test]
+    fn a_block_policy_still_refuses() {
+        let conn = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let mut policy = Policy::default();
+        policy.set(DataKind::CreditCard, Action::Block);
+        let g = DataGateway::new(conn, policy).unwrap();
         let err = g.process_outbound("card 4242 4242 4242 4242").unwrap_err();
         assert!(matches!(err, GatewayError::Blocked(_)));
     }

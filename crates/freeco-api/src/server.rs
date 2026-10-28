@@ -58,6 +58,7 @@ pub async fn build_router(
         frozen_agents: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
         security: Arc::new(crate::security::SecurityService::default()),
     });
+    start_runtime_watchdog(kernel.clone());
     start_backup_scheduler(
         kernel.config.home_dir.clone(),
         kernel.config.data_dir.clone(),
@@ -68,6 +69,30 @@ pub async fn build_router(
             .clone()
             .unwrap_or_else(|| kernel.config.data_dir.join("freeco.db")),
     );
+
+    // Learn what each key is actually entitled to, in the background.
+    //
+    // Model availability is two questions -- is there a key, and does that key
+    // reach this model -- and only the first was ever asked at boot. The probe
+    // that answers the second existed but a button in Settings was its only
+    // caller, so on a machine where nobody pressed it `served_models.json`
+    // never appeared and every model of a keyed provider was offered. Doing it
+    // here makes the picker honest from the first page load instead.
+    //
+    // Detached and never awaited: the control plane must come up whether or
+    // not a provider answers, so a slow or unreachable one costs nothing.
+    {
+        let probe_state = state.clone();
+        tokio::spawn(async move {
+            let summary = crate::routes::probe_and_register_models(&probe_state).await;
+            info!(
+                probed = ?summary.checked,
+                skipped = ?summary.skipped,
+                added = summary.added.len(),
+                "model entitlement probe complete"
+            );
+        });
+    }
 
     // Start WS cron broadcaster — subscribes to kernel event bus and pushes
     // cron job results to all connected WebSocket clients in real-time.
@@ -141,6 +166,7 @@ pub async fn build_router(
     // server is bound to a non-loopback address without an explicit opt-in,
     // shout about it. The middleware will reject non-loopback traffic.
     let bind_is_loopback = listen_addr.ip().is_loopback();
+    crate::csrf::set_listens_on_loopback(bind_is_loopback);
     if api_key.is_empty() && !state.kernel.config.auth.enabled && !bind_is_loopback {
         if allow_no_auth {
             tracing::warn!(
@@ -175,6 +201,7 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        .route("/fonts/{name}", axum::routing::get(webchat::font_file))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/manifest.json", axum::routing::get(webchat::manifest_json))
@@ -249,7 +276,7 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/history",
-            axum::routing::delete(routes::clear_agent_history),
+            axum::routing::get(routes::get_agent_history).delete(routes::clear_agent_history),
         )
         .route(
             "/api/agents/{id}/session/compact",
@@ -258,6 +285,15 @@ pub async fn build_router(
         .route(
             "/api/agents/{id}/stop",
             axum::routing::post(routes::stop_agent),
+        )
+        .route("/api/assistant", axum::routing::get(routes::get_assistant))
+        .route(
+            "/api/config/default-model",
+            axum::routing::put(routes::set_default_model),
+        )
+        .route(
+            "/api/sessions/route",
+            axum::routing::post(routes::route_session),
         )
         .route(
             "/api/agents/{id}/model",
@@ -417,6 +453,10 @@ pub async fn build_router(
         .route(
             "/api/backups/restore",
             axum::routing::post(routes::restore_backup),
+        )
+        .route(
+            "/api/backups/services",
+            axum::routing::post(routes::backup_service_data),
         )
         // Skills endpoints
         .route("/api/skills", axum::routing::get(routes::list_skills))
@@ -605,7 +645,7 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams",
-            axum::routing::post(crate::org_routes::create_team),
+            axum::routing::get(crate::org_routes::list_teams).post(crate::org_routes::create_team),
         )
         .route(
             "/api/org/projects/{id}/sessions",
@@ -670,6 +710,30 @@ pub async fn build_router(
             axum::routing::post(crate::services::install_service),
         )
         .route(
+            "/api/services/vm-fix/{id}",
+            axum::routing::post(crate::services::vm_fix),
+        )
+        .route(
+            "/api/services/{id}/connect",
+            axum::routing::post(crate::crm::connect_service),
+        )
+        // Secrets typed into a chat: found before sending, kept in the vault.
+        .route(
+            "/api/gateway/scan",
+            axum::routing::post(crate::secret_guard::scan),
+        )
+        .route(
+            "/api/vault/secrets",
+            axum::routing::post(crate::secret_guard::save_secret),
+        )
+        // MCP over Streamable HTTP: external clients as team members.
+        .route(
+            "/mcp",
+            axum::routing::post(crate::mcp_http::handle)
+                .get(crate::mcp_http::method_not_allowed)
+                .delete(crate::mcp_http::method_not_allowed),
+        )
+        .route(
             "/api/system/freeze",
             axum::routing::get(routes::get_freeze)
                 .post(routes::freeze_system)
@@ -703,6 +767,11 @@ pub async fn build_router(
             axum::routing::get(routes::usage_by_model),
         )
         .route("/api/usage/daily", axum::routing::get(routes::usage_daily))
+        // By agent, model, team, project and company, from the stored calls.
+        .route(
+            "/api/usage/breakdown",
+            axum::routing::get(crate::usage_breakdown::breakdown),
+        )
         // Budget endpoints
         .route(
             "/api/budget",
@@ -717,7 +786,76 @@ pub async fn build_router(
             axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
         )
         // Session endpoints
+        // The working surface around a conversation -- see chat_tools.rs.
+        .route(
+            "/api/agents/{id}/workspace/tree",
+            axum::routing::get(crate::chat_tools::workspace_tree),
+        )
+        .route(
+            "/api/agents/{id}/workspace/file",
+            axum::routing::get(crate::chat_tools::workspace_file),
+        )
+        .route(
+            "/api/agents/{id}/workspace/changes",
+            axum::routing::get(crate::chat_tools::workspace_changes),
+        )
+        .route(
+            "/api/agents/{id}/artifacts",
+            axum::routing::get(crate::chat_tools::artifacts),
+        )
+        .route(
+            "/api/agents/{id}/terminal",
+            axum::routing::post(crate::chat_tools::terminal),
+        )
+        .route(
+            "/api/agents/{id}/browser/screenshot",
+            axum::routing::get(crate::chat_tools::browser_screenshot),
+        )
+        .route(
+            "/api/agents/{id}/background",
+            axum::routing::get(crate::chat_tools::background),
+        )
+        .route(
+            "/api/agents/{id}/conversation",
+            axum::routing::delete(crate::chat_tools::conversation_delete),
+        )
+        .route(
+            "/api/agents/{id}/conversation/label",
+            axum::routing::put(crate::chat_tools::conversation_label),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archive",
+            axum::routing::post(crate::chat_tools::conversation_archive),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archives",
+            axum::routing::get(crate::chat_tools::conversation_archives),
+        )
+        .route(
+            "/api/agents/{id}/conversation/archives/{file}/restore",
+            axum::routing::post(crate::chat_tools::conversation_restore),
+        )
+        .route(
+            "/api/agents/{id}/conversation/fork",
+            axum::routing::post(crate::chat_tools::conversation_fork),
+        )
+        .route(
+            "/api/agents/{id}/output-style",
+            axum::routing::put(crate::chat_tools::set_output_style),
+        )
+        .route(
+            "/api/agents/{id}/tasks",
+            axum::routing::post(crate::chat_tools::create_task),
+        )
+        .route(
+            "/api/output-styles",
+            axum::routing::get(crate::chat_tools::output_styles),
+        )
         .route("/api/sessions", axum::routing::get(routes::list_sessions))
+        .route(
+            "/api/sessions/search",
+            axum::routing::get(routes::search_sessions),
+        )
         .route("/api/tenancy", axum::routing::get(routes::get_tenancy))
         .route(
             "/api/tenancy/users",
@@ -930,8 +1068,6 @@ pub async fn build_router(
             "/api/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
-        // MCP HTTP endpoint (exposes MCP protocol over HTTP)
-        .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -974,6 +1110,12 @@ pub async fn build_router(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        // Above auth in the stack, so it runs first: a cross-site request is
+        // refused before anything looks at who is asking. With dashboard auth
+        // off, every loopback request is trusted, and a page on any website can
+        // reach 127.0.0.1 -- CORS stops the reply being read, not the request
+        // arriving, which is no help when the request itself is the damage.
+        .layer(axum::middleware::from_fn(crate::csrf::guard))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())
@@ -982,6 +1124,222 @@ pub async fn build_router(
         .with_state(state.clone());
 
     (app, state)
+}
+
+/// Watch the container runtime, and say something the first time it changes.
+///
+/// `runtime()` caches the runtime name once a probe succeeds, so a VM that
+/// stops afterwards is invisible to it: every container operation fails with
+/// podman's own error and nothing reports why. Here that gap gets closed on a
+/// 60s tick.
+///
+/// Two deliberate restraints, both learned from this codebase:
+///
+/// Logging happens only on a **transition**. A warning every minute about a
+/// runtime the user deliberately stopped is noise, and a log people learn to
+/// ignore is worse than no log.
+///
+/// Auto-start is **rate-limited to once every ten minutes**. The agent
+/// auto-recovery loop performed 94 restarts in a single run precisely because
+/// nothing limited it, and starting a VM is far more expensive than restarting
+/// an agent.
+fn start_runtime_watchdog(kernel: Arc<freeco_kernel::FreecoKernel>) {
+    use freeco_hands::container::RuntimeStatus;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut previous: Option<RuntimeStatus> = None;
+        let mut last_start_attempt: Option<tokio::time::Instant> = None;
+        // Podman VM problems seen on the last tick, so each is logged once when
+        // it appears and once when it clears rather than every minute.
+        let mut previous_vm_issues: Vec<&'static str> = Vec::new();
+        let mut last_tick_wall = std::time::SystemTime::now();
+        loop {
+            interval.tick().await;
+
+            // Waking from sleep shows up as a jump in wall-clock time between
+            // two one-minute ticks. The Podman VM rarely survives sleep intact,
+            // and a start attempt made in the seconds before the PC dozed off
+            // again would otherwise hold the next one back for ten minutes --
+            // on a laptop that sleeps several times a day, long enough for the
+            // owner to find every service down.
+            let now_wall = std::time::SystemTime::now();
+            let gap = now_wall.duration_since(last_tick_wall).unwrap_or_default();
+            last_tick_wall = now_wall;
+            if gap > std::time::Duration::from_secs(180) {
+                info!(
+                    asleep_secs = gap.as_secs(),
+                    "resumed from sleep; rechecking the container runtime now"
+                );
+                last_start_attempt = None;
+                previous = None;
+            }
+
+            let status = freeco_hands::container::runtime_status().await;
+
+            if previous.as_ref() != Some(&status) {
+                match &status {
+                    RuntimeStatus::Running { name } => {
+                        info!(runtime = %name, "container runtime is available")
+                    }
+                    RuntimeStatus::Stopped => tracing::warn!(
+                        "container runtime stopped — service hands cannot run. \
+                         Recover with `podman machine start`"
+                    ),
+                    RuntimeStatus::NotInstalled => {
+                        tracing::warn!("no container runtime found — service hands are unavailable")
+                    }
+                }
+                previous = Some(status.clone());
+            }
+
+            // While the runtime is up, look for VM problems that stop services
+            // working: a missing /etc/resolv.conf (every `run` fails while the
+            // probe above still reports healthy) and a disabled
+            // podman-restart.service (services stay down after every reboot).
+            // Both fixes need sudo inside the VM, which is the user's decision,
+            // so the watchdog only reports them -- in the log when one appears
+            // or clears, and on Settings > Services, which offers the fix as a
+            // button.
+            if matches!(status, RuntimeStatus::Running { .. }) {
+                let issues = freeco_hands::container::vm_issues().await;
+                let ids: Vec<&'static str> = issues.iter().map(|issue| issue.id).collect();
+                if ids != previous_vm_issues {
+                    for issue in issues
+                        .iter()
+                        .filter(|issue| !previous_vm_issues.contains(&issue.id))
+                    {
+                        tracing::warn!(
+                            issue = issue.id,
+                            "{} -- {} Fix it from Settings > Services.",
+                            issue.title,
+                            issue.problem
+                        );
+                    }
+                    for gone in previous_vm_issues.iter().filter(|id| !ids.contains(*id)) {
+                        info!(issue = %gone, "Podman VM issue resolved");
+                    }
+                    previous_vm_issues = ids;
+                }
+
+                // Put back service hands whose containers are gone.
+                //
+                // `restart: unless-stopped` is a runtime policy, and it does not
+                // survive the VM itself stopping: the whole Podman machine comes
+                // back with every container exited. The instance records still
+                // say Active, so the product reports services that are not
+                // running -- exactly the "Active while serving nothing" failure
+                // the container wiring was written to end, arriving by a
+                // different route. The CRM was down for a day this way.
+                //
+                // Reconciling here rather than on next use means the user finds
+                // it already running instead of discovering it broken.
+                for inst in kernel.hand_registry.list_instances() {
+                    let is_service = kernel
+                        .hand_registry
+                        .get_definition(&inst.hand_id)
+                        .and_then(|d| d.container.clone());
+                    let Some(spec) = is_service else { continue };
+
+                    let tenant = inst.tenant_id.clone();
+                    let alive = if spec.is_native_stack() {
+                        // A stack is up only if every one of its containers is.
+                        let mut all = true;
+                        for svc in &spec.services {
+                            let name = freeco_hands::container::service_container_name(
+                                &inst.hand_id,
+                                tenant.as_deref(),
+                                &svc.name,
+                            );
+                            if !freeco_hands::container::is_running(&name).await {
+                                all = false;
+                                break;
+                            }
+                        }
+                        all
+                    } else {
+                        let name = freeco_hands::container::container_name(
+                            &inst.hand_id,
+                            tenant.as_deref(),
+                        );
+                        freeco_hands::container::is_running(&name).await
+                    };
+                    if alive {
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        hand = %inst.hand_id,
+                        "service hand is recorded active but its containers are gone — restarting"
+                    );
+                    match kernel
+                        .start_hand_service(&inst.hand_id, &inst.instance_id)
+                        .await
+                    {
+                        Ok(_) => tracing::info!(hand = %inst.hand_id, "service hand restarted"),
+                        // Reported, not retried in a tight loop: the next tick is
+                        // a minute away, which is the right pace for something
+                        // that pulls images and waits on health checks.
+                        Err(e) => tracing::warn!(
+                            hand = %inst.hand_id,
+                            error = %e,
+                            "could not restart service hand"
+                        ),
+                    }
+                }
+            }
+
+            let mut action = "none";
+            if status == RuntimeStatus::Stopped {
+                let due = last_start_attempt
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(600));
+                if due {
+                    last_start_attempt = Some(tokio::time::Instant::now());
+                    if freeco_hands::container::try_start_runtime().await {
+                        info!("container runtime recovered");
+                        previous = None; // re-announce the new state next tick
+                        action = "started runtime: recovered";
+                    } else {
+                        action = "started runtime: FAILED";
+                    }
+                } else {
+                    action = "runtime stopped; waiting out the retry backoff";
+                }
+            }
+            write_watchdog_heartbeat(&kernel.config.home_dir, &status, gap.as_secs(), action);
+        }
+    });
+}
+
+/// Record what the watchdog saw and did on its last tick.
+///
+/// The daemon's log goes wherever the process that launched it points stdout,
+/// and a daemon started without that redirected leaves no trace: when the
+/// container runtime failed to come back after sleep, there was no way to tell
+/// whether the watchdog had tried, failed, or never run. This file is written
+/// by the watchdog itself, on every tick, so the question always has an
+/// answer. One small overwrite per minute, never an append that grows.
+fn write_watchdog_heartbeat(
+    home: &std::path::Path,
+    status: &freeco_hands::container::RuntimeStatus,
+    gap_secs: u64,
+    action: &str,
+) {
+    let dir = home.join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let body = serde_json::json!({
+        "checked_at": chrono::Utc::now().to_rfc3339(),
+        "runtime": format!("{status:?}"),
+        "seconds_since_previous_tick": gap_secs,
+        "resumed_from_sleep": gap_secs > 180,
+        "action": action,
+        "pid": std::process::id(),
+    });
+    let _ = std::fs::write(
+        dir.join("watchdog.json"),
+        serde_json::to_string_pretty(&body).unwrap_or_default(),
+    );
 }
 
 /// Create an encrypted recovery point daily. Individual failures are logged and
@@ -995,6 +1353,8 @@ fn start_backup_scheduler(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
         interval.tick().await;
         loop {
+            // Taken before `home_dir` moves into the blocking task below.
+            let backups_dir = home_dir.join("backups");
             let home_dir = home_dir.clone();
             let data_dir = data_dir.clone();
             let db_path = db_path.clone();
@@ -1006,6 +1366,18 @@ fn start_backup_scheduler(
                 Ok(Ok(backup)) => info!(path = %backup.path, "scheduled encrypted backup created"),
                 Ok(Err(error)) => tracing::warn!(%error, "scheduled encrypted backup failed"),
                 Err(error) => tracing::warn!(%error, "scheduled backup task failed"),
+            }
+            // The archive above covers ~/.freeco-ai only. Service data lives in
+            // container volumes, which it never reached -- so it is saved here,
+            // on the same schedule and with the same retention.
+            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+                Ok(r) => info!(
+                    directory = %r.directory,
+                    saved = r.saved.len(),
+                    failed = r.failed.len(),
+                    "scheduled service data backup"
+                ),
+                Err(error) => tracing::warn!(%error, "scheduled service data backup failed"),
             }
             interval.tick().await;
         }

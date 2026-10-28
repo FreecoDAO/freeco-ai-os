@@ -10,6 +10,521 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reached limit hands over to the fallback chain. Rate limits and used-up
+  allowances (a Claude subscription's 5-hour limit, a provider's quota) never
+  fell back, so the agent stopped until the limit reset even with GLM and
+  Nemotron configured behind it. A wrong or revoked key still does not.
+- The Claude Code provider passes the conversation on standard input. It was
+  a command-line argument, which Windows caps near 32,000 characters, so any
+  real conversation failed to start.
+- The data gateway now protects the chat. It masked secrets only on the
+  non-streaming path, which background ticks use; the dashboard chat and the
+  popup stream, so everything typed there reached the model provider unscanned
+  while the log showed the gateway busy. It now also covers the system prompt,
+  tool results and tool arguments (only plain-text messages were scanned), and
+  restores real values in tool-call arguments so a masked address or key still
+  works when a tool uses it.
+- A number that passes the card checksum no longer bricks a conversation.
+  Cards and private keys were refused outright; the text stays in history, so
+  every later request was refused too. A phone number in a tool call did that
+  to the CEO's chat. Both are now masked (restored in replies and tool
+  arguments), and digits running into letters -- message ids, hashes -- are
+  not read as cards at all.
+- Dictation works with a local speech server. FreEco.ai always asked for
+  OpenAI's `whisper-1`, which speaches maps to a model not installed here, so
+  every dictation failed with a 404. `[media] audio_model` names the model to
+  request.
+- Read-aloud in the main chat no longer says "asterisk asterisk". Markdown is
+  stripped before speaking, as the popup already did, and the main chat uses
+  the voice chosen in the assistant (or the best local "Natural" voice for the
+  language) instead of the browser's default robotic one.
+- The gateway recognises JSON Web Tokens -- how self-hosted services such as
+  Twenty issue API keys, with no vendor prefix -- and values announced as
+  secrets ("CRM key: …", `CRM_API_KEY=…`, "password is …"). Ordinary prose
+  around the same words is left alone.
+- Agents can reach the services FreEco.ai installs from their sandbox. The
+  services listen on the VM's loopback, which a sandbox on podman's default
+  network cannot see: tested, every one refused, and agents asked for a host
+  shell instead. A networked podman sandbox now gets exactly the service ports
+  forwarded (`[docker] service_ports`, default CRM 3200, voice 3010/8000,
+  speech 8010, accounting 8080) and no other host port. The voice, speech,
+  accounting and CRM agents get `sandbox_exec`, and are told the addresses.
+- Backups: the database's write-ahead log is checkpointed first (uncheckpointed
+  it had reached 106 MB beside a 24 MB database); an archive a restore would
+  refuse is no longer written -- it was reported as a success, and pruning then
+  deleted the oldest good archive to make room; the restore limit is 512 MB.
+
+- Conversations show up in the chat again. The chat loaded the agent's compact
+  cross-channel memory instead of the conversation it is in, and built those
+  messages in a shape the page does not draw -- so whole conversations looked
+  empty (the CEO's chat showed none of its 116 messages) and "load earlier" fetched more of
+  the wrong thing. It now opens the agent's current conversation, tool steps
+  included, draws the latest 200 and shows the rest instantly on request; the
+  switcher names the conversation you are in.
+- Paid models were recorded as free. GLM 5.3, 5.3 Flash and 5.2 on Novita had
+  a price of 0 in the catalog, so 26 M+ tokens cost "$0"; they now carry
+  Novita's published prices.
+- The Budget page shows where the money went: spend, calls and tokens by
+  agent, team, project, company and model, for today, 7 days, 30 days or all
+  time, from the stored calls. Its agent list only included agents with a
+  spending limit and was empty; per-agent usage read an in-memory counter that
+  starts at zero on every restart. Calls recorded at $0 before a price was
+  known are estimated at today's price and marked.
+- The assistant button no longer trembles. Its logo bobbed and rotated every
+  3.4 seconds, and wiggled continuously under the mouse.
+- Pausing a hand stops it. Pause only set a flag nothing read, so a paused
+  agent kept waking every hour and spending tokens; a paused hand was also
+  dropped from the saved state and gone after a restart. Its agent's loop now
+  stops, resumes on resume, and stays paused across restarts. The service
+  container keeps running: the agent sleeps, the service does not.
+- A reactive agent with an `[autonomous]` block (freeco-shopping) is no longer
+  flagged unresponsive every minute. The block carries limits, not a schedule.
+- Agents that list `docker_exec` see the sandbox tool again. The rename to
+  `sandbox_exec` was honoured when running a tool but not when choosing which
+  tools to show the model, so those agents silently lost their sandbox.
+- Deleting or restoring a conversation never destroys it without a copy. A
+  failed archive copy was ignored and the conversation cleared anyway.
+- The service-data backup no longer deletes real backups. A day with the
+  container runtime down left an empty run directory that pruning counted as a
+  backup; one container that could not be inspected aborted the whole run.
+- The chat's file panel shows workspace-relative paths on Windows. Comparing a
+  `\\?\`-prefixed root with plain paths never matched.
+- Saving keys from a chat message no longer overwrites one with another: two
+  keys in one message get distinct names, the dialog says when a name already
+  holds a key, and system variables such as `PATH` are refused as names.
+- The cross-site request guard works behind a reverse proxy. It required a
+  loopback `Host` on every write, which only defends a daemon listening on
+  loopback; anywhere else it refused all writes.
+
+### Security
+
+- With dashboard login on and no API key set, an empty token was accepted:
+  the empty key and `Authorization: Bearer ` with nothing after it compared
+  equal. An empty key now matches nothing.
+- The old `POST /mcp` is removed. It ran any built-in tool -- `shell_exec`
+  included -- with no token and no permission check. It is replaced by the
+  MCP endpoint below, which needs a token and acts with one agent's own tools.
+  (Registered twice, the two would also have stopped the daemon starting.)
+
+- The container watchdog no longer takes down a healthy Podman VM. It treated a
+  failed `podman version` probe as proof the runtime was dead, and escalated to
+  `podman machine stop` and then `wsl --shutdown` -- but that probe also fails
+  while the VM is perfectly well, and the daemon had once reported no runtime
+  with twelve containers running. With the daemon stopped the VM stayed up; with
+  it running, the VM went down within minutes, repeatedly. Nothing destructive
+  now happens unless the VM's SSH port is confirmed to refuse connections from
+  Windows, which is what actually distinguishes the post-sleep failure. The
+  watchdog also writes `logs/watchdog.json` on every tick -- what it saw and what
+  it did -- because a daemon launched without its output captured left no way
+  to tell whether it had tried at all.
+
+- Scheduled agents are no longer declared crashed between their own runs. The
+  heartbeat judged every agent by its heartbeat interval alone, so a service hand
+  told to run once an hour was marked unresponsive after sixty idle seconds,
+  marked Crashed, and "recovered" -- about 860 times across five agents in three
+  days. An agent is now late only once its scheduled run is overdue.
+
+- Pressing Enter twice in the assistant no longer sends the message twice. The
+  guard against a second send only closed after an awaited call to the session
+  router; for as long as that took, the message was not yet on screen and a
+  second Enter ran the whole path again. The message now appears at once and
+  the guard closes before anything is awaited. A message sent but not yet
+  answered also survives a reload or a model switch.
+
+- Dictation works in Brave. The browser defines speech recognition but removed
+  the service behind it, so it failed with `language-not-supported` every time,
+  and the record-and-upload fallback -- which only ran when recognition was
+  absent -- never did. A failure that will not change now switches to recording.
+
+- File tools cannot reach outside a workspace. With no workspace set, the only
+  check rejected `..`, so any absolute path was readable and writable,
+  `~/.freeco-ai/secrets.env` included. They now refuse and say why.
+
+- A local speech service is no longer sent the OpenAI key. Pointing
+  `audio_base_url` or `tts_openai_base_url` at a local server still built the
+  Authorization header from `OPENAI_API_KEY`: the wrong credential for that
+  server, and one that should only ever go to OpenAI. `local_audio_api_key_env`
+  names the key to use instead.
+
+- Approving one of several waiting requests no longer announces the rest again.
+  The alert compared the whole set, so any change -- a removal included --
+  re-fired it for requests already on screen.
+
+- Browser settings apply without a restart. `[browser]` changes were detected and
+  queued as a hot-reload action that nothing handled.
+
+- Attachments reach the agent whatever their type. Only images were passed on:
+  every other upload - a PDF, a CV, a spreadsheet - was dropped without a word
+  by the code that resolved attachments. The upload succeeded and the file
+  appeared in the chat, so the agent was asked about a document it had never
+  received, and went looking for it across the user's disk with a host shell.
+  Every attachment is now copied into the agent's own workspace under
+  `uploads/`, and the message carries both paths: the workspace one and
+  `/workspace/uploads/<name>` inside its sandbox. Word, Excel, PowerPoint and
+  OpenDocument files are accepted alongside images, text, audio and PDF, and the
+  sandbox image ships `pdftotext`, `tesseract` (en/fr/de/ru), `docx2txt`,
+  `pypdf`, `python-docx` and `openpyxl` so an agent can read them without asking
+  for anything on the host.
+
+- Renaming an agent moves its folder instead of leaving a copy behind. The
+  manifest is mirrored to `agents/<name>/`, and boot spawns every folder there
+  whose name no agent holds - so a rename left a folder that the next restart
+  turned into a second agent sharing the first one's workspace. That is how the
+  assistant came to exist twice. If a folder already stands under the new name,
+  the old one is archived rather than deleted.
+
+- The Podman VM comes back after the machine sleeps. Waking is detected from the
+  jump in wall-clock time between watchdog ticks, which clears the ten-minute
+  backoff that could otherwise leave every service down long after the user
+  returned. When starting the VM fails the way it does after sleep - the VM
+  running and sshd listening inside it, but WSL's port forwarding gone, so
+  `machine start` reports "not listening on ssh port" - WSL itself is restarted,
+  at most once every ten minutes.
+
+- Runtime commands no longer outlive their timeout. Every `podman` call is
+  spawned with `kill_on_drop`, so one that hangs is killed rather than left
+  holding Podman's lock while every later call queues behind it - which is how
+  the daemon came to report no container runtime while twelve containers ran.
+
+- A failed fallback chain reports every link, in the order tried. Only the last
+  error was kept, so a primary out of credit followed by a backup whose model id
+  does not exist surfaced as "404 page not found" - naming a model the user
+  never chose, and saying nothing about the balance that actually stopped the
+  turn. Retryable errors keep their variant so the agent loop still backs off,
+  and a chain of one reports its own error unchanged.
+
+- The dashboard no longer asks Google for its fonts. Inter and Geist Mono were
+  fetched from fonts.googleapis.com on every page view, sending the viewer's
+  address and browser to a third party. Both are SIL Open Font License 1.1 and
+  now ship with the binary, and Google is gone from the page's
+  Content-Security-Policy so it cannot return unnoticed.
+
+- An agent's configured key can no longer be blanked by opening its settings.
+  The provider list loaded only when the key field was focused, so the first
+  render offered a single option - "None needed (local model)" - and the browser
+  wrote that blank over the real value.
+
+- An agent keeps its sandbox across a daemon restart. The container name is
+  fixed per agent and workspace, but the pool that remembers containers lives
+  in memory, so after any restart, rebuild, or idle hibernation the next
+  `docker_exec` ran `run --name <same name>` and failed with "name is already
+  in use". The agent had lost its sandbox until someone deleted the container
+  by hand. Sandboxes now carry a fingerprint label. A container with a matching
+  fingerprint is picked up again (and started if it was stopped). One with a
+  different or missing fingerprint is replaced, which is safe because
+  `/workspace` is a bind mount.
+
+- `npm install` works inside the sandbox. The root filesystem and `$HOME` are
+  read-only, so npm exited 1 trying to write `~/.npm`, and pip ran with its
+  cache silently disabled. The caches now point at the writable workspace, or
+  at `/tmp` for a read-only sandbox.
+
+- Service containers come back by themselves after the Podman VM restarts.
+  Their `unless-stopped` policy is only honoured at boot by
+  `podman-restart.service`, which ships disabled, so every reboot left CRM,
+  voice and OmniRoute exited until someone started them by hand. The daemon now
+  detects when the unit is off and reports it on Settings > Services, with the
+  exact command and a Fix button. It runs sudo inside the VM only when you
+  press Fix, and a missing /etc/resolv.conf is handled the same way instead of
+  being repaired silently. Verified: after a VM restart, all ten service
+  containers returned on their own within about ninety seconds.
+
+- A Podman VM that reports "already running" while its API refuses every
+  command is now recovered. The VM stayed up but its SSH port forward had died,
+  and another process had taken the port. The runtime watchdog treated "already
+  running" as success and retried every ten minutes, forever. This is how the
+  container runtime stayed dead for two weeks. It now checks the API, and when
+  the API is dead it cycles the VM, which re-establishes the forward.
+
+- The global spend cap actually stops spending. `check_global_budget` existed,
+  read the configured hourly and daily ceilings, and returned `QuotaExceeded` --
+  and had no caller anywhere in the repository, so the dashboard displayed a
+  limit that nothing could enforce. It is now checked on every agent run
+  alongside the per-agent quota, which cannot substitute for it because the bill
+  is the sum over all agents. A single conversation had spent $12 against a
+  provider while the recorded month-to-date total read $0.33.
+
+- A transient provider fault no longer takes an agent's tools away. Any `500`,
+  or the words "internal error" anywhere in a response body, used to clear every
+  tool from the request and retry without them; the agent then had no way to act
+  and narrated instead -- "I am checking that now" -- returning having done
+  nothing, which reads as a model that will not work. Server errors are now
+  retried unchanged, and tools are dropped only when the provider states
+  explicitly that it does not support them. The reasoning-conflict message
+  ("Function tools with reasoning_effort are not supported for ...") contains
+  both "tool" and "not supported" and was matching that rule as well, so a
+  gpt-5.6 agent lost its tools on the retry after the one that switched
+  reasoning off.
+
+- Switching model in the chat keeps the provider. The picker sent only the model
+  id, so the server resolved it across the whole catalogue and preferred
+  Custom-tier entries -- `gpt-5.6-sol` could land on the OpenRouter duplicate and
+  then look for `OPENROUTER_API_KEY`, reported to the user as a local model that
+  needs no key. The provider-aware path already existed and was being bypassed.
+
+- Services keep their containers and their data across restarts. Container and
+  volume names were keyed by the activation instance, and a new instance id was
+  minted on every boot, so each restart built a fresh container on an empty
+  volume and the CRM set up the day before came back blank. Names are now keyed
+  by hand and tenant, which survives a restart, and containers left behind by a
+  superseded instance are removed instead of accumulating.
+
+- Tool calling works on reasoning models. On `/v1/chat/completions` the OpenAI
+  reasoning default is rejected alongside function tools, and the driver
+  responded by stripping every tool from the request -- so agents held tools
+  they could not call and explained, plausibly, that they had none. Reasoning is
+  now switched off for that endpoint instead, keeping the tools. This is a
+  workaround, not a cure: the models reason less well as a result, and the real
+  fix is to route them through the Responses API.
+
+- The gateway keeps its configuration across a restart, and replies say which
+  model actually answered rather than which model was requested -- the two
+  differ whenever a fallback fires, which made an outage look like a quality
+  regression.
+
+- Approval requests say what the agent is trying to achieve. Every one of them
+  read "Agent \<uuid\> requests to execute shell_exec", because the per-tool
+  fallback text was documented as covering "requests that arrive without
+  agent-supplied reasoning" and `request_approval` had no parameter to carry
+  such reasoning — so the fallback was the only path that could run. Agents now
+  pass a `purpose`, required by the `shell_exec` schema, describing the goal and
+  why the sandbox cannot do it. Their system prompt makes the sandbox the
+  default and the host a last resort.
+- The chat picked the wrong agent. It chose the first whose name contained
+  "freeco" — the product name, which every bundled agent carries — so in a
+  registry where `freeco-shopping` sorted first, messages typed to the assistant
+  were answered by the shopping agent. `GET /api/assistant` now answers by role,
+  adopts the agent it resolves as CEO, and persists that, so the guess happens
+  once rather than on every page load.
+- Idle agents are no longer treated as crashed. The guard against the
+  crash-recover loop compared `last_active` to `created_at`, so it only ever
+  protected agents that had never been used; the moment one was chatted with,
+  idleness read as a crash. One daemon run performed 94 recoveries across six
+  agents, including every agent the user had switched off. Reactive agents are
+  idle by design and are no longer liveness-checked; genuine crashes still
+  recover.
+- Newer OpenAI models work. They accept only their default temperature, so an
+  agent temperature of 0.3 failed with 400 — gpt-5.4 accepted it and 5.5 and 5.6
+  did not, which read as a broken model family. The driver now retries without
+  the temperature, and does so before the retry that clears tools, which was
+  "handling" the rejection by silently stripping the agent's capabilities while
+  failing for the same reason.
+- Model ids keep their provider prefix in fallback chains. Only the primary
+  model was normalised, so a stored NVIDIA fallback read back as
+  `nemotron-3-ultra-550b-a55b` and NVIDIA answered with a plain-text `404 page
+  not found` — an error naming a provider and a model the user never chose. The
+  catalog is now asked whether the prefixed form is the real id, which repairs
+  existing rows on read.
+
+### Changed
+
+- The sandbox tool is `sandbox_exec`. It was named `docker_exec` when Docker was
+  the only runtime, and the name sent agents looking for Docker. The old name
+  still works, and a manifest listing it keeps the capability: tool permissions
+  are now compared by canonical name on both sides.
+
+- dograh runs from FreecoDAO/dograh, the audited fork, built by that fork's CI
+  and pinned to the commit. It ran upstream's `latest` images, so the code
+  running was neither the code that was read nor a version anyone could name.
+
+- The assistant everyone talks to is first in every agent list, found by its
+  role rather than guessed from its name.
+
+- A refused host `shell_exec` says where the command can run instead:
+  `sandbox_exec` accepts pipes and substitution because nothing it runs can
+  reach this machine. A timed-out `agent_send` says the other agent's model is
+  the usual cause, instead of inviting another ten-minute wait.
+
+- Model availability is learned at boot rather than assumed. Each provider is
+  asked which models its key may actually call and the answer is persisted, so
+  the picker stops offering models that return "does not have access". The probe
+  existed already, but only a button in Settings ever called it.
+
+- Models are chosen from a list everywhere they are configured - agent config,
+  the fallback chain and the spawn form - instead of typed. A fallback entered as
+  "provider/model" was split on the slash, discarding the "nvidia/" that is part
+  of NVIDIA's real model ids, so the backup answered 404 at exactly the moment it
+  was needed.
+
+- The chat shows what the agent remembers. History was capped at the model's
+  50-message replay window, so a conversation of 284 messages displayed the last
+  50 with no sign the rest existed. It now pages, reports the total and offers the
+  earlier messages. What the model receives is unchanged, so this costs no tokens.
+  A message sent but not yet answered survives a reload instead of vanishing.
+
+- One loader owns the conversation view. Two ran against different stores and
+  raced, so the thread came back whole, truncated or empty depending on timing.
+
+- The assistant widget shows the model the assistant is actually using rather
+  than the model new agents are created with, so one assistant stops looking like
+  two.
+
+- The composer says whether replies are streaming or arriving over plain HTTP,
+  which until now degraded silently when the socket gave up reconnecting.
+
+- Every agent follows a "Truth And Evidence" standard: name what a claim
+  rests on, never invent a citation, line number or statistic, separate what
+  was verified from what was inferred, treat "I cannot verify this" as a
+  complete answer, show the working, and check before finishing. It replaces
+  three overlapping lines rather than repeating them, so the shared
+  instructions grow by about 200 tokens per request rather than 360.
+- The stated minimum Rust version is 1.87, not 1.75. The code already needed
+  1.87 (`u32::is_multiple_of`), so packagers were told something false. The
+  exact floor is not yet measured. The toolchain is pinned to 1.96.1 instead
+  of floating `stable`, so a Rust release cannot break the build without a
+  commit here.
+- The vendored dashboard libraries (Alpine.js 3.15.8, Chart.js 4.4.7,
+  highlight.js 11.11.1, marked 15.0.12) are recorded with their SHA-256 in
+  `static/vendor/VERSIONS.md` and `SHA256SUMS`, and CI checks them; they ship
+  in the binary and no audit tool covered them. They are kept byte-identical on
+  every platform (`.gitattributes`), since line-ending conversion changed them.
+- CI lints test code too (`clippy --all-targets`), as the project rules require.
+- `tokio-tungstenite` comes from the workspace, so it cannot pull a native TLS
+  stack into a tree that is deliberately rustls-only.
+- The global spend cap has a regression test; it is enforced and nothing
+  checked that it stays so. `docs/ui-coverage-audit.md` is marked superseded:
+  it lists 157 routes, and there are 237.
+
+### Added
+
+- "New task" in the popup's routing card puts the task on the task board,
+  assigned to the agent, and starts its own conversation. Routing stays in the
+  popup; the main chat sends to the conversation on screen.
+- `/?widget=1` shows only the assistant, filling its window: what the
+  "FreEco Assistant" desktop shortcut opens.
+- Claude Code and Codex can join the FreEco team. `POST /mcp` is an MCP
+  endpoint with ten tools -- task board, agent conversations, asking an agent,
+  the agent's sandbox, the CRM -- and `integrations/claude-code-plugin`
+  installs it in Claude Code (Codex setup documented). The client acts as a
+  named agent with that agent's own permissions, completes only tasks that
+  agent holds, and the endpoint refuses everything until `FREECO_MCP_TOKEN` is
+  set.
+
+- Claude can be an agent's model and use FreEco's tools. The `claude-code`
+  provider gave the model no tools and dropped earlier tool calls and results,
+  so a Claude-backed agent could talk but not act. It now receives the agent's
+  tool list, its calls come back as real tool calls that FreEco runs with the
+  usual checks, and Claude Code's own built-in tools are switched off.
+- The Claude CLI runs in a container. `base_url = "podman:freeco-claude"`
+  runs it through `podman exec` in a container built from
+  `deploy/claude/Containerfile`, not on the host; the owner's token
+  (`CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`) is passed per call and
+  never stored in the container.
+- The CRM is usable by agents. `crm_api` reads and changes Twenty's tasks (with
+  due dates: the owner's schedule), people, companies, notes and opportunities.
+  It reaches one fixed local address, only the CRM's API paths, with the key
+  read from the vault by the tool, so the key never passes through a model.
+  Services -> Twenty CRM has a Connect field that checks the key against the
+  CRM before storing it. Previously there was no way to connect it: the crm
+  agent had only `web_fetch`, which refuses local addresses.
+- Chat and popup stop a message that contains a key. They offer to save it in
+  the vault under a suggested name (`CRM_API_KEY` when the message mentions the
+  CRM) and send the message with the key replaced by that name.
+
+- The assistant routes work to where it already lives. Each message is checked
+  against existing conversations by theme (`GET /api/sessions/search`) and
+  against the current thread in parallel; when there is a real alternative it
+  offers it -- an existing conversation, a new task, a new project, a new
+  company, or continuing here -- and delivers only when one is chosen.
+
+- Actions that travel. The assistant's Ask, Translate and Shell chips can be
+  dragged into another app or page, or copied: a drag carries a link, an HTML
+  anchor and a ready `curl` command at once. `/?ask=...&agent=...` opens the
+  dashboard with the text prefilled, never sent.
+
+- Dictation language: browser default, English (US and UK), Ukrainian, French,
+  German and Italian. Spoken replies use the same language.
+
+- Spoken replies in the main chat, sharing the assistant's setting.
+
+- Approval alerts with sound and a desktop notification when the dashboard is
+  not the window in front, with a switch in Settings.
+
+- Cross-site request forgery protection on every state-changing request. With
+  dashboard auth off every loopback request is trusted, and a page on any site
+  reaches 127.0.0.1 like any other client; only one endpoint was guarded.
+
+- `docker.sandbox_env`: named environment variables passed into the sandbox,
+  empty by default. `sandbox_env = ["GH_TOKEN"]` lets agents use `gh` inside
+  their container.
+
+- Service data backups. Databases are dumped with their own tools
+  (`pg_dumpall`, `mariadb-dump`) and other service volumes exported, daily and
+  on demand at `POST /api/backups/services`. The `.ofbak` archive never covered
+  container volumes, which is how the CRM's data was lost with no copy.
+
+- Speaches, local speech-to-text and text-to-speech, as a service hand. Built
+  from the audited FreecoDAO/speaches fork, with authentication on, its demo UI
+  off and telemetry off, on port 8010.
+
+- `company_create`, so an agent can create the organisation it belongs to. The
+  store method and the HTTP route both existed and the tool did not, so an agent
+  made CEO had no way to create a company -- and `project_create` takes a
+  `company_id` that had to name an existing row, which meant any id an agent
+  supplied failed on the foreign key with nothing it could do about it.
+
+- Memory scopes. `memory_store` and `memory_recall` take an optional `scope`:
+  `global` (the default and the previous behaviour), `company:<id>`,
+  `project:<id>`, `team:<id>`, or `agent` for the caller's own. Shared memory was
+  one flat namespace, so two teams both storing the obvious key overwrote each
+  other and nothing could be kept to the group it concerned. `global` composes to
+  the bare key, so everything already stored is still readable where it was and
+  nothing needs migrating.
+
+- Session tools, so an agent can name, fork and reset its own conversations.
+  The operations existed in `freeco-memory` and stopped at the crate boundary,
+  so an agent asked to tidy its threads could only explain that it had no way
+  to.
+
+- Organisation tools, so agents can see and build the structure they work in:
+  `org_overview`, `team_create`, `team_add_member` and `project_create`. Note
+  that `create_company` remains reachable only over HTTP -- there is no
+  company-creating tool, so an agent cannot create the company it belongs to.
+
+- A model picker in the assistant chat, listing only models whose provider is
+  configured and which support tools, labelled with provider and price, free
+  first. The list was already being fetched and never rendered, and the code
+  that would have switched the model built its URL from an object, so it could
+  never have worked.
+- A new task opens its own named session. Everything used to append to one
+  endless thread, so unrelated work shared a context and nothing could be found
+  later. `POST /api/sessions/route` asks the model whether a message continues
+  the conversation or starts a task, and fails open to continuing.
+- Permission requests appear in the Chat page as well as the floating
+  assistant, from one shared implementation so the two cannot drift apart.
+
+- Service hands start their container. `freeco_hands::container` had no callers
+  anywhere: activating OmniRoute recorded an instance, answered `status:
+  Active`, and started nothing. Activation now starts the container, waits for
+  its health check, and rolls the instance back if it never serves — on both
+  the HTTP route and the `hand_activate` tool agents call. Deactivation stops
+  it, reading the hand id before the record is deleted, since a container that
+  outlives its instance holds the port and makes the next activation fail
+  complaining about the port instead of the leftover.
+- A host-network service hand could never pass its health check. The port was
+  read only from published mappings, and a host-network container publishes
+  none — the URL came out as `http://127.0.0.1:/v1/models`, so the first
+  activation of the only service hand would have burned its whole 180-second
+  budget and reported a timeout naming nothing. The port now falls back to
+  `PORT` in the container env, and a health path with no derivable port fails
+  at once saying which field to add. `/api/hands` reported `port: null` for the
+  same reason.
+- `hand_status` reports whether a service is actually serving, checked against
+  the container runtime. The registry records what was asked for; only the
+  container knows what runs, and they disagree exactly when it matters.
+- Streaming requests fall back between models like non-streaming ones. The two
+  paths had drifted — non-streaming retried on model-not-found, timeout,
+  overload and context overflow, streaming only on model-not-found — and the
+  dashboard streams, so the narrower path was the one users hit. Auth and
+  billing failures still never fall back: spending on another provider to work
+  around the user's own key would be worse than failing.
+- The free-model picker no longer returns models that cannot serve agents.
+  It filtered on price and on the `tools` parameter, and both families it
+  needed to exclude pass those checks: OpenRouter's own routers advertise
+  `tools` and then answer "No endpoints found that support tool use", and
+  cloaked `stealth/*` models log prompts to an undisclosed provider — one of
+  which had the widest free context on offer, so ranking picked it first.
+
 - Model ids where the provider name is part of the id are no longer corrupted
   when saved. `nvidia/nemotron-3-ultra-550b-a55b` was stored as
   `nemotron-3-ultra-550b-a55b`, which NVIDIA does not serve: the request 404'd,
@@ -318,6 +833,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Empty POST/PUT/PATCH bodies are now rejected** instead of sending an empty request that the server rejects with a confusing error.
 - **Exec-policy refusal names the actual blocked command** instead of always saying "git and gh", so the caller knows what to allowlist or sandbox.
 - **Brave browser is now detected and preferred** over Chrome and Edge. Brave installs per-user in LOCALAPPDATA on Windows, which was not checked, so an ordinary Brave install was reported as "no browser found." The search order now puts Brave and Chromium ahead of Chrome and Edge â same engine, no Google telemetry.
+
+### Added
 - **Voice dictation privacy fix.** The page was telling users that browser-based transcription was on-device, but the Web Speech API is server-side by default. The page now sets `processLocally` and checks `availableOnDevice()`, and warns plainly when the browser vendor's servers are used.
 
 ### Security

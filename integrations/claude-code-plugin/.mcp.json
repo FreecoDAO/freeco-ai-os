@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "freeco": {
+      "type": "http",
+      "url": "http://127.0.0.1:50051/mcp",
+      "headers": {
+        "Authorization": "Bearer ${FREECO_MCP_TOKEN}",
+        "X-Freeco-As-Agent": "${FREECO_AS_AGENT:-Developer}",
+        "X-Freeco-Client": "Claude Code"
+      },
+      "timeout": 660000
+    }
+  }
+}

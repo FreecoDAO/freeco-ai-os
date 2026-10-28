@@ -9,6 +9,8 @@ description = "HTTP/WebSocket API server for the FreEco.ai daemon"
 freeco-types = { path = "../freeco-types" }
 freeco-kernel = { path = "../freeco-kernel" }
 freeco-kernel-runtime = { path = "../freeco-kernel-runtime" }
+freeco-datagateway = { path = "../freeco-datagateway" }
+rusqlite = { workspace = true }
 freeco-memory = { path = "../freeco-memory" }
 freeco-channels = { path = "../freeco-channels" }
 freeco-wire = { path = "../freeco-wire" }

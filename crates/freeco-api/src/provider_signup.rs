@@ -151,6 +151,15 @@ pub fn signup_for(provider_id: &str) -> Option<Signup> {
         ),
 
         // ── Paid: a card is needed before the first call ──
+        // Pay-as-you-go, and where GLM 5.3 is served. The key starts with `sk_`,
+        // which is worth saying: it is how someone knows they copied the right
+        // thing. The link is the domain root on purpose -- the key page's path
+        // is unverified, and a guessed one would send people to a dead end.
+        "novita" => (
+            "https://novita.ai",
+            "Pay-as-you-go. Sign in at novita.ai, open your account's API keys page, create a key (it starts with sk_) and paste it here.",
+            Cost::Paid,
+        ),
         "anthropic" => (
             "https://console.anthropic.com/settings/keys",
             "Requires credit. Add billing, then create a key in the Console.",

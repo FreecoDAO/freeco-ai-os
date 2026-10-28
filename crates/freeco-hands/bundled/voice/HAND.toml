@@ -1,0 +1,137 @@
+id = "voice"
+name = "Dograh Voice"
+description = "Real-time voice AI on your own machine: live calls with barge-in, a visual workflow builder, and telephony for outreach."
+category = "productivity"
+icon = "\U0001F399"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+    "sandbox_exec",
+]
+
+[container]
+# Five of upstream's nine services. The other four -- nginx, coturn,
+# dograh-init and cloudflared -- sit behind compose profiles (`remote`,
+# `tunnel`, `local-turn`) that are not part of a local install: they terminate
+# TLS, relay WebRTC for callers outside this machine, and open a public tunnel.
+# A local hand needs none of that, and coturn alone would publish fifty UDP
+# ports.
+#
+# Native services rather than a compose file, because `podman compose` has no
+# native implementation and shells out to Docker's docker-compose binary -- so a
+# compose-defined stack breaks the day Docker Desktop is uninstalled while every
+# single-container hand keeps running.
+health_path = "/"
+health_timeout_secs = 900
+restart = "unless-stopped"
+
+# The UI is the entry point, so that is what health checks and what the user
+# opens. Upstream publishes it on 3010; kept, because 3000 is taken.
+[container.env]
+PORT = "3010"
+
+[[container.services]]
+name = "postgres"
+# pgvector, not plain postgres: the api stores embeddings and fails its
+# migrations against a database without the extension.
+image = "docker.io/pgvector/pgvector:pg17"
+volumes = ["postgres-data:/var/lib/postgresql/data"]
+health_cmd = ["pg_isready", "-U", "postgres"]
+
+[container.services.env]
+POSTGRES_USER = "postgres"
+POSTGRES_PASSWORD = "secret:VOICE_DB_PASSWORD"
+POSTGRES_DB = "postgres"
+
+[[container.services]]
+name = "redis"
+image = "docker.io/library/redis:7"
+volumes = ["redis-data:/data"]
+command = ["--requirepass", "${VOICE_REDIS_PASSWORD}"]
+health_cmd = ["redis-cli", "-a", "${VOICE_REDIS_PASSWORD}", "ping"]
+
+[[container.services]]
+name = "minio"
+image = "docker.io/minio/minio"
+command = ["server", "/data", "--console-address", ":9001"]
+volumes = ["minio-data:/data"]
+health_cmd = ["curl", "-f", "http://localhost:9000/minio/health/live"]
+
+[container.services.env]
+MINIO_ROOT_USER = "dograh"
+MINIO_ROOT_PASSWORD = "secret:VOICE_MINIO_PASSWORD"
+MINIO_API_CORS_ALLOW_ORIGIN = "*"
+
+[[container.services]]
+name = "api"
+# Built from FreecoDAO/dograh -- the audited fork -- by its own CI, and
+# pinned to that commit. Upstream's `latest` meant the running code was
+# neither the code that was read nor a version anyone could name.
+image = "ghcr.io/freecodao/dograh-api:99aabd9acfc9ef43e6e786b9a07d069cada4cb87"
+depends_on = ["postgres", "redis", "minio"]
+ports = ["8000:8000"]
+# Upstream checks this with Python's urllib rather than curl, because the api
+# image ships no curl.
+# The api serves under `API_PREFIX = "/api/v1"`; bare `/health` has never
+# existed and returns 404, which `urlopen` raises on -- so this check could only
+# ever fail, and the hand would report a working service as never ready.
+health_cmd = ["python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+
+[container.services.env]
+# OSS_JWT_SECRET is required -- the api refuses to start without it.
+OSS_JWT_SECRET = "secret:VOICE_JWT_SECRET"
+# The dialect has to be named. The api opens this with SQLAlchemy's
+# `create_async_engine`, and a bare `postgresql://` resolves to psycopg2 -- the
+# synchronous driver, which this image does not ship. The container then died
+# on `ModuleNotFoundError: No module named 'psycopg2'` at startup and was
+# restarted, 684 times, which read as "the voice hand does not work" rather
+# than as one wrong URL scheme. asyncpg 0.30.0 is installed and is what
+# `create_async_engine` actually wants.
+DATABASE_URL = "postgresql+asyncpg://postgres:${VOICE_DB_PASSWORD}@postgres:5432/postgres"
+REDIS_URL = "redis://:${VOICE_REDIS_PASSWORD}@redis:6379"
+AWS_ACCESS_KEY_ID = "dograh"
+AWS_SECRET_ACCESS_KEY = "${VOICE_MINIO_PASSWORD}"
+AWS_ENDPOINT_URL = "http://minio:9000"
+AWS_REGION = "us-east-1"
+ENVIRONMENT = "oss"
+
+[[container.services]]
+name = "ui"
+# Built from FreecoDAO/dograh -- the audited fork -- by its own CI, and
+# pinned to that commit. Upstream's `latest` meant the running code was
+# neither the code that was read nor a version anyone could name.
+image = "ghcr.io/freecodao/dograh-ui:99aabd9acfc9ef43e6e786b9a07d069cada4cb87"
+depends_on = ["api"]
+ports = ["3010:3010"]
+health_cmd = ["wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3010"]
+
+[container.services.env]
+HOSTNAME = "0.0.0.0"
+BACKEND_URL = "http://api:8000"
+NODE_ENV = "oss"
+
+[agent]
+name = "voice"
+description = "Looks after the voice service: whether it is serving, which workflows exist, and what calls have run."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+To check or call the service, use sandbox_exec with tier='workspace': from the sandbox the API is at http://127.0.0.1:8000 and the interface at http://127.0.0.1:3010 (for example: curl -s http://127.0.0.1:8000/api/v1/health). Never ask for a host shell.
+
+You look after a Dograh voice service running on the user's own machine: the \
+interface at http://localhost:3010 and its API at http://localhost:8000.
+
+This install is local-only on purpose. Callers outside this machine need a TURN \
+relay and a public entry point, which are deliberately not part of the hand. If \
+the user wants to take real outside calls, say that plainly rather than \
+implying the local install already does it.
+
+Voice work costs money per minute through telephony and speech providers. State \
+what a run will cost before starting it, and never start a campaign without the \
+user saying so.
+"""

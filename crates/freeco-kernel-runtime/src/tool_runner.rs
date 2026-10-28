@@ -150,7 +150,13 @@ pub async fn execute_tool(
 
     // Capability enforcement: reject tools not in the allowed list
     if let Some(allowed) = allowed_tools {
-        if !allowed.iter().any(|t| t == tool_name) {
+        // Both sides normalized: a manifest naming `docker_exec` grants the
+        // tool now called `sandbox_exec`, so renaming a tool cannot silently
+        // strip a capability from agents that already list the old name.
+        if !allowed
+            .iter()
+            .any(|t| normalize_tool_name(t.as_str()) == tool_name)
+        {
             warn!(tool_name, "Capability denied: tool not in allowed list");
             return ToolResult {
                 tool_use_id: tool_use_id.to_string(),
@@ -191,7 +197,17 @@ pub async fn execute_tool(
                 tool_name,
                 freeco_types::truncate_str(&input_str, 200)
             );
-            match kh.request_approval(agent_id_str, tool_name, &summary).await {
+            // The agent's own reason, when it supplied one. Any tool may carry
+            // `purpose`; the approval-gated ones ask for it in their schema.
+            let purpose = input
+                .get("purpose")
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            match kh
+                .request_approval(agent_id_str, tool_name, &summary, purpose)
+                .await
+            {
                 Ok(true) => {
                     debug!(tool_name, "Approval granted — proceeding with execution");
                 }
@@ -314,9 +330,16 @@ pub async fn execute_tool(
             {
                 return ToolResult {
                     tool_use_id: tool_use_id.to_string(),
+                    // Say where the command CAN run, not only that it cannot run
+                    // here. The refusal alone left agents retrying variations on
+                    // the host, or asking the user for a looser policy, when the
+                    // sandbox accepts pipes, redirection and substitution
+                    // because nothing it does can reach this machine.
                     content: format!(
-                        "shell_exec blocked: command contains {reason}. \
-                         Shell metacharacters are never allowed."
+                        "shell_exec blocked: command contains {reason}. Shell \
+                         metacharacters are never allowed on the host. Run this with \
+                         sandbox_exec instead: it accepts pipes, redirection and \
+                         substitution, and runs isolated from this machine."
                     ),
                     is_error: true,
                 };
@@ -373,8 +396,8 @@ pub async fn execute_tool(
         "agent_activate" => tool_agent_activate(input, kernel),
 
         // Shared memory tools
-        "memory_store" => tool_memory_store(input, kernel),
-        "memory_recall" => tool_memory_recall(input, kernel),
+        "memory_store" => tool_memory_store(input, kernel, caller_agent_id),
+        "memory_recall" => tool_memory_recall(input, kernel, caller_agent_id),
 
         // Collaboration tools
         "agent_find" => tool_agent_find(input, kernel),
@@ -408,8 +431,8 @@ pub async fn execute_tool(
         "text_to_speech" => tool_text_to_speech(input, tts_engine, workspace_root).await,
         "speech_to_text" => tool_speech_to_text(input, media_engine, workspace_root).await,
 
-        // Docker sandbox tool
-        "docker_exec" => {
+        // Sandbox tool
+        "sandbox_exec" => {
             tool_docker_exec(
                 input,
                 docker_config,
@@ -419,6 +442,9 @@ pub async fn execute_tool(
             )
             .await
         }
+
+        // The CRM on this machine: one fixed address, key read from the vault.
+        "crm_api" => crate::crm_tool::crm_api(input).await,
 
         // Location tool
         "location_get" => tool_location_get().await,
@@ -448,6 +474,102 @@ pub async fn execute_tool(
         "hand_activate" => tool_hand_activate(input, kernel).await,
         "hand_status" => tool_hand_status(input, kernel).await,
         "hand_deactivate" => tool_hand_deactivate(input, kernel).await,
+
+        // Organisation tools.
+        "org_overview" => match kernel {
+            Some(kh) => kh.org_overview().await.map(|v| v.to_string()),
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "team_create" => match kernel {
+            Some(kh) => {
+                kh.team_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["project_id"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "team_add_member" => match kernel {
+            Some(kh) => {
+                kh.team_add_member(
+                    input["team_id"].as_str().unwrap_or(""),
+                    input["agent_id"].as_str().unwrap_or(""),
+                    input["role"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+        "team_list" => match kernel {
+            Some(kh) => match kh.team_list().await {
+                Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+                Err(e) => Err(e),
+            },
+            None => Err("Organisation store is not available".to_string()),
+        },
+
+        "company_create" => match kernel {
+            Some(kh) => {
+                kh.company_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["description"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+
+        "project_create" => match kernel {
+            Some(kh) => {
+                kh.project_create(
+                    input["name"].as_str().unwrap_or(""),
+                    input["description"].as_str().filter(|s| !s.is_empty()),
+                    input["company_id"].as_str().filter(|s| !s.is_empty()),
+                )
+                .await
+            }
+            None => Err("Organisation store is not available".to_string()),
+        },
+
+        "system_audit" => match kernel {
+            Some(kh) => match kh.system_audit().await {
+                Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())),
+                Err(e) => Err(e),
+            },
+            None => Err("System audit is not available to this agent".to_string()),
+        },
+
+        // Session tools. Both need to know which agent is calling, so they fail
+        // clearly rather than renaming whatever session happens to be handy.
+        "session_rename" => match (kernel, caller_agent_id) {
+            (Some(kh), Some(aid)) => {
+                match kh
+                    .session_rename(aid, input["label"].as_str().unwrap_or(""))
+                    .await
+                {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("Session management is not available to this agent".to_string()),
+        },
+        "session_fork" => match (kernel, caller_agent_id) {
+            (Some(kh), Some(aid)) => {
+                match kh
+                    .session_fork(
+                        aid,
+                        input["label"].as_str().unwrap_or(""),
+                        input["carry_history"].as_bool().unwrap_or(false),
+                    )
+                    .await
+                {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => Err(e),
+                }
+            }
+            _ => Err("Session management is not available to this agent".to_string()),
+        },
 
         // A2A outbound tools (cross-instance agent communication)
         "a2a_discover" => tool_a2a_discover(input).await,
@@ -733,16 +855,182 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shell tool ---
         ToolDefinition {
             name: "shell_exec".to_string(),
-            description: "Execute a shell command and return its output.".to_string(),
+            description: "Run a command directly on the user's machine, outside any sandbox. \
+                          This is a last resort: prefer `sandbox_exec`, which runs in the isolated \
+                          Linux sandbox and needs no approval. Use this only when the task cannot \
+                          be done in the sandbox — because it needs the user's own files, their \
+                          installed tools, or a service bound to their machine — and say which in \
+                          `purpose`. Installing software belongs in a sandbox or a hand, never here."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The command to execute" },
+                    "purpose": {
+                        "type": "string",
+                        "description": "What you are trying to achieve, in one sentence a \
+                                        non-programmer can act on, plus why the sandbox cannot do \
+                                        it. This is shown to the user as the reason to allow or \
+                                        refuse, so describe the goal, not the command: \
+                                        \"read your OmniRoute config to find why gpt-5.6 fails — \
+                                        the file is on your machine, not in the sandbox\", not \
+                                        \"run cat on a file\"."
+                    },
                     "timeout_seconds": { "type": "integer", "description": "Timeout in seconds (default: 30)" }
                 },
-                "required": ["command"]
+                "required": ["command", "purpose"]
             }),
         },
+        // --- Organisation tools ---
+        //
+        // `OrgStore` could already create companies, projects and teams, add
+        // members and assign work, and none of it was reachable by an agent.
+        // A coordinating agent could spawn workers and message them, but had no
+        // way to say who belongs to what -- so structure lived in the user's
+        // head and every delegation started by re-explaining it.
+        ToolDefinition {
+            name: "org_overview".to_string(),
+            description: "See the organisation: companies, projects, teams and who is in them. \
+                          Read this before organising anything, so you extend the existing \
+                          structure instead of duplicating it."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "team_create".to_string(),
+            description: "Create a team, optionally inside a project. A team is how related \
+                          agents are grouped so work can be given to the group rather than \
+                          to a name you happen to remember."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Team name" },
+                    "project_id": { "type": "string", "description": "Project it belongs to (optional)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "team_add_member".to_string(),
+            description: "Put an agent in a team, with the role it plays there. Use the role \
+                          to say what the agent is accountable for, not just what it is \
+                          called: \"keeps the books\" is useful, \"member\" is not."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "team_id": { "type": "string", "description": "Team id from org_overview" },
+                    "agent_id": { "type": "string", "description": "Agent id from agent_list" },
+                    "role": { "type": "string", "description": "What this agent is accountable for" }
+                },
+                "required": ["team_id", "agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "team_list".to_string(),
+            description: "List every team, with the project it belongs to and who is in it. \
+                          Use it to find the team you are on, to see who else could take a \
+                          piece of work, and to get the team id that `memory_store` and \
+                          `memory_recall` need for `scope: \"team:<id>\"`."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+
+        ToolDefinition {
+            name: "company_create".to_string(),
+            description: "Create a company — the top of the organisation, which projects \
+                          belong to. Create this before passing a `company_id` to \
+                          `project_create`: that id must name a company that already exists, \
+                          and the insert is refused otherwise. Check `org_overview` first to \
+                          avoid creating a second company for the same organisation."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Company name" },
+                    "description": { "type": "string", "description": "What it does" }
+                },
+                "required": ["name"]
+            }),
+        },
+
+        ToolDefinition {
+            name: "project_create".to_string(),
+            description: "Create a project — a body of work that teams and conversations can \
+                          be attached to, so related threads stay findable together. \
+                          `company_id`, if given, must be the id of an existing company from \
+                          `company_create` or `org_overview`; leave it out to create a project \
+                          that belongs to no company."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Project name" },
+                    "description": { "type": "string", "description": "What it is for" },
+                    "company_id": { "type": "string", "description": "Owning company (optional)" }
+                },
+                "required": ["name"]
+            }),
+        },
+
+        ToolDefinition {
+            name: "system_audit".to_string(),
+            description: "Check the health of this installation and what is running on it. \
+                          Returns the container runtime state, every running container, and \
+                          three findings: containers the kernel did not start (`unexpected`), \
+                          services recorded active but not running (`missing`), and a one-line \
+                          `verdict`.\n\
+                          `unexpected` is the one to act on. Containers accumulate there when \
+                          something starts them outside the hand system, and it is where an \
+                          unwanted install would sit, because nothing else looks. Report what \
+                          you find rather than removing anything: this cannot tell a leftover \
+                          from something the user started deliberately."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+
+        // --- Session tools ---
+        //
+        // The backing operations existed in `freeco-memory` and stopped at the
+        // crate boundary, so an agent asked to tidy its own threads could only
+        // explain that it had no way to. Naming a conversation is the cheapest
+        // thing that makes a pile of them navigable.
+        ToolDefinition {
+            name: "session_rename".to_string(),
+            description: "Rename the current conversation. Use a short name describing the \
+                          task, so the thread can be found later among others."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "The new name, a few words" }
+                },
+                "required": ["label"]
+            }),
+        },
+        ToolDefinition {
+            name: "session_fork".to_string(),
+            description: "Start a new named conversation, optionally carrying this one's \
+                          history into it. Use when a request turns out to be a separate \
+                          task: forking keeps each thread about one thing instead of \
+                          interleaving them. The original is left untouched."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "Name for the new conversation" },
+                    "carry_history": {
+                        "type": "boolean",
+                        "description": "Copy the current conversation into the new one (default false). \
+                                        Copies rather than moves: nothing is removed from the original, \
+                                        because there is no recoverable message delete yet."
+                    }
+                },
+                "required": ["label"]
+            }),
+        },
+
         // --- Inter-agent tools ---
         ToolDefinition {
             name: "agent_send".to_string(),
@@ -758,7 +1046,21 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "agent_spawn".to_string(),
-            description: "Spawn a new agent from a TOML manifest. Returns the new agent's ID and name.".to_string(),
+            description: "Hire a new agent from a TOML manifest. Returns its ID and name.\n\
+                          Check `agent_list` and `org_overview` first: if an agent already \
+                          owns this area, send it work instead. A second agent doing the \
+                          same job splits the knowledge and neither ends up holding it.\n\
+                          Write the manifest as you would a job description. `name` says \
+                          what it is; `description` says what it is accountable for, in \
+                          terms someone else could check. `system_prompt` says how it should \
+                          work and what it must never do -- be concrete about the domain, \
+                          because the general rules are supplied to every agent already.\n\
+                          Give it only the tools its job needs. Broad access is not \
+                          generosity: it widens what a mistake can reach, and an agent with \
+                          sixty tools chooses worse than one with six.\n\
+                          After hiring, put it in a team with `team_add_member` so the rest \
+                          of the organisation can find it."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -843,23 +1145,43 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Shared memory tools ---
         ToolDefinition {
             name: "memory_store".to_string(),
-            description: "Store a value in shared memory accessible by all agents. Use for cross-agent coordination and data sharing.".to_string(),
+            description: "Remember something durably, beyond this conversation. \
+                          Use it for what you will still need next week: the user's \
+                          preferences and constraints, decisions and the reasons \
+                          behind them, corrections they have given you, and facts \
+                          about their setup that were expensive to establish. \
+                          Also readable by other agents, so it doubles as \
+                          coordination. Conversations are replayed only up to a \
+                          window and older turns are compacted into a summary -- \
+                          anything not stored here is eventually lost, so store it \
+                          when you learn it, not when you need it."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "The storage key" },
-                    "value": { "type": "string", "description": "The value to store (JSON-encode objects/arrays, or pass a plain string)" }
+                    "value": { "type": "string", "description": "The value to store (JSON-encode objects/arrays, or pass a plain string)" },
+                    "scope": {
+                        "type": "string",
+                        "description": "Who this is for. `global` (the default) is the whole installation. `company:<id>`, `project:<id>` or `team:<id>` keep it to that part of the organisation -- take the ids from `org_overview`. `agent` is private to you. Two teams both storing `priorities` globally overwrite each other; scoped, they do not."
+                    }
                 },
                 "required": ["key", "value"]
             }),
         },
         ToolDefinition {
             name: "memory_recall".to_string(),
-            description: "Recall a value from shared memory by key.".to_string(),
+            description: "Recall a value from shared memory by key. Pass the same `scope` it \
+                          was stored under -- a scoped value is not visible from `global`."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "The storage key to recall" }
+                    "key": { "type": "string", "description": "The storage key to recall" },
+                    "scope": {
+                        "type": "string",
+                        "description": "`global` (default), `company:<id>`, `project:<id>`, `team:<id>`, or `agent` for your own."
+                    }
                 },
                 "required": ["key"]
             }),
@@ -1329,14 +1651,40 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["path"]
             }),
         },
+        // --- CRM tool ---
+        ToolDefinition {
+            name: "crm_api".to_string(),
+            description: "Read and change the owner's Twenty CRM on this machine: tasks \
+(with due dates - these are the owner's schedule), people, companies, notes and \
+opportunities. The CRM key is added by this tool; never ask for it. REST: GET \
+/rest/tasks?limit=20&orderBy=dueAt (list), GET /rest/tasks/{id}, POST /rest/tasks \
+with body {\"title\":\"…\",\"status\":\"TODO\",\"dueAt\":\"2026-10-01T09:00:00Z\"} \
+(create), PATCH /rest/tasks/{id} with {\"status\":\"DONE\"} (update). Status is \
+TODO, IN_PROGRESS or DONE. Same pattern for /rest/people, /rest/companies, \
+/rest/notes, /rest/opportunities; filter with \
+?filter=status[eq]:TODO. POST /graphql for anything REST does not cover.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "enum": ["GET","POST","PATCH","DELETE"], "description": "HTTP method (default GET)" },
+                    "path": { "type": "string", "description": "API path starting with /rest/ or /graphql, including any query string" },
+                    "body": { "type": "object", "description": "JSON body for POST/PATCH" }
+                },
+                "required": ["path"]
+            }),
+        },
         // --- Docker sandbox tool ---
         ToolDefinition {
-            name: "docker_exec".to_string(),
+            name: "sandbox_exec".to_string(),
             description: "Execute a command inside an isolated Linux container. \
 Use tier='workspace' to build, test or install dependencies: that gets 4 GB, a \
 30 minute timeout, a writable workspace and network access. The default \
 tier='exec' is a throwaway container with no network and a 60 second limit, for \
-running a single command. Works with Docker or Podman.".to_string(),
+running a single command. Works with Docker or Podman. The services installed on \
+this machine are reachable from tier='workspace' at http://127.0.0.1:<port> - by \
+default CRM 3200, voice API 8000 (health: /api/v1/health), voice UI 3010, speech \
+8010 (health: /health), accounting 8080. Use this, never a host shell, to reach \
+them.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1492,11 +1840,22 @@ fn validate_path(path: &str) -> Result<&str, String> {
 
 /// Resolve a file path through the workspace sandbox (if available) or legacy validation.
 fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(root) = workspace_root {
-        crate::workspace_sandbox::resolve_sandbox_path(raw_path, root)
-    } else {
-        let _ = validate_path(raw_path)?;
-        Ok(PathBuf::from(raw_path))
+    match workspace_root {
+        Some(root) => crate::workspace_sandbox::resolve_sandbox_path(raw_path, root),
+        // No workspace means nothing to confine the path to, and the fallback
+        // here used to reject only `..` -- so any absolute path was readable
+        // and writable, `~/.freeco-ai/secrets.env` included, by any agent that
+        // happened to have no workspace set. Refusing is the only confinement
+        // available without one; every agent the kernel spawns gets a
+        // workspace, so this closes a gap rather than a working path.
+        None => {
+            let _ = validate_path(raw_path)?;
+            Err(format!(
+                "Access denied: '{raw_path}' cannot be reached because this agent has no \
+                 workspace to confine file access to. Give the agent a workspace, or use \
+                 sandbox_exec to work with files inside its container."
+            ))
+        }
     }
 }
 
@@ -2066,26 +2425,57 @@ fn tool_agent_activate(
 // Shared memory tools
 // ---------------------------------------------------------------------------
 
+/// Compose the stored key for a memory scope.
+///
+/// Shared memory was one flat namespace: everything an agent stored was visible
+/// to every other agent, and two teams choosing the same obvious key
+/// (`"priorities"`) overwrote each other. Scopes give the organisation the same
+/// shape its structure already has -- a team's working notes, a project's
+/// decisions, a company's standards, an agent's own memory -- without a second
+/// store.
+///
+/// `global` composes to the bare key, so everything written before scopes
+/// existed is still readable at the same key and nothing has to be migrated.
+fn scoped_memory_key(scope: Option<&str>, key: &str, caller_agent_id: Option<&str>) -> String {
+    match scope.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("global") => key.to_string(),
+        Some("agent") => match caller_agent_id {
+            Some(id) => format!("agent:{id}/{key}"),
+            // No caller identity means a private scope cannot be private.
+            // Falling back to global would silently publish it, so it goes
+            // somewhere unreadable-by-accident instead.
+            None => format!("agent:unknown/{key}"),
+        },
+        Some(other) => format!("{}/{}", other.trim_end_matches('/'), key),
+    }
+}
+
 fn tool_memory_store(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
     let value = input.get("value").ok_or("Missing 'value' parameter")?;
-    kh.memory_store(key, value.clone())?;
-    Ok(format!("Stored value under key '{key}'."))
+    let scope = input["scope"].as_str();
+    let stored = scoped_memory_key(scope, key, caller_agent_id);
+    kh.memory_store(&stored, value.clone())?;
+    Ok(format!("Stored value under key '{stored}'."))
 }
 
 fn tool_memory_recall(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let key = input["key"].as_str().ok_or("Missing 'key' parameter")?;
-    match kh.memory_recall(key)? {
+    let scope = input["scope"].as_str();
+    let stored = scoped_memory_key(scope, key, caller_agent_id);
+    match kh.memory_recall(&stored)? {
         Some(val) => Ok(serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())),
-        None => Ok(format!("No value found for key '{key}'.")),
+        None => Ok(format!("No value found for key '{stored}'.")),
     }
 }
 
@@ -3494,7 +3884,7 @@ async fn tool_speech_to_text(
 // Docker sandbox tool
 // ---------------------------------------------------------------------------
 
-async fn tool_docker_exec(
+pub async fn tool_docker_exec(
     input: &serde_json::Value,
     docker_config: Option<&freeco_types::config::DockerSandboxConfig>,
     workspace_root: Option<&Path>,
@@ -3528,14 +3918,12 @@ async fn tool_docker_exec(
             }
         };
     }
-    let config = &config;
-
     if !config.enabled {
         return Err("Docker sandbox is disabled. Set docker.enabled=true in config.".into());
     }
     if config.mode != freeco_types::config::DockerSandboxMode::All {
         return Err(
-            "docker_exec requires docker.mode = 'all'. The 'off' and 'non_main' modes do not grant this tool because it has no trusted main-agent identity context."
+            "sandbox_exec requires docker.mode = 'all'. The 'off' and 'non_main' modes do not grant this tool because it has no trusted main-agent identity context."
                 .into(),
         );
     }
@@ -3568,12 +3956,33 @@ async fn tool_docker_exec(
                 .into(),
         );
     }
+    // Reusable sandboxes must run a content-addressed image. Requiring the user
+    // to write the digest by hand is what made this unusable: the configured
+    // image is a tag, so every call on every tier was refused and agents could
+    // not run a command, install a tool, or use a container at all. Resolve the
+    // tag to the digest it points at now, which keeps the guarantee and drops
+    // the manual step. Refuse only when it cannot be resolved.
     if reusable && !crate::docker_sandbox::is_immutable_image_reference(&config.image) {
-        return Err(
-            "Reusable Docker sandboxes require docker.image pinned by immutable SHA-256 digest (for example registry.example/freeco@sha256:<64-hex-digits>). Mutable tags are allowed only for ephemeral session sandboxes."
-                .into(),
-        );
+        match crate::docker_sandbox::resolve_image_digest(&config.runtime, &config.image).await {
+            Some(pinned) => {
+                tracing::info!(
+                    image = %config.image,
+                    pinned = %pinned,
+                    "Resolved sandbox image tag to its current digest"
+                );
+                config.image = pinned;
+            }
+            None => {
+                return Err(format!(
+                    "Reusable Docker sandboxes run a digest-pinned image, and `{}` could not be \
+                     resolved to one -- the image is not present in {}. Pull or build it, or set \
+                     docker.image to a `repo@sha256:<64-hex-digits>` reference.",
+                    config.image, config.runtime
+                ));
+            }
+        }
     }
+    let config = &config;
 
     // Check Docker availability. Failing here is the correct outcome: the
     // sandbox is the safety boundary, so when it is unavailable the tool
@@ -3604,7 +4013,15 @@ async fn tool_docker_exec(
                 "start a long-running service in the sandbox for agent {agent_id}, {ports}.                  It keeps running after this command finishes, restarts with Docker, and is                  not removed by the idle cleanup. Files in the agent workspace persist."
             );
             match kh
-                .request_approval(agent_id, "docker_service", &summary)
+                .request_approval(
+                    agent_id,
+                    "docker_service",
+                    &summary,
+                    // This path builds its own explanation rather than taking
+                    // one from the model, and it is already written as a
+                    // purpose, so it serves as the aim directly.
+                    Some(summary.as_str()),
+                )
                 .await
             {
                 Ok(true) => {}
@@ -4186,7 +4603,7 @@ mod tests {
         // 3 voice/docker tools
         assert!(names.contains(&"text_to_speech"));
         assert!(names.contains(&"speech_to_text"));
-        assert!(names.contains(&"docker_exec"));
+        assert!(names.contains(&"sandbox_exec"));
         // Canvas tool
         assert!(names.contains(&"canvas_present"));
         // 3 skill introspection tools (issue #1038)
@@ -4616,16 +5033,25 @@ mod tests {
             None, // process_manager
         )
         .await;
-        // Should fail for file-not-found, NOT for permission denied
+        // Should fail for a reason other than the capability check. With no
+        // workspace the file tools now refuse outright -- the unconfined
+        // fallback let any absolute path through -- so that refusal is an
+        // expected outcome here, as long as it is not a capability denial.
         assert!(
             result.is_error,
             "Expected error but got: {}",
             result.content
         );
         assert!(
+            !result.content.contains("does not have capability"),
+            "An allowed tool must not be denied by capability: {}",
+            result.content
+        );
+        assert!(
             result.content.contains("Failed to read")
                 || result.content.contains("not found")
-                || result.content.contains("No such file"),
+                || result.content.contains("No such file")
+                || result.content.contains("no workspace to confine"),
             "Unexpected error: {}",
             result.content
         );
@@ -5413,5 +5839,50 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_lowercase().contains("kernel"));
+    }
+
+    /// Everything stored before scopes existed lives at a bare key, so `global`
+    /// must compose to exactly that key or the whole store reads as empty.
+    #[test]
+    fn global_scope_is_the_bare_key() {
+        assert_eq!(scoped_memory_key(None, "priorities", None), "priorities");
+        assert_eq!(
+            scoped_memory_key(Some("global"), "priorities", None),
+            "priorities"
+        );
+        assert_eq!(
+            scoped_memory_key(Some("  "), "priorities", None),
+            "priorities"
+        );
+    }
+
+    /// The point of scopes: two teams can both store the obvious key without
+    /// overwriting one another.
+    #[test]
+    fn org_scopes_do_not_collide() {
+        let a = scoped_memory_key(Some("team:alpha"), "priorities", None);
+        let b = scoped_memory_key(Some("team:beta"), "priorities", None);
+        assert_eq!(a, "team:alpha/priorities");
+        assert_eq!(b, "team:beta/priorities");
+        assert_ne!(a, b);
+        assert_eq!(
+            scoped_memory_key(Some("project:p1"), "decisions", None),
+            "project:p1/decisions"
+        );
+        assert_eq!(
+            scoped_memory_key(Some("company:c1"), "standards", None),
+            "company:c1/standards"
+        );
+    }
+
+    /// A private scope with no caller identity must not fall back to global --
+    /// that would publish the thing the agent asked to keep to itself.
+    #[test]
+    fn agent_scope_never_falls_back_to_global() {
+        let known = scoped_memory_key(Some("agent"), "notes", Some("a1"));
+        assert_eq!(known, "agent:a1/notes");
+        let unknown = scoped_memory_key(Some("agent"), "notes", None);
+        assert_ne!(unknown, "notes");
+        assert!(unknown.starts_with("agent:"));
     }
 }

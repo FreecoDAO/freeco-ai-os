@@ -20,6 +20,77 @@ document.addEventListener('alpine:init', function() {
       restoreBusy: false,
       restoreResult: null,
 
+      // --- Default model picker ---
+      showDefaultModelPicker: false,
+      defaultModelQuery: '',
+      defaultModelList: [],
+      defaultModelSaving: false,
+      defaultModelMsg: '',
+      defaultModelMsgOk: false,
+
+      // Only models the user can actually run: their provider has a key, and
+      // they take tools. Offering a model whose provider is unconfigured
+      // produces an auth error at the first message, blamed on the model.
+      get filteredDefaultModels() {
+        var configured = {};
+        (this.providers || []).forEach(function(p) {
+          if (p.auth_status === 'configured' || p.auth_status === 'not_required') {
+            configured[p.id] = true;
+          }
+        });
+        var q = (this.defaultModelQuery || '').toLowerCase();
+        return (this.defaultModelList || []).filter(function(m) {
+          if (!configured[m.provider]) return false;
+          if (m.supports_tools === false) return false;
+          if (!q) return true;
+          return (m.id || '').toLowerCase().indexOf(q) !== -1 ||
+                 (m.display_name || '').toLowerCase().indexOf(q) !== -1 ||
+                 (m.provider || '').toLowerCase().indexOf(q) !== -1;
+        }).sort(function(a, b) {
+          // Free first, then by name, so the zero-cost options are the ones
+          // a newcomer sees without having to know which those are.
+          if (!!b.is_free !== !!a.is_free) return b.is_free ? 1 : -1;
+          return (a.id || '').localeCompare(b.id || '');
+        }).slice(0, 200);
+      },
+
+      async openDefaultModelPicker() {
+        this.showDefaultModelPicker = true;
+        this.defaultModelMsg = '';
+        if (this.defaultModelList.length) return;
+        try {
+          var data = await FreecoAPI.get('/api/models');
+          this.defaultModelList = Array.isArray(data) ? data : (data.models || []);
+        } catch (e) {
+          this.defaultModelMsg = 'Could not load the model list.';
+          this.defaultModelMsgOk = false;
+        }
+      },
+
+      async chooseDefaultModel(m) {
+        this.defaultModelSaving = true;
+        this.defaultModelMsg = '';
+        try {
+          var res = await FreecoAPI.put('/api/config/default-model',
+                                        { model: m.id, provider: m.provider });
+          if (res && (res.status === 'ok' || res.status === 'applied')) {
+            this.defaultModel = res.provider + ' : ' + res.model;
+            this.showDefaultModelPicker = false;
+            // A change that is active but unsaved is reported as such rather
+            // than as a clean success, because it will not survive a restart.
+            this.defaultModelMsg = res.warning || 'Default model updated.';
+            this.defaultModelMsgOk = !res.warning;
+          } else {
+            this.defaultModelMsg = (res && res.error) || 'Could not change the default model.';
+            this.defaultModelMsgOk = false;
+          }
+        } catch (e) {
+          this.defaultModelMsg = 'Could not change the default model.';
+          this.defaultModelMsgOk = false;
+        }
+        this.defaultModelSaving = false;
+      },
+
       async loadData() {
         this.loading = true;
         try {

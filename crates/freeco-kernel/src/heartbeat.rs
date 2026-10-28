@@ -158,12 +158,27 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
         let inactive_secs = (now - entry_ref.last_active).num_seconds();
 
         // Determine timeout: use agent's autonomous config if set, else default
-        let timeout_secs = entry_ref
+        let heartbeat_timeout = entry_ref
             .manifest
             .autonomous
             .as_ref()
             .map(|a| a.heartbeat_interval_secs * UNRESPONSIVE_MULTIPLIER)
-            .unwrap_or(config.default_timeout_secs) as i64;
+            .unwrap_or(config.default_timeout_secs);
+        // Never shorter than the agent's own schedule.
+        //
+        // The timeout came only from the heartbeat interval, so an agent told
+        // to run once an hour was judged by a sixty-second clock: idle for its
+        // whole designed pause, declared unresponsive, marked Crashed and
+        // "recovered" between every tick. Five service hands did this about 860
+        // times in three days. An agent is only late once its next scheduled
+        // run is overdue, so allow its interval plus the heartbeat margin.
+        let schedule_floor = match entry_ref.manifest.schedule {
+            freeco_types::agent::ScheduleMode::Continuous {
+                check_interval_secs,
+            } => check_interval_secs.saturating_add(heartbeat_timeout),
+            _ => 0,
+        };
+        let timeout_secs = heartbeat_timeout.max(schedule_floor) as i64;
 
         // --- Skip idle agents that have never genuinely processed a message ---
         //
@@ -185,6 +200,36 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
                 agent = %entry_ref.name,
                 inactive_secs,
                 "Skipping idle agent — never received a message"
+            );
+            continue;
+        }
+
+        // --- A reactive agent is idle by design ---
+        //
+        // The guard above only covers agents that were *never* used, because it
+        // compares `last_active` against `created_at`. As soon as you chat with
+        // an agent once, that no longer holds and idleness starts reading as a
+        // crash: marked unresponsive, marked Crashed, auto-recovered, idle
+        // again, forever. One daemon run here did 94 recoveries across six
+        // agents, and every agent the user had switched off came back.
+        //
+        // Reactive agents have nothing to be unresponsive about -- they act when
+        // messaged and sit still otherwise. Only an agent that is supposed to
+        // run on its own can be late. A genuine crash still routes to recovery,
+        // because this only skips the liveness check, not the Crashed state.
+        // Judged by the schedule alone. An `[autonomous]` block only carries
+        // limits (iterations, restarts); a reactive agent that has one still
+        // waits to be messaged, and counting the block as "runs on its own"
+        // flagged freeco-shopping unresponsive every minute.
+        let runs_on_its_own = !matches!(
+            entry_ref.manifest.schedule,
+            freeco_types::agent::ScheduleMode::Reactive
+        );
+        if !runs_on_its_own && entry_ref.state == AgentState::Running {
+            debug!(
+                agent = %entry_ref.name,
+                inactive_secs,
+                "Skipping reactive agent — idle is its normal state"
             );
             continue;
         }
@@ -415,6 +460,78 @@ mod tests {
         assert!(!should_exempt_idle_reactive_agent(&agent, false));
     }
 
+    /// An agent scheduled to run once an hour is idle between runs by design.
+    /// It used to be judged against the heartbeat interval alone and was marked
+    /// Crashed and "recovered" between every tick -- five service hands did so
+    /// about 860 times in three days. It is late only once its run is overdue.
+    #[test]
+    fn hourly_agent_is_not_crashed_between_its_own_runs() {
+        let registry = crate::registry::AgentRegistry::new();
+        let created = Utc::now() - Duration::seconds(7200);
+        // Active 89 seconds ago: well inside an hourly schedule.
+        let mut idle_between_runs = make_entry(
+            "hourly",
+            AgentState::Running,
+            created,
+            Utc::now() - Duration::seconds(89),
+        );
+        idle_between_runs.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 3600,
+        };
+        registry.register(idle_between_runs).unwrap();
+        let statuses = check_agents(&registry, &HeartbeatConfig::default());
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            !statuses[0].unresponsive,
+            "an agent between its own scheduled runs is not unresponsive"
+        );
+    }
+
+    /// An `[autonomous]` block carries limits, not a schedule. A reactive agent
+    /// with one (freeco-shopping) waits to be messaged like any reactive agent
+    /// and was flagged unresponsive every minute.
+    #[test]
+    fn reactive_agent_with_autonomous_limits_is_not_flagged_when_idle() {
+        let registry = crate::registry::AgentRegistry::new();
+        let mut agent = make_entry(
+            "shopping",
+            AgentState::Running,
+            Utc::now() - Duration::seconds(7200),
+            Utc::now() - Duration::seconds(3600),
+        );
+        agent.manifest.schedule = ScheduleMode::Reactive;
+        agent.manifest.autonomous = Some(AutonomousConfig::default());
+        registry.register(agent).unwrap();
+        let statuses = check_agents(&registry, &HeartbeatConfig::default());
+        assert!(
+            statuses.iter().all(|s| !s.unresponsive),
+            "a reactive agent idle between messages is not unresponsive"
+        );
+    }
+
+    #[test]
+    fn hourly_agent_that_missed_its_run_is_flagged() {
+        let registry = crate::registry::AgentRegistry::new();
+        let created = Utc::now() - Duration::seconds(20_000);
+        // Silent for well over an hour plus the heartbeat margin.
+        let mut overdue = make_entry(
+            "hourly-late",
+            AgentState::Running,
+            created,
+            Utc::now() - Duration::seconds(5_000),
+        );
+        overdue.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 3600,
+        };
+        registry.register(overdue).unwrap();
+        let statuses = check_agents(&registry, &HeartbeatConfig::default());
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            statuses[0].unresponsive,
+            "a missed hourly run is a real problem"
+        );
+    }
+
     #[test]
     fn test_active_agent_detected_unresponsive() {
         // An agent that WAS active (last_active >> created_at) but has gone
@@ -422,12 +539,19 @@ mod tests {
         let registry = crate::registry::AgentRegistry::new();
         let ten_min_ago = Utc::now() - Duration::seconds(600);
         let five_min_ago = Utc::now() - Duration::seconds(300);
-        let active_agent = make_entry(
+        let mut active_agent = make_entry(
             "active-agent",
             AgentState::Running,
             ten_min_ago,
             five_min_ago,
         );
+        // Liveness is only checked for agents that run on their own: a reactive
+        // agent is idle until messaged, so check_agents skips it by design. This
+        // test predates that skip and built a default -- reactive -- agent, so
+        // check_agents returned nothing and the test failed on len().
+        active_agent.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 60,
+        };
         registry.register(active_agent).unwrap();
 
         let config = HeartbeatConfig::default(); // timeout = 180s, inactive = ~300s
@@ -446,7 +570,13 @@ mod tests {
         let registry = crate::registry::AgentRegistry::new();
         let ten_min_ago = Utc::now() - Duration::seconds(600);
         let just_now = Utc::now() - Duration::seconds(10);
-        let healthy_agent = make_entry("healthy-agent", AgentState::Running, ten_min_ago, just_now);
+        let mut healthy_agent =
+            make_entry("healthy-agent", AgentState::Running, ten_min_ago, just_now);
+        // A self-running agent, for the same reason as the test above: a
+        // reactive one is skipped and never reaches the timeout check.
+        healthy_agent.manifest.schedule = ScheduleMode::Continuous {
+            check_interval_secs: 60,
+        };
         registry.register(healthy_agent).unwrap();
 
         let config = HeartbeatConfig::default(); // timeout = 180s

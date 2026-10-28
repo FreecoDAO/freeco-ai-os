@@ -3519,6 +3519,18 @@ mark.search-highlight {
 .freeco-chip svg { flex-shrink: 0; opacity: .8; }
 
 .freeco-input-row { display: flex; align-items: flex-end; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border-subtle); }
+
+/* Which model is answering. Sits under the input rather than in it: it is
+   consulted occasionally and should not compete with typing. */
+.freeco-model-row { display: flex; align-items: center; gap: 8px; padding: 0 12px 8px; }
+.freeco-model-select {
+  flex: 1 1 auto; min-width: 0; max-width: 100%;
+  font-size: 11px; padding: 3px 6px;
+  color: var(--text-dim); background: var(--bg-subtle);
+  border: 1px solid var(--border-subtle); border-radius: 6px;
+}
+.freeco-model-select:hover { color: var(--text); border-color: var(--border); }
+.freeco-model-note { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
 .freeco-input {
   flex: 1; resize: none; max-height: 100px; padding: 8px 10px; font-size: .85rem; font-family: inherit;
   border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-primary); color: var(--text);
@@ -3549,12 +3561,12 @@ mark.search-highlight {
   border: 1px solid var(--border) !important;
   overflow: visible;
 }
+/* Still. It used to bob and rotate every 3.4 s and wiggle continuously under
+   the mouse -- in the corner of every page, which read as the widget
+   trembling. The button's own hover lift is enough to say it is clickable. */
 .freeco-fab-logo {
   width: 34px; height: 34px; object-fit: contain;
-  animation: freecoBob 3.4s ease-in-out infinite;
-  transform-origin: 50% 80%;
 }
-.freeco-fab:hover .freeco-fab-logo { animation: freecoWiggle 0.6s ease-in-out infinite; }
 .freeco-fab-open { background: var(--accent) !important; color: var(--text-on-accent) !important; border-color: var(--accent) !important; }
 @keyframes freecoBob {
   0%, 100% { transform: translateY(0) rotate(0deg); }
@@ -3564,6 +3576,22 @@ mark.search-highlight {
   0%, 100% { transform: rotate(-7deg) scale(1.04); }
   50%      { transform: rotate(7deg) scale(1.04); }
 }
+/* Widget mode (/?widget=1, the desktop "FreEco Assistant" shortcut): only the
+   assistant, filling the window. Everything else is hidden rather than
+   removed, so the page's scripts run unchanged. */
+html.widget-mode body { overflow: hidden; }
+html.widget-mode body * { visibility: hidden; }
+html.widget-mode .freeco-dock,
+html.widget-mode .freeco-dock * { visibility: visible; }
+html.widget-mode .freeco-dock { inset: 0; right: 0; bottom: 0; }
+html.widget-mode .freeco-panel {
+  position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important;
+  max-width: none !important; max-height: none !important; border-radius: 0 !important;
+  left: 0 !important; top: 0 !important; transform: none !important;
+}
+html.widget-mode .freeco-fab,
+html.widget-mode .freeco-x { display: none !important; }
+
 .freeco-avatar-img { width: 22px; height: 22px; object-fit: contain; display: block; }
 .freeco-avatar { background: rgba(255,255,255,.9) !important; }
 
@@ -3806,3 +3834,58 @@ mark.search-highlight {
   border: 1px solid var(--border); background: var(--surface2); color: var(--text);
 }
 .freeco-search::placeholder { color: var(--text-dim); }
+
+/* ── Conversation menu ─────────────────────────────────────────────────── */
+.conv-menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 12px; background: none; border: 0; text-align: left;
+  font-size: 13px; color: var(--text); cursor: pointer;
+}
+.conv-menu-item:hover { background: var(--bg-secondary); }
+.conv-menu-sep { height: 1px; margin: 4px 0; background: var(--border); }
+.conv-menu-label {
+  padding: 6px 12px 2px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--text-dim);
+}
+
+/* ── Working panel ─────────────────────────────────────────────────────── */
+.chat-side-panel {
+  position: fixed; top: 56px; right: 0; bottom: 0;
+  width: min(460px, 92vw); z-index: 40;
+  display: flex; flex-direction: column;
+  background: var(--bg-primary, var(--bg)); border-left: 1px solid var(--border);
+  box-shadow: -6px 0 18px rgba(0,0,0,.18);
+}
+.chat-side-tabs {
+  display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-side-tabs button {
+  background: none; border: 0; padding: 5px 8px; border-radius: 6px;
+  font-size: 12px; color: var(--text-dim); cursor: pointer;
+}
+.chat-side-tabs button.active { color: var(--text); background: var(--bg-secondary); }
+.chat-side-tabs .chat-side-close { margin-left: auto; font-size: 18px; line-height: 1; }
+.chat-side-body { flex: 1; overflow: auto; padding: 8px; }
+.chat-side-bar { display: flex; align-items: center; gap: 6px; padding: 4px 0 8px; }
+.chat-side-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.chat-side-row:hover { background: var(--bg-secondary); }
+.chat-side-pre {
+  margin: 0; padding: 8px; overflow: auto; max-height: 60vh;
+  font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap;
+  word-break: break-word; background: var(--bg-elevated);
+  border-radius: 6px;
+}
+/* Leave room so the panel does not cover the conversation on wide screens. */
+@media (min-width: 1100px) {
+  .messages.with-side-panel { padding-right: min(470px, 40vw); }
+}
+
+/* ── Transcript view settings ──────────────────────────────────────────── */
+.messages.view-hide-tools .tool-card { display: none; }
+.messages.view-no-ts .message-time { display: none; }
+.messages.view-compact .message { margin-bottom: 4px; }
+.messages.view-compact .message-meta { display: none; }
