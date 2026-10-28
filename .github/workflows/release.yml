@@ -131,6 +131,17 @@ jobs:
         with:
           targets: ${{ matrix.platform.rust_target }}
 
+      # rust-toolchain.toml pins the compiler, so cargo builds with that
+      # toolchain, not the stable one above, and the target has to be added to
+      # it. Without this every cross-compiled target failed with "can't find
+      # crate for `core`" (v0.9.8).
+      - name: Add the target to the pinned toolchain
+        shell: bash
+        run: |
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update \
+            --target ${{ matrix.platform.rust_target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}
@@ -264,6 +275,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins the compiler, so cargo builds with that
+      # toolchain, not the stable one above, and the target has to be added to
+      # it. Without this every cross-compiled target failed with "can't find
+      # crate for `core`" (v0.9.8).
+      - name: Add the target to the pinned toolchain
+        shell: bash
+        run: |
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update \
+            --target ${{ matrix.target }}
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
