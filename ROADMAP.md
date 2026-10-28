@@ -1,6 +1,6 @@
 # FreEco.ai Roadmap & verified status
 
-_Last verified: **2026-08-15** against this repository's `v0.9.7` tag, the
+_Last verified: **2026-10-28** against this repository's `v0.9.8` tag, the
 running daemon on this machine, and the live OpenRouter model list._
 
 Every claim below was checked against something that can disagree with it — a
@@ -95,7 +95,7 @@ recorded as such.
   instantly with no steps — indistinguishable from a broken workflow file.
   Pushes to `main` and release-labelled pull requests still run all three.
 
-## Unreleased
+## Shipped in v0.9.8
 
 The current state of every feature, with how to check it, is in
 [`docs/feature-register.md`](docs/feature-register.md) (2026-09-30).
@@ -119,24 +119,24 @@ The current state of every feature, with how to check it, is in
 
 Checked against the running daemon on this machine, not against the commits.
 
-- 🟨 Attachments of any supported type reach the agent. Verified: a `.docx`
+- ✅ Attachments of any supported type reach the agent. Verified: a `.docx`
   uploaded (HTTP 201, a type the old allow-list refused), staged to
   `workspaces/Developer/uploads/`, and read by the agent with `docx2txt` inside
   its sandbox — no host shell involved.
-- 🟨 Sandbox image `freeco-sandbox:t3` reads documents: `pdftotext`, `tesseract`
+- ✅ Sandbox image `freeco-sandbox:t3` reads documents: `pdftotext`, `tesseract`
   (en/fr/de/ru), `docx2txt`, `pypdf`, `python-docx`, `openpyxl`. Verified by
   extracting text from a real PDF in a container with `--network none`.
-- 🟨 Model entitlement is probed at boot and persisted to `served_models.json`.
+- ✅ Model entitlement is probed at boot and persisted to `served_models.json`.
   Verified: NVIDIA shows 70 of 95 models available rather than all 95; Novita
   went from 3 visible models to 54.
-- 🟨 Conversation history pages instead of silently stopping at 50. Verified on
+- ✅ Conversation history pages instead of silently stopping at 50. Verified on
   an agent holding 284 messages: `total` and `has_more` returned, earlier
   messages loadable. The prompt sent to the model is unchanged.
-- 🟨 Renaming an agent moves its folder. Verified by renaming twice: one folder
+- ✅ Renaming an agent moves its folder. Verified by renaming twice: one folder
   at each step, no orphan left. This is what had produced a second assistant.
-- 🟨 The container runtime recovers unattended. Verified by stopping the Podman
+- ✅ The container runtime recovers unattended. Verified by stopping the Podman
   VM: all 12 containers were back **50 seconds** later with no human action.
-- 🟨 Fonts are served from the binary; the dashboard makes no request to Google,
+- ✅ Fonts are served from the binary; the dashboard makes no request to Google,
   which is also removed from its Content-Security-Policy.
 
 Not yet verified, and recorded as such:
@@ -642,13 +642,13 @@ Blocked work, reported by the assistant as not executed:
   against a copy of the real database - 1298 rows preserved, none left
   without a tenant - and live on `GET /api/tenancy` and
   `POST /api/tenancy/users`.
-- 🟨 **Wire the data gateway into the LLM path.** Done in two steps: first the
+- ✅ **Wire the data gateway into the LLM path.** Done in two steps: first the
   non-streaming loop only (background ticks), then, on 2026-09-30, the
   streaming loop the chat and popup use, plus system prompts, tool results and
   tool arguments. Until then everything typed in the chat reached the provider
   unscanned. See `docs/feature-register.md` §2.
 - [ ] **`users` and `tenants` tables.** No row can say who owns it.
-- 🟨 **Build the sandbox image and make it the default — built, not yet the
+- ✅ **Build the sandbox image and make it the default — built, not yet the
   default.** `localhost/freeco-sandbox:t1` (2026-08-22) predated the browser
   commit, so Brave, Xvfb, x11vnc and `freeco-screen` were never in it, and
   `deploy/sandbox/Dockerfile` could not build: `USER agent` came before the
@@ -666,12 +666,15 @@ Blocked work, reported by the assistant as not executed:
 - [ ] Prove a service tier end to end by hosting something real in it.
 
 
-- 🟨 Container runtime detection and the five-second probe timeout are one
+- ✅ Container runtime detection and the five-second probe timeout are one
   mechanism now. Two sessions built these separately; detection probes each
   candidate through the guarded check, so a wedged Docker costs five seconds
   once instead of hanging, and Podman is found when Docker does not answer.
-- 🟨 `docs/services.md` records the three tiers, why containers rather than
+- ✅ `docs/services.md` records the three tiers, why containers rather than
   WASM for persistent services, and what exists today versus what does not.
+
+## Unreleased
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase
