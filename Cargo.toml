@@ -32,7 +32,7 @@ version = "0.9.7"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/FreecoDAO/freeco-ai"
-rust-version = "1.75"
+rust-version = "1.87"
 
 [workspace.dependencies]
 # Async runtime
@@ -96,7 +96,7 @@ url = "2"
 # 47.0.3 or newer clears RUSTSEC-2026-0222 (stores could mix up type indices
 # between engines). Note 47.0.0-47.0.2 do NOT -- that range is still
 # vulnerable, and 47.0.2 is what dependabot proposed.
-wasmtime = "47.0.3"
+wasmtime = "49.0.2"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws", "multipart"] }

@@ -220,6 +220,68 @@ impl OrgStore {
         Ok(team)
     }
 
+    /// Every team, with its project and its members.
+    ///
+    /// Teams were write-only: `create_team` and `add_team_member` existed and
+    /// nothing could read them back, so a team once created was invisible to
+    /// the dashboard and to the agents in it. That also made the `team:<id>`
+    /// memory scope unusable, because nothing could discover the id.
+    pub fn list_teams(&self, include_archived: bool) -> FreecoResult<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let sql = if include_archived {
+            "SELECT t.id, t.name, t.description, t.archived, t.project_id, p.name
+             FROM teams t LEFT JOIN projects p ON p.id = t.project_id
+             ORDER BY t.updated_at DESC"
+        } else {
+            "SELECT t.id, t.name, t.description, t.archived, t.project_id, p.name
+             FROM teams t LEFT JOIN projects p ON p.id = t.project_id
+             WHERE t.archived = 0
+             ORDER BY t.updated_at DESC"
+        };
+        let mut stmt = conn.prepare(sql).map_err(mem_err)?;
+        let teams: Vec<(String, serde_json::Value)> = stmt
+            .query_map([], |r| {
+                let id: String = r.get(0)?;
+                Ok((
+                    id.clone(),
+                    serde_json::json!({
+                        "id": id,
+                        "name": r.get::<_, String>(1)?,
+                        "description": r.get::<_, Option<String>>(2)?,
+                        "archived": r.get::<_, i64>(3)? != 0,
+                        "project_id": r.get::<_, Option<String>>(4)?,
+                        "project": r.get::<_, Option<String>>(5)?,
+                    }),
+                ))
+            })
+            .map_err(mem_err)?
+            .collect::<Result<_, _>>()
+            .map_err(mem_err)?;
+
+        let mut member_stmt = conn
+            .prepare("SELECT agent_id, role FROM team_members WHERE team_id = ?1")
+            .map_err(mem_err)?;
+        let mut out = Vec::with_capacity(teams.len());
+        for (id, mut team) in teams {
+            let members: Vec<serde_json::Value> = member_stmt
+                .query_map([&id], |r| {
+                    Ok(serde_json::json!({
+                        "agent_id": r.get::<_, String>(0)?,
+                        "role": r.get::<_, Option<String>>(1)?,
+                    }))
+                })
+                .map_err(mem_err)?
+                .collect::<Result<_, _>>()
+                .map_err(mem_err)?;
+            if let Some(obj) = team.as_object_mut() {
+                obj.insert("member_count".into(), serde_json::json!(members.len()));
+                obj.insert("members".into(), serde_json::Value::Array(members));
+            }
+            out.push(team);
+        }
+        Ok(out)
+    }
+
     pub fn add_team_member(
         &self,
         team_id: &str,
@@ -312,9 +374,16 @@ impl OrgStore {
         let conn = self.conn.lock().map_err(lock_err)?;
         let mut stmt = conn
             .prepare(
-                "SELECT p.id, p.name, p.status, c.name,
+                // company_id and the team count come back too. The overview
+                // previously returned the company's *name* and no id at all,
+                // so nothing reading it could address a company or a team --
+                // which is what the `company:<id>` and `team:<id>` memory
+                // scopes need in order to be usable.
+                "SELECT p.id, p.name, p.status, c.name, c.id,
                         (SELECT count(*) FROM sessions s
-                          WHERE s.project_id = p.id AND s.trashed = 0) AS sessions
+                          WHERE s.project_id = p.id AND s.trashed = 0) AS sessions,
+                        (SELECT count(*) FROM teams t
+                          WHERE t.project_id = p.id AND t.archived = 0) AS teams
                  FROM projects p
                  LEFT JOIN companies c ON c.id = p.company_id
                  WHERE p.archived = 0
@@ -328,7 +397,9 @@ impl OrgStore {
                     "project": r.get::<_, String>(1)?,
                     "status": r.get::<_, String>(2)?,
                     "company": r.get::<_, Option<String>>(3)?,
-                    "sessions": r.get::<_, i64>(4)?,
+                    "company_id": r.get::<_, Option<String>>(4)?,
+                    "sessions": r.get::<_, i64>(5)?,
+                    "teams": r.get::<_, i64>(6)?,
                 }))
             })
             .map_err(mem_err)?;

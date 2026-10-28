@@ -26,7 +26,7 @@ or upstream Freeco material.
 
 ### Prerequisites
 
-- **Rust 1.75+** (install via [rustup](https://rustup.rs/))
+- **Rust 1.87+** (install via [rustup](https://rustup.rs/))
 - **Git**
 - **Python 3.8+** (optional, for Python runtime and skills)
 - A supported LLM API key (Anthropic, OpenAI, Groq, etc.) for end-to-end testing

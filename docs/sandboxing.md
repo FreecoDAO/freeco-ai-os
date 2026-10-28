@@ -57,3 +57,27 @@ SBOM/provenance and vulnerability scanning in the image-release pipeline. The
 release workflow checks the Dockerfile, emits BuildKit SBOM and provenance
 attestations, and blocks a release image with fixable high or critical Trivy
 findings.
+
+## Reaching the local services from a sandbox
+
+The services FreEco.ai installs (CRM, voice, speech, accounting) listen on the
+container VM's loopback interface, which a sandbox on podman's default network
+cannot see. With podman, a networked sandbox (`tier = "workspace"`) gets each
+port in `[docker] service_ports` forwarded to the same port on the host, one by
+one, through `pasta -T`:
+
+```toml
+[docker]
+service_ports = [3200, 3010, 8000, 8010, 8080]   # the default
+```
+
+Inside the sandbox the services are then at `http://127.0.0.1:<port>`. No other
+host port is forwarded, so the services' databases stay out of reach, and
+outbound internet is unchanged. OmniRoute (20128) is left out on purpose: it
+spends the owner's model credits. Docker has no equivalent option, and the
+`exec` tier has no network at all; both are unaffected.
+
+Agents use this rather than a host shell. `web_fetch` keeps refusing local
+addresses: a model that could reach 127.0.0.1 through it could reach this
+product's own API. The CRM has its own tool, `crm_api`, which reaches one fixed
+address and adds the vault-stored key itself.

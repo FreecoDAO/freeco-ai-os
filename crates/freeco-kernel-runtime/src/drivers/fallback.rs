@@ -33,16 +33,71 @@ impl FallbackDriver {
     }
 }
 
+/// The error to report once every link in the chain has failed.
+///
+/// Three rules, each protecting something a caller relies on:
+///
+/// - A chain of one reports its own error untouched. Nothing fell back, so
+///   there is no trail worth adding and no reason to change what callers see.
+/// - A retryable error (`RateLimited`, `Overloaded`) keeps its variant. The
+///   agent loop matches on those to back off and try again; wrapping them into
+///   `Api` would quietly turn a transient limit into a permanent failure.
+/// - Anything else becomes `Api` carrying every link's failure. Reporting only
+///   the last one describes the backup and hides why the primary was dropped:
+///   a primary out of credit followed by a mistyped backup used to surface as
+///   "404 page not found", naming a model the user never chose and saying
+///   nothing about the balance that actually stopped the turn.
+fn chain_error(last_error: Option<LlmError>, trail: Vec<String>) -> LlmError {
+    let Some(last) = last_error else {
+        return LlmError::Api {
+            status: 0,
+            message: "No drivers configured in fallback chain".to_string(),
+        };
+    };
+    if trail.len() <= 1 {
+        return last;
+    }
+    match last {
+        e @ (LlmError::RateLimited { .. } | LlmError::Overloaded { .. }) => e,
+        other => {
+            let status = match &other {
+                LlmError::Api { status, .. } => *status,
+                _ => 0,
+            };
+            LlmError::Api {
+                status,
+                message: format!(
+                    "every model in the fallback chain failed — {}",
+                    trail.join(" | ")
+                ),
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl LlmDriver for FallbackDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut last_error = None;
+        // Every link's failure, not just the last one.
+        //
+        // Reporting only the final error describes the backup and hides the
+        // reason the primary was abandoned. A primary out of credit followed
+        // by a mistyped backup surfaced as "404 page not found" -- naming the
+        // one provider the user never configured, and saying nothing about
+        // the balance that actually stopped the turn.
+        let mut trail: Vec<String> = Vec::new();
 
         for (i, (driver, model_name)) in self.drivers.iter().enumerate() {
             let mut req = request.clone();
             if !model_name.is_empty() {
                 req.model = model_name.clone();
             }
+            let attempted = if model_name.is_empty() {
+                request.model.clone()
+            } else {
+                model_name.clone()
+            };
             match driver.complete(req).await {
                 Ok(response) => return Ok(response),
                 Err(e @ LlmError::RateLimited { .. }) | Err(e @ LlmError::Overloaded { .. }) => {
@@ -52,6 +107,7 @@ impl LlmDriver for FallbackDriver {
                         error = %e,
                         "Driver rate-limited/overloaded, trying next fallback"
                     );
+                    trail.push(format!("{attempted}: {e}"));
                     last_error = Some(e);
                 }
                 Err(e) => {
@@ -61,15 +117,13 @@ impl LlmDriver for FallbackDriver {
                         error = %e,
                         "Fallback driver failed, trying next"
                     );
+                    trail.push(format!("{attempted}: {e}"));
                     last_error = Some(e);
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
-            status: 0,
-            message: "No drivers configured in fallback chain".to_string(),
-        }))
+        Err(chain_error(last_error, trail))
     }
 
     async fn stream(
@@ -78,12 +132,18 @@ impl LlmDriver for FallbackDriver {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         let mut last_error = None;
+        let mut trail: Vec<String> = Vec::new();
 
         for (i, (driver, model_name)) in self.drivers.iter().enumerate() {
             let mut req = request.clone();
             if !model_name.is_empty() {
                 req.model = model_name.clone();
             }
+            let attempted = if model_name.is_empty() {
+                request.model.clone()
+            } else {
+                model_name.clone()
+            };
             match driver.stream(req, tx.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(e @ LlmError::RateLimited { .. }) | Err(e @ LlmError::Overloaded { .. }) => {
@@ -93,6 +153,7 @@ impl LlmDriver for FallbackDriver {
                         error = %e,
                         "Driver rate-limited/overloaded (stream), trying next fallback"
                     );
+                    trail.push(format!("{attempted}: {e}"));
                     last_error = Some(e);
                 }
                 Err(e) => {
@@ -102,15 +163,13 @@ impl LlmDriver for FallbackDriver {
                         error = %e,
                         "Fallback driver (stream) failed, trying next"
                     );
+                    trail.push(format!("{attempted}: {e}"));
                     last_error = Some(e);
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| LlmError::Api {
-            status: 0,
-            message: "No drivers configured in fallback chain".to_string(),
-        }))
+        Err(chain_error(last_error, trail))
     }
 }
 
@@ -314,6 +373,91 @@ mod tests {
         assert!(
             result.is_ok(),
             "FallbackDriver::stream should also escalate network errors"
+        );
+    }
+
+    /// A primary out of credit, then a backup whose model id does not exist.
+    /// The user must be told about BOTH, and the balance first.
+    #[tokio::test]
+    async fn exhausted_chain_reports_every_link_not_just_the_last() {
+        struct NoBalance;
+        #[async_trait]
+        impl LlmDriver for NoBalance {
+            async fn complete(
+                &self,
+                _r: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::Api {
+                    status: 403,
+                    message: "not enough balance".to_string(),
+                })
+            }
+        }
+        struct NoSuchModel;
+        #[async_trait]
+        impl LlmDriver for NoSuchModel {
+            async fn complete(
+                &self,
+                _r: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Err(LlmError::Api {
+                    status: 404,
+                    message: "404 page not found".to_string(),
+                })
+            }
+        }
+        let driver = FallbackDriver::new(vec![
+            Arc::new(NoBalance) as Arc<dyn LlmDriver>,
+            Arc::new(NoSuchModel) as Arc<dyn LlmDriver>,
+        ]);
+        let err = driver.complete(test_request()).await.unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("not enough balance"),
+            "the primary's reason must survive: {text}"
+        );
+        assert!(
+            text.contains("404 page not found"),
+            "the backup's reason must be there too: {text}"
+        );
+        assert!(
+            text.find("not enough balance") < text.find("404 page not found"),
+            "links are reported in the order they were tried: {text}"
+        );
+    }
+
+    /// Nothing fell back, so nothing about the error may change.
+    #[tokio::test]
+    async fn single_link_chain_returns_its_error_untouched() {
+        let driver = FallbackDriver::new(vec![Arc::new(FailDriver) as Arc<dyn LlmDriver>]);
+        match driver.complete(test_request()).await {
+            Err(LlmError::Api { status, message }) => {
+                assert_eq!(status, 500);
+                assert_eq!(message, "Internal error");
+            }
+            other => panic!("expected the driver's own error, got {other:?}"),
+        }
+    }
+
+    /// The agent loop backs off on RateLimited. Wrapping it into Api would turn
+    /// a transient limit into a permanent failure, so the variant must survive
+    /// even at the end of a longer chain.
+    #[test]
+    fn retryable_error_keeps_its_variant_at_the_end_of_a_chain() {
+        let err = chain_error(
+            Some(LlmError::RateLimited {
+                retry_after_ms: 1500,
+            }),
+            vec!["a: failed".to_string(), "b: rate limited".to_string()],
+        );
+        assert!(
+            matches!(
+                err,
+                LlmError::RateLimited {
+                    retry_after_ms: 1500
+                }
+            ),
+            "got {err:?}"
         );
     }
 }

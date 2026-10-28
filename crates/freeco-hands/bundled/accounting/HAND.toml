@@ -1,0 +1,79 @@
+id = "accounting"
+name = "Akaunting"
+description = "Auditable books on your own machine: income and expense, invoices, and the reports grant funders ask for."
+category = "productivity"
+icon = "\U0001F4B0"
+
+tools = [
+    "web_fetch",
+    "memory_store", "memory_recall",
+    "sandbox_exec",
+]
+
+[container]
+# An application plus its database. Defined as native services rather than a
+# compose file, because `podman compose` has no native implementation and shells
+# out to Docker's docker-compose binary -- a compose-defined stack stops working
+# the day Docker Desktop is uninstalled, while single-container hands keep
+# running.
+health_path = "/"
+health_timeout_secs = 600
+restart = "unless-stopped"
+
+# Read by service_port() to build the health URL.
+[container.env]
+PORT = "8080"
+
+[[container.services]]
+name = "db"
+image = "docker.io/library/mariadb:11"
+volumes = ["db-data:/var/lib/mysql"]
+# Akaunting's installer fails outright against a database still starting up, and
+# leaves a half-written install behind, so dependents wait for this.
+health_cmd = ["healthcheck.sh", "--connect", "--innodb_initialized"]
+
+[container.services.env]
+MYSQL_ROOT_PASSWORD = "secret:ACCOUNTING_DB_ROOT_PASSWORD"
+MYSQL_DATABASE = "akaunting"
+MYSQL_USER = "akaunting"
+MYSQL_PASSWORD = "secret:ACCOUNTING_DB_PASSWORD"
+
+[[container.services]]
+name = "app"
+image = "docker.io/akaunting/akaunting:latest"
+depends_on = ["db"]
+ports = ["8080:80"]
+volumes = ["app-data:/var/www/html"]
+
+[container.services.env]
+DB_HOST = "db"
+DB_DATABASE = "akaunting"
+DB_USERNAME = "akaunting"
+DB_PASSWORD = "${ACCOUNTING_DB_PASSWORD}"
+APP_URL = "http://localhost:8080"
+
+[agent]
+name = "accounting"
+description = "Looks after the books: what has been recorded, what is outstanding, and whether the service is actually serving."
+module = "builtin:chat"
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.3
+max_iterations = 20
+system_prompt = """
+To check or call the service, use sandbox_exec with tier='workspace': from the sandbox it is at http://127.0.0.1:8080. Never ask for a host shell.
+
+You look after an Akaunting instance running on the user's own machine at \
+http://localhost:8080.
+
+The first activation needs one step you cannot do for them: they open it and \
+finish the first-run wizard, creating the company and the admin user. Those \
+credentials are what the accounting tools then use. Say so plainly rather than \
+reporting the hand as finished -- until the wizard is done the service is up \
+and holds nothing, which looks like a broken install and is not.
+
+These are books. Report what is actually recorded, never an estimate presented \
+as a figure, and say when something is unreconciled rather than rounding it \
+away.
+"""

@@ -147,6 +147,9 @@ const RATE_LIMIT_PATTERNS: &[&str] = &[
     "requests per minute",
     "tpm limit",
     "rpm limit",
+    // Subscription CLIs (Claude Code) report "5-hour limit reached" and
+    // similar rather than an HTTP status.
+    "limit reached",
 ];
 
 /// Model-not-found patterns.

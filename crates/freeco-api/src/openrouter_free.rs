@@ -172,6 +172,27 @@ fn is_free(model: &serde_json::Value) -> bool {
     ["prompt", "completion"].iter().all(|k| zero(k))
 }
 
+/// Is this id one we are willing to hand a user's conversation to?
+///
+/// Two families are excluded, and neither is caught by price or by the `tools`
+/// parameter list, so both slipped through the filter that exists to keep this
+/// model usable:
+///
+/// `openrouter/*` are OpenRouter's own routers. They advertise `tools` and then
+/// answer "No endpoints found that support tool use", which is the failure this
+/// whole function was written to avoid -- and `openrouter/free` passes every
+/// other check here, so it was only ranking below the wide-context models by
+/// luck. A week of delistings and it becomes the answer.
+///
+/// `stealth/*` are cloaked pre-release models. The provider is undisclosed and
+/// prompts are logged for evaluation, which is a strange default for a product
+/// that puts a local router in front of the paid ones. It is also the widest
+/// free context on offer today, so ranking picks it first unless it is
+/// excluded here.
+fn is_usable_free_model(id: &str) -> bool {
+    !id.starts_with("openrouter/") && !id.starts_with("stealth/")
+}
+
 /// The best free model that will actually accept tool definitions.
 ///
 /// `openrouter/free` lists `tools` among its supported parameters, but the
@@ -213,6 +234,7 @@ pub async fn best_free_tool_model() -> Option<String> {
                 .as_array()
                 .is_some_and(|ps| ps.iter().any(|p| p.as_str() == Some("tools")))
         })
+        .filter(|m| m["id"].as_str().is_some_and(is_usable_free_model))
         .filter_map(|m| {
             Some((
                 m["context_length"].as_u64().unwrap_or(0),
@@ -271,6 +293,28 @@ mod tests {
         });
         assert!(is_free(&router));
         assert_eq!(DEFAULT_FREE_MODEL, "openrouter/free");
+    }
+
+    /// The router advertises `tools` and then refuses them, so it must never be
+    /// what the picker returns -- however wide its context or however many
+    /// named free models get delisted.
+    #[test]
+    fn routers_are_never_picked_as_the_free_tool_model() {
+        assert!(!is_usable_free_model("openrouter/free"));
+        assert!(!is_usable_free_model("openrouter/auto"));
+    }
+
+    /// Cloaked models log prompts to an undisclosed provider. Today one of them
+    /// has the widest free context on OpenRouter, so ranking alone picks it.
+    #[test]
+    fn cloaked_models_are_never_picked() {
+        assert!(!is_usable_free_model("stealth/ox-alpha"));
+    }
+
+    #[test]
+    fn named_free_models_are_still_eligible() {
+        assert!(is_usable_free_model("nvidia/nemotron-3.5-lightning:free"));
+        assert!(is_usable_free_model("thinkingmachines/inkling:free"));
     }
 
     /// The paid auto-router must not be mistaken for the free one. It prices

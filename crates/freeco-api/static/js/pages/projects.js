@@ -12,6 +12,9 @@ function projectsPage() {
     projects: [],
     companies: [],
     overview: [],
+    // Teams were being created here and never read back, because the route
+    // accepted POST only. A team nobody can see is a team nobody joins.
+    teams: [],
     // Archived work is hidden by default so finished projects do not crowd
     // the list, and reachable in one click so it is never lost.
     showArchived: false,
@@ -34,11 +37,13 @@ function projectsPage() {
         var results = await Promise.all([
           FreecoAPI.get('/api/org/projects' + q),
           FreecoAPI.get('/api/org/companies' + q),
-          FreecoAPI.get('/api/org/overview')
+          FreecoAPI.get('/api/org/overview'),
+          FreecoAPI.get('/api/org/teams' + q)
         ]);
         this.projects = (results[0] && results[0].projects) || [];
         this.companies = (results[1] && results[1].companies) || [];
         this.overview = (results[2] && results[2].projects) || [];
+        this.teams = (results[3] && results[3].teams) || [];
       } catch (e) {
         // Say what failed. A silently empty page reads as "you have no
         // projects", which is a different and more alarming message.
@@ -52,6 +57,12 @@ function projectsPage() {
     countFor(id) {
       var row = this.overview.find(function (o) { return o.project_id === id; });
       return row ? row.sessions : 0;
+    },
+
+    // Teams on a project, so the structure reads top-down: company, project,
+    // the groups doing the work, and who is in them.
+    teamsFor(projectId) {
+      return this.teams.filter(function (t) { return t.project_id === projectId; });
     },
 
     companyName(id) {
@@ -92,6 +103,9 @@ function projectsPage() {
         await FreecoAPI.post('/api/org/teams', { name: name, project_id: this.selected.id });
         this.newTeam = '';
         FreecoToast.success('Team added to ' + this.selected.name + '.');
+        // Reload so the new team appears. Without this the only feedback was
+        // the toast, and the team stayed invisible until a page refresh.
+        await this.load();
       } catch (e) {
         FreecoToast.error('Could not create team: ' + e.message);
       }

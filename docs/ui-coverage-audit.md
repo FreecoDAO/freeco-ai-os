@@ -1,4 +1,10 @@
-# Dashboard Coverage Audit (v0.7.4)
+# Dashboard Coverage Audit (v0.7.4) — superseded
+
+> **Superseded.** This audit was last run at v0.7.4, when the API had 157
+> routes; `server.rs` registers 237 as of v0.9.8. Its route inventory is out of
+> date and must not be used as a list of what exists. For the current state of
+> each feature, and how to check it, see
+> [`feature-register.md`](feature-register.md).
 
 Comparing all 157 `/api/*` routes against what the dashboard surfaces. The
 recurring finding this session: **abilities exist in the backend but are

@@ -29,6 +29,10 @@ pub struct TtsEngine {
     /// of the hardcoded `https://api.elevenlabs.io/...`. Sourced from
     /// `MediaConfig.tts_elevenlabs_base_url`. Closes #1051.
     elevenlabs_base_url: Option<String>,
+    /// Env var holding the key for a local OpenAI-compatible TTS service,
+    /// from `MediaConfig.local_audio_api_key_env`. A custom endpoint must not
+    /// be sent the real `OPENAI_API_KEY`.
+    local_api_key_env: Option<String>,
 }
 
 impl TtsEngine {
@@ -37,7 +41,14 @@ impl TtsEngine {
             config,
             openai_base_url: None,
             elevenlabs_base_url: None,
+            local_api_key_env: None,
         }
+    }
+
+    /// Key for a local TTS service reached through `openai_base_url`.
+    pub fn with_local_api_key_env(mut self, env: Option<String>) -> Self {
+        self.local_api_key_env = env;
+        self
     }
 
     /// Attach optional base-URL overrides from `MediaConfig`. Use this to
@@ -113,7 +124,13 @@ impl TtsEngine {
         voice_override: Option<&str>,
         format_override: Option<&str>,
     ) -> Result<TtsResult, String> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?;
+        // A custom endpoint is a different service and never receives the
+        // OpenAI key; it gets its own, or a placeholder a local server accepts.
+        let api_key = match (&self.openai_base_url, &self.local_api_key_env) {
+            (Some(_), Some(env)) => std::env::var(env).map_err(|_| format!("{env} not set"))?,
+            (Some(_), None) => "local".to_string(),
+            (None, _) => std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
+        };
 
         // Apply per-request overrides or fall back to config defaults
         let voice = voice_override.unwrap_or(&self.config.openai.voice);

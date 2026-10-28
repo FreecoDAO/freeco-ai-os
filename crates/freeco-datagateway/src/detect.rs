@@ -103,6 +103,157 @@ fn is_key_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
+fn is_b64url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Characters a secret handed over after "key:" or "token=" can contain.
+fn is_secret_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_-.+/=~".contains(c)
+}
+
+/// A JSON Web Token: `eyJ<header>.<payload>.<signature>`, all base64url.
+///
+/// Self-hosted services hand these out as API keys (Twenty CRM does), and none
+/// of them carries a vendor prefix, so the prefix list alone never saw one.
+/// The three-part shape starting with the base64 of `{"` is specific enough to
+/// mask without a keyword next to it.
+fn scan_jwt(text: &str, start: usize) -> Option<Finding> {
+    if !word_boundary_before(text, start) {
+        return None;
+    }
+    let rest = &text[start..];
+    if !rest.starts_with("eyJ") {
+        return None;
+    }
+    let mut end = 0usize;
+    let mut parts = 0usize;
+    loop {
+        let seg = rest[end..]
+            .char_indices()
+            .find(|(_, c)| !is_b64url_char(*c))
+            .map(|(p, _)| p)
+            .unwrap_or(rest.len() - end);
+        if seg < 10 {
+            return None;
+        }
+        end += seg;
+        parts += 1;
+        if parts == 3 {
+            break;
+        }
+        if !rest[end..].starts_with('.') {
+            return None;
+        }
+        end += 1;
+    }
+    Some(Finding {
+        kind: DataKind::ApiKey,
+        start,
+        end: start + end,
+        value: rest[..end].to_string(),
+    })
+}
+
+/// Words that announce a secret: "api key: …", "token=…", "password is …".
+/// The shorter minimum applies to passwords, which are shorter than keys.
+const SECRET_KEYWORDS: &[(&str, usize)] = &[
+    ("api_key", 20),
+    ("apikey", 20),
+    ("api key", 20),
+    ("access key", 20),
+    ("secret", 20),
+    ("token", 20),
+    ("bearer", 20),
+    ("key", 20),
+    ("password", 8),
+    ("passwd", 8),
+];
+
+/// A value handed over right after a word that announces it, e.g.
+/// `CRM key: 7fk3...`. Returns the value, not the keyword, and the byte offset
+/// where scanning resumes.
+///
+/// Anchored on the keyword so that a long random string on its own -- a commit
+/// hash, a UUID in a log line -- is left alone: the prefix list's reasoning
+/// still holds, and this only widens it to the case where the user has said
+/// out loud that what follows is a secret.
+fn scan_announced_secret(text: &str, start: usize) -> Option<(Finding, usize)> {
+    // `_` counts as a boundary here so `CRM_API_KEY=…` announces a secret the
+    // way `key: …` does; a letter before does not, or "monkey" would.
+    if text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|p| p.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let rest = &text[start..];
+    let lower: String = rest
+        .chars()
+        .take(12)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let (kw, min_len) = SECRET_KEYWORDS
+        .iter()
+        .find(|(kw, _)| lower.starts_with(kw))?;
+    let mut pos = kw.len();
+    // A keyword glued to more letters is another word: "keyboard", "tokens".
+    if rest[pos..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    // Separator: any mix of `:`, `=`, quotes and spaces, optionally " is ".
+    let sep_start = pos;
+    while let Some(c) = rest[pos..].chars().next() {
+        if c == ':' || c == '=' || c == '"' || c == '\'' || c == ' ' || c == '\t' || c == '`' {
+            pos += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if rest[pos..].to_ascii_lowercase().starts_with("is ") {
+        pos += 3;
+        while rest[pos..].starts_with(' ') {
+            pos += 1;
+        }
+    }
+    if pos == sep_start || pos - sep_start > 8 {
+        return None;
+    }
+    let value_len = rest[pos..]
+        .char_indices()
+        .find(|(_, c)| !is_secret_char(*c))
+        .map(|(p, _)| p)
+        .unwrap_or(rest.len() - pos);
+    let value = rest[pos..pos + value_len].trim_end_matches('.');
+    let has_digit = value.chars().any(|c| c.is_ascii_digit());
+    let has_alpha = value.chars().any(|c| c.is_ascii_alphabetic());
+    let has_other = value.chars().any(|c| !c.is_ascii_alphabetic());
+    let plausible = if *min_len < 20 {
+        // A password: anything but a plain word.
+        has_other
+    } else {
+        has_digit && has_alpha
+    };
+    if value.len() < *min_len || !plausible {
+        return None;
+    }
+    let vstart = start + pos;
+    Some((
+        Finding {
+            kind: DataKind::ApiKey,
+            start: vstart,
+            end: vstart + value.len(),
+            value: value.to_string(),
+        },
+        vstart + value.len(),
+    ))
+}
+
 /// Locate every sensitive value in `text`.
 ///
 /// Findings never overlap: the longest match at a given position wins, so a
@@ -161,6 +312,26 @@ pub fn scan(text: &str) -> Vec<Finding> {
         }
 
         let c = rest.chars().next().unwrap();
+
+        // JSON Web Tokens, which self-hosted services issue as API keys.
+        if c == 'e' {
+            if let Some(f) = scan_jwt(text, i) {
+                i = f.end;
+                out.push(f);
+                continue;
+            }
+        }
+
+        // A value the user announced as a secret: "CRM key: …".
+        if c.is_ascii_alphabetic() {
+            if let Some((f, resume)) = scan_announced_secret(text, i) {
+                // The value may itself be a JWT or prefixed key; one finding
+                // covers it either way.
+                out.push(f);
+                i = resume;
+                continue;
+            }
+        }
 
         // Email addresses.
         if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '%' || c == '+' || c == '-' {
@@ -360,6 +531,16 @@ fn scan_card(text: &str, start: usize) -> Option<Finding> {
     if !luhn_valid(&digits) {
         return None;
     }
+    // Digits running straight into letters are part of an identifier -- a hex
+    // message id, a hash -- not a card someone wrote down. One in ten digit
+    // runs passes the checksum by chance, so ids were being flagged.
+    if rest[end..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
     Some(Finding {
         kind: DataKind::CreditCard,
         start,
@@ -400,6 +581,15 @@ mod tests {
         assert!(scan("order 4242 4242 4242 4243").is_empty());
     }
 
+    /// A Luhn-valid digit run inside an identifier is not a card.
+    #[test]
+    fn digits_inside_an_identifier_are_not_a_card() {
+        assert!(scan("id 4242424242424242abc").is_empty());
+        assert!(scan("ref 4242424242424242_x").is_empty());
+        // Still found on its own, or before punctuation.
+        assert_eq!(kinds("pay 4242424242424242."), vec![DataKind::CreditCard]);
+    }
+
     #[test]
     fn finds_emails_but_not_every_at_sign() {
         assert_eq!(
@@ -427,6 +617,45 @@ mod tests {
     fn finds_private_key_blocks() {
         let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----";
         assert_eq!(kinds(pem), vec![DataKind::PrivateKey]);
+    }
+
+    /// Twenty CRM hands out JWTs as API keys, with no vendor prefix. This is
+    /// the key that went to a model provider in plain text.
+    #[test]
+    fn finds_jwt_api_keys() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ3b3Jrc3BhY2UifQ.c2lnbmF0dXJlLXZhbHVlLTEyMw";
+        let f = scan(&format!("here is my key {jwt} thanks"));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, DataKind::ApiKey);
+        assert_eq!(f[0].value, jwt);
+        // Bare, with no keyword next to it.
+        assert_eq!(scan(jwt).len(), 1);
+    }
+
+    #[test]
+    fn finds_values_announced_as_secrets() {
+        let f = scan("CRM key: 7fk3Qx9LmP2vR8tW4yZ6aB1c done");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].value, "7fk3Qx9LmP2vR8tW4yZ6aB1c");
+        let f = scan("CRM_API_KEY=7fk3Qx9LmP2vR8tW4yZ6aB1c");
+        assert_eq!(f[0].value, "7fk3Qx9LmP2vR8tW4yZ6aB1c");
+        let f = scan("the password is Hunter2-x9.");
+        assert_eq!(f[0].value, "Hunter2-x9");
+    }
+
+    /// The keywords are ordinary words. Prose around them must survive.
+    #[test]
+    fn keywords_in_prose_are_left_alone() {
+        for t in [
+            "the key is to plan first",
+            "a token of appreciation for the whole team",
+            "password reset link",
+            "my keyboard broke",
+            "secret: keep calm",
+            "monkey: 7fk3Qx9LmP2vR8tW4yZ6aB1c",
+        ] {
+            assert!(scan(t).is_empty(), "masked prose: {t}");
+        }
     }
 
     #[test]

@@ -707,6 +707,33 @@ pub struct DockerSandboxConfig {
     /// widening every agent's filesystem access.
     #[serde(default)]
     pub persistent_workspace_agents: Vec<String>,
+    /// Environment variables copied from the daemon into every sandbox.
+    ///
+    /// The sandbox ships `gh`, `git` and `curl`, so an agent could already read
+    /// an issue or open a pull request from inside its container -- except that
+    /// no credential ever reached it, and the agent would ask for a host shell
+    /// instead, which is the one thing the sandbox exists to avoid.
+    ///
+    /// Named rather than blanket-copied, and empty by default: the daemon's
+    /// environment holds every provider key and every service password, and
+    /// handing that to agent code wholesale is not a default anyone should get
+    /// without asking. List exactly what the work needs, e.g.
+    /// `sandbox_env = ["GH_TOKEN"]`.
+    #[serde(default)]
+    pub sandbox_env: Vec<String>,
+    /// Local service ports a networked sandbox can reach at `127.0.0.1:<port>`.
+    ///
+    /// The services FreEco.ai installs listen on the host's loopback, which a
+    /// sandbox cannot see; with podman each port listed here is forwarded into
+    /// the sandbox, one by one, and no other host port is. Defaults: CRM 3200,
+    /// voice UI 3010, voice API 8000, speech 8010, accounting 8080. OmniRoute
+    /// (20128) is left out on purpose: it spends the owner's model credits.
+    #[serde(default = "default_service_ports")]
+    pub service_ports: Vec<u16>,
+}
+
+fn default_service_ports() -> Vec<u16> {
+    vec![3200, 3010, 8000, 8010, 8080]
 }
 
 fn default_reuse_cool_secs() -> u64 {
@@ -773,6 +800,8 @@ impl Default for DockerSandboxConfig {
             restart_policy: default_restart_policy(),
             persistent_workspace: false,
             persistent_workspace_agents: Vec::new(),
+            sandbox_env: Vec::new(),
+            service_ports: default_service_ports(),
         }
     }
 }

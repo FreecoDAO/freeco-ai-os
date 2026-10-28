@@ -120,6 +120,21 @@ pub async fn list_projects(
     }
 }
 
+/// GET /api/org/teams — every team, with its project and its members.
+///
+/// The route accepted POST only, so a team could be created and never listed:
+/// the dashboard had no way to show one and an agent had no way to find the id
+/// its own team memory is keyed by.
+pub async fn list_teams(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ArchivedFlag>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().list_teams(q.archived) {
+        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "teams": rows }))),
+        Err(e) => fail(e),
+    }
+}
+
 /// POST /api/org/projects — create, or return the existing project of that
 /// name.
 ///

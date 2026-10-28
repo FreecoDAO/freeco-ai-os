@@ -653,6 +653,112 @@ impl SessionStore {
             .map_err(|e| FreecoError::Memory(e.to_string()))
     }
 
+    /// Name an agent's conversation. An empty name clears it, so the next
+    /// write derives one from the first user message again.
+    pub fn set_canonical_label(&self, agent_id: AgentId, label: Option<&str>) -> FreecoResult<()> {
+        let mut canonical = self.load_canonical(agent_id)?;
+        canonical.label = label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty());
+        canonical.updated_at = Utc::now().to_rfc3339();
+        self.save_canonical(&canonical)
+    }
+
+    /// Find existing conversations about a theme.
+    ///
+    /// The assistant is asked to put a message "in the chat about X", and until
+    /// now nothing could answer that question: sessions could be listed but not
+    /// searched, so every request became a new thread and related work scattered.
+    ///
+    /// Matching is by whole words from the query against the conversation's
+    /// label and its text. A label hit counts for more than a body hit: a thread
+    /// named for the task is a better home for it than one that merely mentioned
+    /// it once. Scoring is deliberately plain rather than semantic - the caller
+    /// shows the candidates and a person chooses, so a near miss costs nothing.
+    pub fn search_canonical_sessions(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() > 2)
+            .map(|w| w.to_string())
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, messages, updated_at, label \
+                 FROM canonical_sessions ORDER BY updated_at DESC",
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let agent_id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                let updated_at: String = row.get(2)?;
+                let label: Option<String> = row.get(3).unwrap_or(None);
+                Ok((agent_id, blob, updated_at, label))
+            })
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+
+        let mut scored: Vec<(usize, serde_json::Value)> = Vec::new();
+        for row in rows.flatten() {
+            let (agent_id, blob, updated_at, label) = row;
+            let messages = rmp_serde::from_slice::<Vec<Message>>(&blob).unwrap_or_default();
+            let label_text = label.clone().unwrap_or_default().to_lowercase();
+            // Only the trailing part of the conversation: a term mentioned once,
+            // long ago, does not make a thread the right home for new work.
+            let start = messages.len().saturating_sub(40);
+            let body: String = messages[start..]
+                .iter()
+                .map(|m| m.content.text_content())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+
+            let mut score = 0usize;
+            let mut matched: Vec<String> = Vec::new();
+            for term in &terms {
+                if label_text.contains(term.as_str()) {
+                    score += 3;
+                    matched.push(term.clone());
+                } else if body.contains(term.as_str()) {
+                    score += 1;
+                    matched.push(term.clone());
+                }
+            }
+            if score == 0 {
+                continue;
+            }
+            scored.push((
+                score,
+                serde_json::json!({
+                    "session_id": agent_id,
+                    "agent_id": agent_id,
+                    "label": label,
+                    "message_count": messages.len(),
+                    "updated_at": updated_at,
+                    "score": score,
+                    "matched": matched,
+                    "kind": "canonical",
+                }),
+            ));
+        }
+        // Best match first; equal scores keep the most recently used thread,
+        // which the ORDER BY above already put first.
+        // Stable, so equal scores keep the ORDER BY's most-recent-first order.
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+        Ok(scored.into_iter().take(limit).map(|(_, v)| v).collect())
+    }
+
     /// Append new messages to the canonical session and compact if over threshold.
     ///
     /// Compaction summarizes old messages into a text summary and trims the
@@ -742,6 +848,16 @@ impl SessionStore {
         let start = canonical.messages.len().saturating_sub(window);
         let recent = canonical.messages[start..].to_vec();
         Ok((canonical.compacted_summary.clone(), recent))
+    }
+
+    /// How many messages this agent's conversation actually holds.
+    ///
+    /// `canonical_context` returns a trailing window, so a caller that shows
+    /// its result has no way to tell a short conversation from a long one it
+    /// is only seeing the end of. A reader that cannot say "there is more"
+    /// looks exactly like one that lost the rest.
+    pub fn canonical_len(&self, agent_id: AgentId) -> FreecoResult<usize> {
+        Ok(self.load_canonical(agent_id)?.messages.len())
     }
 
     /// Persist a canonical session to SQLite.

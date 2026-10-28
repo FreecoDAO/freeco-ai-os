@@ -284,6 +284,9 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "auth_status": auth_status,
                 "ready": ready,
                 "is_inferencing": is_inferencing,
+                // So the chat's style menu shows the real choice after a reload.
+                "output_style": e.manifest.metadata.get("output_style").cloned()
+                    .unwrap_or_else(|| serde_json::json!("default")),
                 "profile": e.manifest.profile,
                 "identity": {
                     "emoji": e.identity.emoji,
@@ -295,6 +298,166 @@ pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .collect();
 
     Json(agents)
+}
+
+/// Largest attachment copied into an agent's workspace.
+const MAX_STAGED_ATTACHMENT: usize = 50 * 1024 * 1024;
+
+/// A filename that is safe to create inside the workspace: the last path
+/// component only, ordinary characters, never hidden, never empty.
+fn safe_upload_name(name: &str, fallback: &str) -> String {
+    // The last component by plain string split rather than `Path`: `Path` is
+    // platform-dependent -- Windows reads "a:" as a drive and a backslash as a
+    // separator, Linux does neither -- and this must behave the same on both.
+    let normalized = name.trim().replace('\\', "/");
+    let base = normalized.rsplit('/').next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() || cleaned == ".." {
+        fallback.to_string()
+    } else {
+        cleaned.chars().take(120).collect()
+    }
+}
+
+/// Put every attachment where the agent can actually reach it, and say where.
+///
+/// Attachments used to reach the agent only if they were images: everything
+/// else -- a PDF, a spreadsheet, a Word file -- was dropped by
+/// `resolve_attachments` without a word. The upload succeeded, the user saw
+/// the file in the chat, and the agent never received it, so it went looking
+/// for the file across the user's disk with a host shell. The file now lands
+/// in the agent's own workspace, which is also `/workspace` inside its
+/// sandbox, and the message carries both paths so the agent does not have to
+/// guess.
+///
+/// Returns the note to append to the user's message, or None when there was
+/// nothing to stage.
+pub fn stage_attachments(
+    kernel: &freeco_kernel::FreecoKernel,
+    agent_id: AgentId,
+    attachments: &[AttachmentRef],
+) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    let workspace = kernel
+        .registry
+        .get(agent_id)
+        .and_then(|e| e.manifest.workspace.clone())?;
+    let upload_dir = std::env::temp_dir().join("freeco_uploads");
+    let dest_dir = workspace.join("uploads");
+    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+        tracing::warn!(error = %e, dir = %dest_dir.display(), "cannot create uploads dir");
+        return Some(format!(
+            "\n\n[The user attached {} file(s), but they could not be saved to your \
+             workspace ({e}). Tell the user; do not search the disk for them.]",
+            attachments.len()
+        ));
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for att in attachments {
+        // The id names the file in the upload directory; anything else could
+        // point outside it.
+        if uuid::Uuid::parse_str(&att.file_id).is_err() {
+            continue;
+        }
+        let meta = UPLOAD_REGISTRY.get(&att.file_id);
+        let original = if !att.filename.trim().is_empty() {
+            att.filename.clone()
+        } else {
+            meta.as_ref()
+                .map(|m| m.filename.clone())
+                .unwrap_or_default()
+        };
+        let content_type = meta
+            .as_ref()
+            .map(|m| m.content_type.clone())
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| att.content_type.clone());
+        drop(meta);
+        let name = safe_upload_name(&original, &att.file_id);
+
+        let bytes = match std::fs::read(upload_dir.join(&att.file_id)) {
+            Ok(b) if b.len() <= MAX_STAGED_ATTACHMENT => b,
+            Ok(b) => {
+                lines.push(format!(
+                    "- {name}: too large to stage ({} MB, limit {} MB)",
+                    b.len() / (1024 * 1024),
+                    MAX_STAGED_ATTACHMENT / (1024 * 1024)
+                ));
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(file_id = %att.file_id, error = %e, "upload missing when staging");
+                lines.push(format!(
+                    "- {name}: the upload could not be read; ask the user to attach it again"
+                ));
+                continue;
+            }
+        };
+
+        // Same name, same bytes: the file is already there. Same name,
+        // different bytes: keep both rather than overwrite what the agent
+        // may already be working on.
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut final_name = name.clone();
+        let mut n = 2;
+        loop {
+            let path = dest_dir.join(&final_name);
+            match std::fs::read(&path) {
+                Ok(existing) if existing == bytes => break,
+                Ok(_) => {
+                    final_name = format!("{stem} ({n}){ext}");
+                    n += 1;
+                }
+                Err(_) => {
+                    if let Err(e) = std::fs::write(&path, &bytes) {
+                        tracing::warn!(error = %e, path = %path.display(), "cannot stage upload");
+                        lines.push(format!("- {name}: could not be saved ({e})"));
+                        final_name.clear();
+                    }
+                    break;
+                }
+            }
+        }
+        if final_name.is_empty() {
+            continue;
+        }
+        let kind = if content_type.is_empty() {
+            String::new()
+        } else {
+            format!("{content_type}, ")
+        };
+        lines.push(format!(
+            "- uploads/{final_name} ({kind}{} KB) -- in your sandbox: /workspace/uploads/{final_name}",
+            bytes.len().div_ceil(1024)
+        ));
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "\n\n[Files the user attached, saved in your workspace]\n{}\n\
+         Read them from there. For PDFs and office documents use your sandbox \
+         (e.g. `pdftotext /workspace/uploads/<file> -`); if a reader is \
+         missing, install it inside the sandbox, never on the host.",
+        lines.join("\n")
+    ))
 }
 
 /// Resolve uploaded file attachments into ContentBlock::Image blocks.
@@ -442,12 +605,18 @@ pub async fn send_message(
         None
     };
 
+    // Every attachment, not only images, goes into the agent's workspace.
+    let message = match stage_attachments(&state.kernel, agent_id, &req.attachments) {
+        Some(note) => format!("{}{}", req.message, note),
+        None => req.message.clone(),
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
         .kernel
         .send_message_with_handle_and_blocks(
             agent_id,
-            &req.message,
+            &message,
             Some(kernel_handle),
             content_blocks,
             req.sender_id,
@@ -1361,6 +1530,31 @@ pub async fn create_backup(
 }
 
 /// POST /api/backups/restore — Verify or stage an encrypted recovery archive.
+/// POST /api/backups/services — save service containers' data now.
+///
+/// The scheduled run does this daily; this is for "before I change anything".
+/// Databases are dumped with their own tools and other volumes exported, into
+/// `backups/services/<timestamp>/`. The report lists what was saved and what
+/// was not, so a partial backup is never mistaken for a complete one.
+pub async fn backup_service_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let dir = state.kernel.config.home_dir.join("backups");
+    match crate::service_backup::export_service_data(&dir, 7).await {
+        Ok(report) => {
+            let status = if report.failed.is_empty() {
+                StatusCode::CREATED
+            } else {
+                // Some of it worked: say so, and do not call it a success.
+                StatusCode::MULTI_STATUS
+            };
+            (status, Json(serde_json::json!(report)))
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": error})),
+        ),
+    }
+}
+
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RestoreRequest>,
@@ -4001,7 +4195,117 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "agent_count": state.kernel.registry.count(),
         "database": if db_ok { "connected" } else { "error" },
         "config_warnings": config_warnings,
+        // What is actually running, and whether anything is running that
+        // should not be. Twenty-two containers accumulated here unnoticed for
+        // four services, because nothing ever compared what the runtime holds
+        // against what the kernel believes it started.
+        "containers": container_audit(&state).await,
     }))
+}
+
+/// Compare the containers that exist against the ones the kernel believes in.
+///
+/// Three answers, and the interesting one is the third:
+///
+/// - `expected`: a running container matching an active hand instance.
+/// - `missing`: an instance the kernel thinks is Active with nothing running --
+///   the "reports Active while serving nothing" failure, arriving by way of a
+///   stopped VM or a crashed container.
+/// - `unexpected`: a `freeco-` container the kernel has no record of. These are
+///   what accumulate silently: each restart used to mint a new instance and
+///   leave the previous containers running, and nothing counted them. They are
+///   also where an unwanted install would hide, since nothing else looks.
+///
+/// Deliberately read-only. Reporting a surprise is safe; removing something the
+/// user started themselves is not, and this cannot tell the difference.
+async fn container_audit(state: &AppState) -> serde_json::Value {
+    let Some(rt) = freeco_hands::container::runtime().await else {
+        return serde_json::json!({
+            "runtime": null,
+            "detail": "no container runtime available",
+        });
+    };
+
+    let out = tokio::process::Command::new(rt)
+        .args(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"])
+        .output()
+        .await;
+    let Ok(out) = out else {
+        return serde_json::json!({ "runtime": rt, "detail": "could not list containers" });
+    };
+    let listing = String::from_utf8_lossy(&out.stdout);
+
+    // Every container name the kernel can account for.
+    let mut known: Vec<String> = Vec::new();
+    let mut missing: Vec<serde_json::Value> = Vec::new();
+    for inst in state.kernel.hand_registry.list_instances() {
+        let Some(def) = state.kernel.hand_registry.get_definition(&inst.hand_id) else {
+            continue;
+        };
+        let Some(spec) = def.container.as_ref() else {
+            continue;
+        };
+        let tenant = inst.tenant_id.clone();
+        let names: Vec<String> = if spec.is_native_stack() {
+            spec.services
+                .iter()
+                .map(|s| {
+                    freeco_hands::container::service_container_name(
+                        &inst.hand_id,
+                        tenant.as_deref(),
+                        &s.name,
+                    )
+                })
+                .collect()
+        } else {
+            vec![freeco_hands::container::container_name(
+                &inst.hand_id,
+                tenant.as_deref(),
+            )]
+        };
+        for n in &names {
+            if !listing
+                .lines()
+                .any(|l| l.split('\t').next() == Some(n.as_str()))
+            {
+                missing.push(serde_json::json!({ "hand": inst.hand_id, "container": n }));
+            }
+        }
+        known.extend(names);
+    }
+
+    let mut running = Vec::new();
+    let mut unexpected = Vec::new();
+    for line in listing.lines() {
+        let mut f = line.split('\t');
+        let (Some(name), image, status) =
+            (f.next(), f.next().unwrap_or(""), f.next().unwrap_or(""))
+        else {
+            continue;
+        };
+        let entry = serde_json::json!({ "name": name, "image": image, "status": status });
+        if name.starts_with("freeco-") && !known.iter().any(|k| k == name) {
+            unexpected.push(entry.clone());
+        }
+        running.push(entry);
+    }
+
+    serde_json::json!({
+        "runtime": rt,
+        "running": running.len(),
+        "expected": known.len(),
+        "unexpected": unexpected,
+        "missing": missing,
+        // One line a person or an agent can act on without reading the arrays.
+        "verdict": if !unexpected.is_empty() {
+            format!("{} container(s) running that the kernel did not start", unexpected.len())
+        } else if !missing.is_empty() {
+            format!("{} service(s) recorded active but not running", missing.len())
+        } else {
+            "every running container is accounted for".to_string()
+        },
+        "containers": running,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4806,7 +5110,10 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "is_service": d.container.is_some(),
                 "container": d.container.as_ref().map(|c| serde_json::json!({
                     "image": c.image,
-                    "port": freeco_hands::container::first_host_port(c),
+                    // service_port, not first_host_port: a host-network hand
+                    // publishes no mapping and still serves a port, and an
+                    // agent told `port: null` cannot reach a running service.
+                    "port": freeco_hands::container::service_port(c),
                     "health_path": c.health_path,
                     "host_network": c.host_network,
                 })),
@@ -5340,6 +5647,43 @@ pub async fn activate_hand(
 
     match state.kernel.activate_hand(&hand_id, config, instance_name) {
         Ok(instance) => {
+            // A service hand is only activated once its container serves.
+            //
+            // Without this the instance was recorded, the response said
+            // "Active", and nothing was running -- the container module had no
+            // callers at all. Roll the instance back on failure so the registry
+            // never holds an instance that maps to no container: leaving it
+            // would make the next activation fail as "already active" while
+            // still serving nothing.
+            let container = match state
+                .kernel
+                .start_hand_service(&hand_id, &instance.instance_id)
+                .await
+            {
+                Ok(name) => name,
+                Err(e) => {
+                    // Take the containers down too, not just the record.
+                    //
+                    // Rolling back only the instance leaves whatever did start
+                    // running with nothing tracking it -- which is precisely how
+                    // orphans accumulate, and a failed activation is the most
+                    // likely moment for it. Accounting failed its health check
+                    // and left a database and an application container behind.
+                    let _ = state
+                        .kernel
+                        .stop_hand_service(&hand_id, &instance.instance_id)
+                        .await;
+                    let _ = state.kernel.deactivate_hand(instance.instance_id);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": format!("{hand_id} could not start: {e}"),
+                            "hand_id": hand_id,
+                        })),
+                    );
+                }
+            };
+
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
             if let Some(agent_id) = instance.agent_id {
@@ -5376,6 +5720,9 @@ pub async fn activate_hand(
                     "agent_id": instance.agent_id.map(|a| a.to_string()),
                     "agent_name": effective_agent_name,
                     "activated_at": instance.activated_at.to_rfc3339(),
+                    // Present only for service hands, and only once the health
+                    // check passed, so its presence means "serving".
+                    "container": container,
                 })),
             )
         }
@@ -5425,11 +5772,33 @@ pub async fn deactivate_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
+    // Read the hand id before deactivating: once the instance is gone there is
+    // nothing left to say which container belonged to it, and a container that
+    // outlives its instance holds the port. The next activation then fails
+    // complaining about the port rather than about the leftover.
+    let hand_id = state
+        .kernel
+        .hand_registry
+        .get_instance(id)
+        .map(|i| i.hand_id);
+
     match state.kernel.deactivate_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
-        ),
+        Ok(()) => {
+            if let Some(hand_id) = hand_id {
+                if let Err(e) = state.kernel.stop_hand_service(&hand_id, &id).await {
+                    tracing::warn!(
+                        hand_id = %hand_id,
+                        instance_id = %id,
+                        error = %e,
+                        "hand deactivated but its container did not stop"
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "deactivated", "instance_id": id})),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -6280,13 +6649,20 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .registry
         .list()
         .iter()
+        // From the stored calls, not the scheduler's in-memory counter, which
+        // starts at zero on every restart: every agent read 0 tokens while the
+        // database held a hundred million.
         .map(|e| {
-            let (tokens, tool_calls) = state.kernel.scheduler.get_usage(e.id).unwrap_or((0, 0));
+            let s = state.kernel.memory.usage().query_summary(Some(e.id)).ok();
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
-                "total_tokens": tokens,
-                "tool_calls": tool_calls,
+                "total_tokens": s.as_ref().map(|s| s.total_input_tokens + s.total_output_tokens).unwrap_or(0),
+                "input_tokens": s.as_ref().map(|s| s.total_input_tokens).unwrap_or(0),
+                "output_tokens": s.as_ref().map(|s| s.total_output_tokens).unwrap_or(0),
+                "cost_usd": s.as_ref().map(|s| s.total_cost_usd).unwrap_or(0.0),
+                "calls": s.as_ref().map(|s| s.call_count).unwrap_or(0),
+                "tool_calls": s.as_ref().map(|s| s.total_tool_calls).unwrap_or(0),
             })
         })
         .collect();
@@ -6557,6 +6933,45 @@ pub async fn update_agent_budget(
 // ---------------------------------------------------------------------------
 
 /// GET /api/sessions — List all sessions with metadata.
+/// What to search for, and how many answers to bring back.
+#[derive(serde::Deserialize)]
+pub struct SessionSearchQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/sessions/search?q= — conversations that already cover a theme.
+///
+/// The assistant's job is to put a message where the work already lives, and it
+/// had no way to find out where that was: sessions could be listed but never
+/// searched, so everything became a new thread and related work scattered across
+/// agents. Each hit carries the agent's name, because "the Grant Q4 chat" means
+/// nothing to a person without knowing who they were talking to.
+pub async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SessionSearchQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(5).clamp(1, 25);
+    let mut hits = state
+        .kernel
+        .memory
+        .search_canonical_sessions(&q.q, limit)
+        .unwrap_or_default();
+    for hit in &mut hits {
+        let name = hit
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .and_then(|id| id.parse::<AgentId>().ok())
+            .and_then(|id| state.kernel.registry.get(id).map(|e| e.name.clone()));
+        if let (Some(obj), Some(name)) = (hit.as_object_mut(), name) {
+            obj.insert("agent_name".to_string(), serde_json::json!(name));
+        }
+    }
+    // Threads whose agent no longer exists cannot be a destination.
+    hits.retain(|h| h.get("agent_name").is_some());
+    Json(serde_json::json!({"query": q.q, "results": hits}))
+}
+
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Include agent conversations. The `sessions` table is only written during
     // compaction, so listing it alone showed an empty or stale list however
@@ -6997,11 +7412,7 @@ pub async fn patch_agent(
 
     // Apply partial updates using dedicated registry methods
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
-        if let Err(e) = state
-            .kernel
-            .registry
-            .update_name(agent_id, name.to_string())
-        {
+        if let Err(e) = state.kernel.rename_agent(agent_id, name) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("{e}")})),
@@ -7298,15 +7709,29 @@ pub async fn list_models(
                         return false;
                     }
                 }
+                if catalog.is_served(&m.provider, &m.id) == Some(false) {
+                    return false;
+                }
             }
             true
         })
         .map(|m| {
-            // Custom models from unknown providers are assumed available
-            let available = catalog
+            // Availability is two questions, not one. "Is there a key?" was the
+            // only one asked, so every model of a configured provider was
+            // offered -- including the 128 an OpenAI project is not entitled
+            // to. Picking one returned `Project does not have access` and the
+            // agent produced no reply at all. The second question is "does this
+            // key have access to this model?", answered from what the provider
+            // itself listed at /v1/models.
+            //
+            // A provider that has never been probed answers None, and its
+            // models stay available: hiding a model that works is worse than
+            // showing one that might not.
+            let has_key = catalog
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
                 .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
+            let available = has_key && catalog.is_served(&m.provider, &m.id) != Some(false);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -7519,7 +7944,25 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// Only providers with a working key are queried -- the rest would 401 and add
 /// nothing but noise. Models already known are left alone rather than
 /// overwritten, so hand-tuned pricing and tier survive a refresh.
-pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// What one catalog refresh did: models registered, providers probed, providers
+/// passed over and why.
+pub struct ModelRefreshSummary {
+    pub added: Vec<String>,
+    pub checked: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Ask each configured provider which models its key may actually call, record
+/// that entitlement, and register anything the compiled catalog lacks.
+///
+/// Extracted from the HTTP handler so the daemon can also run this at boot.
+/// While a button in Settings was the only caller, `served_models.json` never
+/// came into existence on a machine where nobody pressed it; `is_served` then
+/// answers None for every model and availability quietly degrades to "this
+/// provider has some key". That is how an OpenAI project entitled to one model
+/// went on offering all 129, every other pick returning `Project does not have
+/// access` with no reply from the agent at all.
+pub async fn probe_and_register_models(state: &Arc<AppState>) -> ModelRefreshSummary {
     // (provider id, models endpoint, whether ids carry a vendor prefix)
     let sources: Vec<(&str, String, bool)> = vec![
         (
@@ -7537,6 +7980,14 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
             "https://api.openai.com/v1/models".to_string(),
             false,
         ),
+        // Novita ids are vendor-prefixed the way OpenRouter's are
+        // (`zai-org/glm-5.3`), and it serves ~117 models that were invisible
+        // because the provider was never registered in the catalog.
+        (
+            "novita",
+            "https://api.novita.ai/v3/openai/models".to_string(),
+            true,
+        ),
     ];
 
     let client = reqwest::Client::builder()
@@ -7545,10 +7996,11 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     let client = match client {
         Ok(c) => c,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("http client: {e}")})),
-            )
+            return ModelRefreshSummary {
+                added: Vec::new(),
+                checked: Vec::new(),
+                skipped: vec![format!("http client: {e}")],
+            }
         }
     };
 
@@ -7556,9 +8008,16 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
     let mut checked: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for (provider, url, vendor_prefixed) in sources {
+    for (provider, url, _vendor_prefixed) in sources {
         let env_var = state.kernel.config.resolve_api_key_env(provider);
-        let key = std::env::var(&env_var).unwrap_or_default();
+        // vault -> dotenv -> env, not the environment alone. A key held only in
+        // vault.enc is invisible to std::env::var, so the provider would be
+        // skipped here as unkeyed while the dashboard showed it configured --
+        // and its models would keep their optimistic availability forever.
+        let key = state
+            .kernel
+            .resolve_credential(&env_var)
+            .unwrap_or_default();
         if key.is_empty() {
             skipped.push(format!("{provider} (no key)"));
             continue;
@@ -7584,20 +8043,40 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         let list = body["data"].as_array().cloned().unwrap_or_default();
         checked.push(format!("{provider}: {} served", list.len()));
 
+        // Record entitlement before any display filtering below narrows the
+        // list. A configured key is not access to every model the provider
+        // publishes: an OpenAI project entitled to one model was still being
+        // offered all 129, so every other pick returned `Project does not have
+        // access` and the agent answered nothing. This is what makes the
+        // picker show only what the key can really call.
+        {
+            let served: Vec<String> = list
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            let mut catalog = state
+                .kernel
+                .model_catalog
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            catalog.set_served(provider, served);
+        }
+
         for m in list {
-            let Some(raw_id) = m["id"].as_str() else { continue };
+            let Some(raw_id) = m["id"].as_str() else {
+                continue;
+            };
             // Batch and free variants are addressing modes of a model already
             // listed; adding them triples the catalog without adding choice.
             if raw_id.contains(":batch") || raw_id.contains(":free") {
                 continue;
             }
             // Store the id the provider itself answers to. OpenRouter prefixes
-            // with the vendor; the direct APIs do not.
-            let id = if vendor_prefixed {
-                raw_id.to_string()
-            } else {
-                raw_id.to_string()
-            };
+            // with the vendor and the direct APIs do not, but either way the id
+            // is used exactly as the provider returned it -- both branches of
+            // the `vendor_prefixed` check this replaced were identical, so the
+            // flag never changed anything.
+            let id = raw_id.to_string();
             {
                 let catalog = state
                     .kernel
@@ -7657,15 +8136,31 @@ pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResp
         if let Err(e) = catalog.save_custom_models(&path) {
             tracing::warn!("Failed to persist refreshed models: {e}");
         }
+        // Persist entitlement too, so the picker is honest from the next boot
+        // rather than only after someone remembers to press Refresh.
+        let served_path = state.kernel.config.home_dir.join("served_models.json");
+        if let Err(e) = catalog.save_served(&served_path) {
+            tracing::warn!("Failed to persist served models: {e}");
+        }
     }
 
+    ModelRefreshSummary {
+        added,
+        checked,
+        skipped,
+    }
+}
+
+/// POST /api/models/refresh — re-probe every configured provider on demand.
+pub async fn refresh_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let summary = probe_and_register_models(&state).await;
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "added": added.len(),
-            "models": added,
-            "checked": checked,
-            "skipped": skipped,
+            "added": summary.added.len(),
+            "models": summary.added,
+            "checked": summary.checked,
+            "skipped": summary.skipped,
         })),
     )
 }
@@ -8129,108 +8624,11 @@ pub async fn a2a_external_task_status(
     }
 }
 
-// ── MCP HTTP Endpoint ───────────────────────────────────────────────────
-
-/// POST /mcp — Handle MCP JSON-RPC requests over HTTP.
-///
-/// Exposes the same MCP protocol normally served via stdio, allowing
-/// external MCP clients to connect over HTTP instead.
-pub async fn mcp_http(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    // Gather all available tools (builtin + skills + MCP)
-    let mut tools = builtin_tool_definitions();
-    {
-        let registry = state
-            .kernel
-            .skill_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        for skill_tool in registry.all_tool_definitions() {
-            tools.push(freeco_types::tool::ToolDefinition {
-                name: skill_tool.name.clone(),
-                description: skill_tool.description.clone(),
-                input_schema: skill_tool.input_schema.clone(),
-            });
-        }
-    }
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
-        tools.extend(mcp_tools.iter().cloned());
-    }
-
-    // Check if this is a tools/call that needs real execution
-    let method = request["method"].as_str().unwrap_or("");
-    if method == "tools/call" {
-        let tool_name = request["params"]["name"].as_str().unwrap_or("");
-        let arguments = request["params"]
-            .get("arguments")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-
-        // Verify the tool exists
-        if !tools.iter().any(|t| t.name == tool_name) {
-            return Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request.get("id").cloned(),
-                "error": {"code": -32602, "message": format!("Unknown tool: {tool_name}")}
-            }));
-        }
-
-        // Snapshot skill registry before async call (RwLockReadGuard is !Send)
-        let skill_snapshot = state
-            .kernel
-            .skill_registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .snapshot();
-
-        // Execute the tool via the kernel's tool runner
-        let kernel_handle: Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle>;
-        let result = freeco_kernel_runtime::tool_runner::execute_tool(
-            "mcp-http",
-            tool_name,
-            &arguments,
-            Some(&kernel_handle),
-            None,
-            None,
-            Some(&skill_snapshot),
-            Some(&state.kernel.mcp_connections),
-            Some(&state.kernel.web_ctx),
-            Some(&state.kernel.browser_ctx),
-            None,
-            None,
-            Some(&state.kernel.media_engine),
-            None, // exec_policy
-            if state.kernel.config.tts.enabled {
-                Some(&state.kernel.tts_engine)
-            } else {
-                None
-            },
-            if state.kernel.config.docker.enabled {
-                Some(&state.kernel.config.docker)
-            } else {
-                None
-            },
-            Some(&*state.kernel.process_manager),
-        )
-        .await;
-
-        return Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request.get("id").cloned(),
-            "result": {
-                "content": [{"type": "text", "text": result.content}],
-                "isError": result.is_error,
-            }
-        }));
-    }
-
-    // For non-tools/call methods (initialize, tools/list, etc.), delegate to the handler
-    let response = freeco_kernel_runtime::mcp_server::handle_mcp_request(&request, &tools).await;
-    Json(response)
-}
+// The old `POST /mcp` lived here. It ran any built-in tool -- shell_exec
+// included -- with no token and no capability check, so anything that could
+// reach the port could run commands on the host. It is replaced by
+// `crate::mcp_http`, which requires FREECO_MCP_TOKEN, acts as a named agent
+// with that agent's own tools, and runs commands only in its sandbox.
 
 // ── Multi-Session Endpoints ─────────────────────────────────────────────
 
@@ -8463,6 +8861,426 @@ pub async fn stop_agent(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+/// POST /api/sessions/route — does this message continue the session, or start a task?
+///
+/// The chat used to append everything to one endless conversation, so unrelated
+/// work piled into a single thread: the model carried irrelevant history into
+/// every answer, and the user had no way to find anything later. Splitting on a
+/// timer or on a button both get it wrong in the common case -- a follow-up
+/// three seconds later is the same task, and a new task typed straight after an
+/// answer is not.
+///
+/// Body: `{ "message": "...", "context": "recent turns, oldest first" }`
+/// Returns: `{ "new_session": bool, "title": "..." }`
+///
+/// Fails open. If the model is unreachable or answers something unparseable the
+/// answer is "continue", because appending to the current session is the
+/// behaviour the user already had -- a housekeeping call that cannot reach a
+/// model must not stop them from sending a message.
+pub async fn route_session(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let message = body["message"].as_str().unwrap_or("").trim().to_string();
+    let context = body["context"].as_str().unwrap_or("").trim().to_string();
+
+    if message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "message is required"})),
+        );
+    }
+
+    // No history yet: nothing to continue, and the title still helps.
+    let system = "You sort chat messages for a personal assistant. Answer with \
+                  one line of JSON and nothing else: \
+                  {\"new_session\":true|false,\"title\":\"...\"}. \
+                  new_session is true when the message starts a task unrelated to \
+                  the conversation so far, false when it continues, corrects, or \
+                  follows up on it. A short reply like \"yes\", \"go on\" or \
+                  \"why?\" always continues. title is 2-5 words naming the task in \
+                  the user's own vocabulary, capitalised like a heading, no \
+                  trailing punctuation.";
+    let prompt = if context.is_empty() {
+        format!("Conversation so far: (none)\n\nNew message: {message}")
+    } else {
+        format!("Conversation so far:\n{context}\n\nNew message: {message}")
+    };
+
+    let raw = match state.kernel.complete_once(system, &prompt, 120).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("session routing unavailable, continuing session: {e}");
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "new_session": context.is_empty(),
+                    "title": "",
+                    "degraded": true,
+                })),
+            );
+        }
+    };
+
+    // Models fence JSON even when told not to.
+    let cleaned = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let parsed: serde_json::Value = serde_json::from_str(cleaned).unwrap_or(serde_json::json!({}));
+
+    let new_session = parsed["new_session"]
+        .as_bool()
+        .unwrap_or(context.is_empty());
+    let title = parsed["title"].as_str().unwrap_or("").trim();
+    let title: String = title.chars().take(60).collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "new_session": new_session, "title": title })),
+    )
+}
+
+/// PUT /api/config/default-model — change the model new agents inherit.
+///
+/// The System page showed the default model as a read-only stat, so changing it
+/// meant editing `config.toml` by hand and restarting the daemon. It is the one
+/// setting that decides what every agent created from here on will run, which
+/// makes "read only" the wrong shape for it.
+///
+/// Applies in two places on purpose: the in-memory override so it takes effect
+/// on the next agent without a restart, and `config.toml` so it survives one.
+/// Writing only the first is a setting that silently reverts; writing only the
+/// second is a setting that appears to do nothing.
+pub async fn set_default_model(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(model) = body["model"].as_str().filter(|m| !m.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing 'model'"})),
+        );
+    };
+
+    // Resolve the provider from the catalog when the caller did not name one,
+    // and normalise the id -- the same treatment agent models get, so a default
+    // of `nvidia/nemotron-...` keeps its prefix while `openai/gpt-...` from a
+    // gateway loses ours.
+    let (provider, model) = {
+        let explicit = body["provider"].as_str().filter(|p| !p.is_empty());
+        match state.kernel.model_catalog.read() {
+            Ok(catalog) => {
+                let entry = match explicit {
+                    Some(p) => catalog.find_model_for_provider(model, p),
+                    None => catalog.find_model(model),
+                };
+                match entry {
+                    Some(e) => (e.provider.clone(), e.id.clone()),
+                    None => match explicit {
+                        Some(p) => (p.to_string(), model.to_string()),
+                        None => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": format!("Unknown model '{model}'. Pass a provider to use it anyway."),
+                                })),
+                            )
+                        }
+                    },
+                }
+            }
+            Err(_) => (explicit.unwrap_or_default().to_string(), model.to_string()),
+        }
+    };
+
+    let api_key_env = state.kernel.config.resolve_api_key_env(&provider);
+    let new_default = freeco_types::config::DefaultModelConfig {
+        provider: provider.clone(),
+        model: model.clone(),
+        api_key_env: api_key_env.clone(),
+        ..state.kernel.config.default_model.clone()
+    };
+
+    if let Ok(mut guard) = state.kernel.default_model_override.write() {
+        *guard = Some(new_default);
+    }
+
+    let config_path = freeco_kernel::config::freeco_ai_home().join("config.toml");
+    if let Err(e) = write_default_model_config(&config_path, &provider, &model, &api_key_env) {
+        // The running daemon already uses the new model; say the persistence
+        // failed rather than reporting a clean success for a change that will
+        // not survive a restart.
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "applied",
+                "provider": provider,
+                "model": model,
+                "warning": format!("Active now, but could not be saved to config.toml: {e}"),
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "provider": provider,
+            "model": model,
+        })),
+    )
+}
+
+/// Rewrite the `[default_model]` provider/model/api_key_env in place.
+///
+/// Edits the three lines rather than re-serialising the file, so comments and
+/// every unrelated setting survive -- a config the product rewrites wholesale
+/// is one users stop hand-editing.
+fn write_default_model_config(
+    path: &std::path::Path,
+    provider: &str,
+    model: &str,
+    api_key_env: &str,
+) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read config.toml: {e}"))?;
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut in_section = false;
+    let (mut wrote_provider, mut wrote_model, mut wrote_key) = (false, false, false);
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            // Leaving the section: add anything it did not already contain.
+            if in_section {
+                if !wrote_provider {
+                    out.push_str(&format!("provider = \"{provider}\"\n"));
+                }
+                if !wrote_model {
+                    out.push_str(&format!("model = \"{model}\"\n"));
+                }
+                if !wrote_key {
+                    out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+                }
+            }
+            in_section = trimmed == "[default_model]";
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_section {
+            if trimmed.starts_with("provider") && trimmed.contains('=') {
+                out.push_str(&format!("provider = \"{provider}\"\n"));
+                wrote_provider = true;
+                continue;
+            }
+            if trimmed.starts_with("model") && trimmed.contains('=') {
+                out.push_str(&format!("model = \"{model}\"\n"));
+                wrote_model = true;
+                continue;
+            }
+            if trimmed.starts_with("api_key_env") && trimmed.contains('=') {
+                out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+                wrote_key = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // The section ran to end of file.
+    if in_section {
+        if !wrote_provider {
+            out.push_str(&format!("provider = \"{provider}\"\n"));
+        }
+        if !wrote_model {
+            out.push_str(&format!("model = \"{model}\"\n"));
+        }
+        if !wrote_key {
+            out.push_str(&format!("api_key_env = \"{api_key_env}\"\n"));
+        }
+    }
+
+    std::fs::write(path, out).map_err(|e| format!("write config.toml: {e}"))
+}
+
+/// GET /api/agents/{id}/history — the conversation the agent still remembers.
+///
+/// The route existed for DELETE only, so a chat surface could clear history and
+/// never read it back. Switching agent or model empties the view, and with
+/// nothing to reload from, the conversation looked deleted while the agent
+/// still had every message -- the user and the agent disagreeing about what was
+/// said, which is worse than either side simply being empty.
+///
+/// Returns the same window the agent itself is given, plus the compacted
+/// summary of everything older, so what the user sees matches what the model
+/// sees rather than being a second, prettier version of it.
+/// How much of the conversation to return. Absent means the default page.
+#[derive(serde::Deserialize)]
+pub struct HistoryQuery {
+    pub limit: Option<usize>,
+}
+
+/// Messages returned when the caller does not ask for a number.
+///
+/// The endpoint used to pass None and take `canonical_context`'s own default of
+/// 50, which is the size of the model's replay window -- a prompt-budget
+/// decision that has no business deciding how much of their own conversation a
+/// person may look at. An agent holding 258 messages showed the last 50 and the
+/// other 208 simply were not in the response.
+const HISTORY_DEFAULT_LIMIT: usize = 200;
+/// Ceiling for an explicit `?limit=`, so one request cannot try to serialize an
+/// unbounded conversation.
+const HISTORY_MAX_LIMIT: usize = 5000;
+
+pub async fn get_agent_history(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    let Ok(agent_id) = id.parse::<AgentId>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid agent ID"})),
+        );
+    };
+
+    let limit = q
+        .limit
+        .unwrap_or(HISTORY_DEFAULT_LIMIT)
+        .clamp(1, HISTORY_MAX_LIMIT);
+    let total = state.kernel.memory.canonical_len(agent_id).unwrap_or(0);
+
+    match state.kernel.memory.canonical_context(agent_id, Some(limit)) {
+        Ok((summary, messages)) => {
+            let items: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "role": match m.role {
+                            freeco_types::message::Role::User => "user",
+                            freeco_types::message::Role::Assistant => "assistant",
+                            freeco_types::message::Role::System => "system",
+                        },
+                        "content": m.content.text_content(),
+                    })
+                })
+                .filter(|m| !m["content"].as_str().unwrap_or_default().trim().is_empty())
+                .collect();
+            // Counted before the macro takes ownership of `items`.
+            let returned = items.len();
+            // Against the window actually read, not the rendered count: blank
+            // and tool-only turns are filtered out of `items`, so comparing
+            // that against the total would claim there is more to load on a
+            // conversation already shown in full.
+            let has_more = total > messages.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "agent_id": id,
+                    // Present when the conversation outgrew the replay window.
+                    // Shown to the user because its absence is what makes an
+                    // agent look like it forgot -- it did not, it summarised.
+                    "summary": summary,
+                    "messages": items,
+                    // What was asked for and what exists, so a reader can tell
+                    // "this is the whole conversation" from "this is the end of
+                    // one" and offer the rest rather than silently truncating.
+                    "returned": returned,
+                    "total": total,
+                    "has_more": has_more,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+/// GET /api/assistant — the agent the concierge widget talks to.
+///
+/// The widget used to choose this itself, by looking for a name containing
+/// "freeco", "concierge" or "assistant" and taking the first match. "freeco" is
+/// the product name, so every bundled agent carries it: in a registry where
+/// `freeco-shopping` sorted before `Freeco.AI assistant`, messages typed to
+/// Freeco were answered by the shopping agent. Which agent is the assistant is
+/// not a question the browser can answer from a list of names, so it is
+/// answered here.
+///
+/// Resolution is by role first. The assistant is the CEO of the workspace --
+/// the coordinator that can run teams, hands and companies, act directly or
+/// delegate -- and a role is a property of the agent, not of its spelling. The
+/// name checks below it exist only so installs predating the role keep talking
+/// to the agent that already holds their history, rather than being handed a
+/// clean one; an assistant that loses its context is a new assistant.
+pub async fn get_assistant(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let agents = state.kernel.registry.list();
+
+    let by_role = agents
+        .iter()
+        .find(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")));
+
+    let canonical = freeco_types::agent::AgentId::from_string("freeco-concierge");
+    let pick = by_role
+        .or_else(|| agents.iter().find(|e| e.id == canonical))
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case("freeco.ai assistant"))
+        })
+        .or_else(|| {
+            agents.iter().find(|e| {
+                let n = e.name.to_lowercase();
+                n.contains("concierge") || n.contains("assistant")
+            })
+        });
+
+    match pick {
+        Some(e) => {
+            let matched_by = if by_role.is_some() { "role" } else { "name" };
+            // Adopt it: an agent found by name once becomes the CEO by role, so
+            // the next lookup is an answer rather than another guess -- and
+            // stays correct when agents are added, renamed or reordered.
+            if by_role.is_none() {
+                if let Ok(true) = state.kernel.registry.add_role_tag(e.id, "ceo") {
+                    if let Some(updated) = state.kernel.registry.get(e.id) {
+                        if let Err(err) = state.kernel.memory.save_agent(&updated) {
+                            tracing::warn!("could not persist CEO role: {err}");
+                        }
+                    }
+                    tracing::info!(
+                        agent = %e.name,
+                        id = %e.id,
+                        "adopted as CEO — resolved by name once, by role from now on"
+                    );
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": e.id.to_string(),
+                    "name": e.name,
+                    "role": "ceo",
+                    // How it was found, so a support question about the wrong
+                    // agent answering can be settled without guessing.
+                    "matched_by": matched_by,
+                })),
+            )
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no assistant registered",
+                "create_template": "freeco-concierge",
+            })),
         ),
     }
 }
@@ -8836,6 +9654,23 @@ pub async fn set_provider_key(
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
+
+    // Learn what the new key actually reaches, without making the user wait.
+    //
+    // detect_auth above only records that a key exists. Until the provider is
+    // asked which models it will serve this key, every model it publishes is
+    // offered -- so a key added here would look like it unlocked hundreds of
+    // models it cannot call, until the next restart.
+    {
+        let probe_state = state.clone();
+        tokio::spawn(async move {
+            let summary = probe_and_register_models(&probe_state).await;
+            tracing::info!(
+                probed = ?summary.checked,
+                "re-probed provider entitlement after key change"
+            );
+        });
+    }
 
     // Auto-switch default provider if current default has no working key.
     // This fixes the common case where a user adds e.g. a Gemini key via dashboard
@@ -9840,7 +10675,11 @@ fn atomic_write_toml(
 
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
-fn write_secret_env(path: &std::path::Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+pub(crate) fn write_secret_env(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), std::io::Error> {
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -10997,11 +11836,7 @@ pub async fn patch_agent_config(
     // Update name
     if let Some(ref new_name) = req.name {
         if !new_name.is_empty() {
-            if let Err(e) = state
-                .kernel
-                .registry
-                .update_name(agent_id, new_name.clone())
-            {
+            if let Err(e) = state.kernel.rename_agent(agent_id, new_name) {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({"error": format!("{e}")})),
@@ -11754,7 +12589,6 @@ struct UploadResponse {
 
 /// Metadata stored alongside uploaded files.
 struct UploadMeta {
-    #[allow(dead_code)]
     filename: String,
     content_type: String,
 }
@@ -11766,7 +12600,25 @@ static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> = LazyLock::new(Da
 const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
 
 /// Allowed content type prefixes for upload.
-const ALLOWED_CONTENT_TYPES: &[&str] = &["image/", "text/", "application/pdf", "audio/"];
+///
+/// Office and OpenDocument formats are here because they are what real work
+/// arrives in -- a grant form, a budget sheet, a CV. They are only ever
+/// written into the agent's workspace and read inside its sandbox; nothing
+/// uploaded is opened or executed on the host.
+const ALLOWED_CONTENT_TYPES: &[&str] = &[
+    "image/",
+    "text/",
+    "audio/",
+    "application/pdf",
+    "application/json",
+    "application/rtf",
+    "application/zip",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.",
+    "application/vnd.oasis.opendocument.",
+];
 
 fn is_allowed_content_type(ct: &str) -> bool {
     ALLOWED_CONTENT_TYPES
@@ -11855,7 +12707,7 @@ pub async fn upload_file(
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                serde_json::json!({"error": "Unsupported content type. Allowed: image/*, text/*, audio/*, application/pdf"}),
+                serde_json::json!({"error": "Unsupported file type. Allowed: images, text, audio, PDF, JSON, RTF, ZIP, Word, Excel, PowerPoint and OpenDocument files"}),
             ),
         );
     }
@@ -12935,6 +13787,13 @@ pub async fn webhook_agent(
                 "status": "completed",
                 "agent_id": agent_id.to_string(),
                 "response": result.response,
+                // Present only when a fallback answered instead of the
+                // configured model. A silent substitution is worse than a
+                // failure: the interface keeps naming the model the user
+                // chose, the answers change character, and nothing points at
+                // why. Being rate-limited onto a weaker model unannounced is
+                // the case this exists for.
+                "served_by_fallback": result.served_by_fallback,
                 "usage": {
                     "input_tokens": result.total_usage.input_tokens,
                     "output_tokens": result.total_usage.output_tokens,
@@ -13775,6 +14634,13 @@ pub async fn comms_send(
             Json(serde_json::json!({
                 "ok": true,
                 "response": result.response,
+                // Present only when a fallback answered instead of the
+                // configured model. A silent substitution is worse than a
+                // failure: the interface keeps naming the model the user
+                // chose, the answers change character, and nothing points at
+                // why. Being rate-limited onto a weaker model unannounced is
+                // the case this exists for.
+                "served_by_fallback": result.served_by_fallback,
                 "input_tokens": result.total_usage.input_tokens,
                 "output_tokens": result.total_usage.output_tokens,
             })),
@@ -14965,5 +15831,36 @@ mod role_resolution_tests {
     fn unrecognized_role_string_defaults_to_user() {
         let users = vec![user("dave", "wizard", true)];
         assert_eq!(role_for("dave", "admin", &users), "user");
+    }
+}
+
+#[cfg(test)]
+mod upload_name_tests {
+    use super::safe_upload_name;
+
+    #[test]
+    fn keeps_an_ordinary_name() {
+        assert_eq!(
+            safe_upload_name("CV Anna (2024).pdf", "id"),
+            "CV Anna (2024).pdf"
+        );
+    }
+
+    #[test]
+    fn cannot_escape_the_uploads_directory() {
+        assert_eq!(safe_upload_name("../../secrets.env", "id"), "secrets.env");
+        assert_eq!(safe_upload_name(r"..\..\config.toml", "id"), "config.toml");
+        assert_eq!(safe_upload_name("..", "id"), "id");
+    }
+
+    #[test]
+    fn never_hidden_never_empty() {
+        assert_eq!(safe_upload_name(".bashrc", "id"), "bashrc");
+        assert_eq!(safe_upload_name("   ", "fallback-id"), "fallback-id");
+    }
+
+    #[test]
+    fn odd_characters_are_replaced_not_passed_through() {
+        assert_eq!(safe_upload_name("a:b*c?.pdf", "id"), "a_b_c_.pdf");
     }
 }

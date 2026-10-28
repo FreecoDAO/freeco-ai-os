@@ -97,6 +97,37 @@ pub struct MediaConfig {
     /// ```
     pub audio_base_url: Option<String>,
 
+    /// Environment variable holding the bearer token for a local audio service.
+    ///
+    /// Used instead of the provider's key whenever `audio_base_url` or
+    /// `tts_openai_base_url` points somewhere other than the provider. Without
+    /// it, pointing either at a local server sent the real `OPENAI_API_KEY` to
+    /// that server -- the wrong credential for it, and one that should never
+    /// be handed to a service other than the one it was issued by. A local
+    /// server that checks its own key (speaches does) rejected every request.
+    ///
+    /// ```toml
+    /// [media]
+    /// audio_base_url = "http://127.0.0.1:8010"
+    /// local_audio_api_key_env = "SPEACHES_API_KEY"
+    /// ```
+    #[serde(default)]
+    pub local_audio_api_key_env: Option<String>,
+
+    /// Transcription model to request, instead of the provider's default.
+    ///
+    /// A local server names its models its own way. FreEco.ai sent OpenAI's
+    /// `whisper-1`, which speaches maps to `faster-whisper-large-v3` -- a model
+    /// not installed here -- so every dictation came back 404 while the small
+    /// model sat loaded and working.
+    ///
+    /// ```toml
+    /// [media]
+    /// audio_model = "Systran/faster-whisper-small"
+    /// ```
+    #[serde(default)]
+    pub audio_model: Option<String>,
+
     /// Optional override for the OpenAI TTS endpoint base URL.
     ///
     /// When set, replaces `https://api.openai.com` with
@@ -146,6 +177,8 @@ impl Default for MediaConfig {
             image_provider: None,
             audio_provider: None,
             audio_base_url: None,
+            local_audio_api_key_env: None,
+            audio_model: None,
             tts_openai_base_url: None,
             tts_elevenlabs_base_url: None,
             image_gen_base_url: None,
@@ -502,6 +535,19 @@ mod tests {
         assert!(parsed.tts_openai_base_url.is_none());
         assert!(parsed.tts_elevenlabs_base_url.is_none());
         assert!(parsed.image_gen_base_url.is_none());
+    }
+
+    #[test]
+    fn test_media_config_audio_model_from_toml() {
+        let parsed: MediaConfig = toml::from_str(
+            "audio_base_url = \"http://127.0.0.1:8010\"\naudio_model = \"Systran/faster-whisper-small\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.audio_model.as_deref(),
+            Some("Systran/faster-whisper-small")
+        );
+        assert!(MediaConfig::default().audio_model.is_none());
     }
 
     #[test]

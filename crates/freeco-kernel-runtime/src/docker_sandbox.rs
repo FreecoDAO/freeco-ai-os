@@ -199,6 +199,73 @@ pub async fn is_image_present(runtime: &str, image: &str) -> bool {
     }
 }
 
+/// Resolve a mutable image tag to the immutable digest it currently points at.
+///
+/// Reusable sandboxes require a digest, because a tag can be repointed under a
+/// long-lived container and nothing would notice. Requiring the *user* to write
+/// the digest is what made that rule unusable in practice: the configured image
+/// was a tag, so `docker_exec` refused every call on every tier, and agents
+/// could not run a command, install a tool, or touch a container at all.
+///
+/// Resolving it here keeps the guarantee — the container still runs a specific,
+/// content-addressed image — while removing the manual step. The digest is read
+/// at the moment of use, so repointing the tag takes effect on the next sandbox
+/// rather than silently mid-life.
+///
+/// Returns `None` when the image is absent or the runtime reports no digest, in
+/// which case the caller must refuse rather than fall back to the tag.
+pub async fn resolve_image_digest(runtime: &str, image: &str) -> Option<String> {
+    if is_immutable_image_reference(image) {
+        return Some(image.to_string());
+    }
+    // `RepoDigests` first -- that is the manifest digest the registry and the
+    // runtime both address the image by.
+    //
+    // Not `.Id`: that is the *config blob* digest, a different hash entirely.
+    // Pasting it after `repo@sha256:` produces a reference that looks right and
+    // resolves to nothing, so the sandbox reported the image as "not downloaded
+    // yet" for an image sitting in local storage. On this machine `.Id` is
+    // 73169df1... while the real repo digest is 3dc62ec6... -- no relation.
+    let inspect = |format: &str| {
+        let mut c = crate::quiet_command::quiet_async(runtime);
+        c.arg("image")
+            .arg("inspect")
+            .arg(image)
+            .arg("--format")
+            .arg(format)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        c
+    };
+
+    if let Ok(out) = inspect("{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}")
+        .output()
+        .await
+    {
+        if out.status.success() {
+            let reference = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if is_immutable_image_reference(&reference) {
+                return Some(reference);
+            }
+        }
+    }
+
+    // An image built locally and never pushed has no repo digest at all. Its
+    // id is still content-addressed and still immutable, and the runtime
+    // accepts it as a reference, so it satisfies the same guarantee -- the
+    // container cannot silently become a different image.
+    let out = inspect("{{.Id}}").output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bare = id.strip_prefix("sha256:").unwrap_or(&id);
+    if bare.len() != 64 || !bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("sha256:{bare}"))
+}
+
 /// Create and start a sandbox container for an agent.
 pub async fn create_sandbox(
     config: &DockerSandboxConfig,
@@ -226,9 +293,84 @@ pub async fn create_sandbox(
     }
     let container_name = sandbox_container_name(config, agent_id, workspace)?;
     let workspace_user = workspace_owner(workspace)?;
+    let runtime_bin = container_runtime().await.unwrap_or("docker");
 
-    let mut cmd = crate::quiet_command::quiet_async(container_runtime().await.unwrap_or("docker"));
+    // What this sandbox is: the pool's config hash, plus the tier and whether
+    // the workspace is writable, which change the container's limits and mounts
+    // without necessarily changing that hash.
+    let fingerprint = format!(
+        "{:016x}-{:?}-{}",
+        config_hash(config),
+        config.tier,
+        if writable_workspace { "rw" } else { "ro" }
+    );
+
+    // Pick up the sandbox an earlier process left behind instead of colliding
+    // with it. See `SANDBOX_FINGERPRINT_LABEL` for why this has to exist.
+    if let Some(existing) = inspect_existing_sandbox(runtime_bin, &container_name).await {
+        let same = existing.fingerprint.as_deref() == Some(fingerprint.as_str());
+        if same && (existing.running || start_existing_sandbox(runtime_bin, &container_name).await)
+        {
+            debug!(container = %container_name, "Reusing existing sandbox");
+            return Ok(SandboxContainer {
+                container_id: existing.id,
+                agent_id: agent_id.to_string(),
+                created_at: chrono::Utc::now(),
+                is_service: config.service,
+                tier: config.tier,
+                runtime: config.runtime.clone(),
+            });
+        }
+        // A different sandbox under this name -- made from another image or
+        // config, unlabelled from before labels existed -- or one that will not
+        // start. The workspace is a bind mount, so removing the container loses
+        // nothing that was meant to persist.
+        remove_sandbox_by_name(runtime_bin, &container_name).await?;
+    }
+
+    let mut cmd = crate::quiet_command::quiet_async(runtime_bin);
     cmd.arg("run").arg("-d").arg("--name").arg(&container_name);
+    cmd.arg("--label")
+        .arg(format!("{SANDBOX_FINGERPRINT_LABEL}={fingerprint}"));
+
+    // Package-manager caches somewhere writable. The root filesystem is
+    // read-only and so is `$HOME`, so `npm install` failed outright (exit 1)
+    // trying to write `~/.npm`, and pip ran with its cache silently disabled.
+    // A writable workspace keeps the cache on disk, where it survives the
+    // container and a real front-end install fits; otherwise it goes to the
+    // tmpfs, which is small and lost on stop but is all that sandbox has.
+    let cache_root = if writable_workspace {
+        format!("{}/.cache", config.workdir)
+    } else {
+        "/tmp/.cache".to_string()
+    };
+    cmd.arg("-e").arg(format!("XDG_CACHE_HOME={cache_root}"));
+    cmd.arg("-e")
+        .arg(format!("npm_config_cache={cache_root}/npm"));
+    cmd.arg("-e").arg(format!("PIP_CACHE_DIR={cache_root}/pip"));
+
+    // Credentials the owner chose to make available inside the sandbox.
+    //
+    // Only the names listed in `docker.sandbox_env`, and only when the daemon
+    // actually has them. An unset name is skipped rather than passed empty, so
+    // a tool inside reports "not authenticated" instead of failing on a blank
+    // token. Values are never logged: the name is enough to see what was
+    // shared.
+    for name in &config.sandbox_env {
+        let clean = name.trim();
+        // A name only: anything else would let a config entry inject a second
+        // variable, or a value, into the container's environment.
+        if clean.is_empty() || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            tracing::warn!(entry = %name, "ignoring invalid sandbox_env name");
+            continue;
+        }
+        match std::env::var(clean) {
+            Ok(value) if !value.is_empty() => {
+                cmd.arg("-e").arg(format!("{clean}={value}"));
+            }
+            _ => tracing::debug!(name = %clean, "sandbox_env name is not set on the daemon"),
+        }
+    }
     if let Some(workspace_user) = workspace_user {
         cmd.arg("--user").arg(workspace_user);
     }
@@ -278,6 +420,7 @@ pub async fn create_sandbox(
     } else {
         config.network.clone()
     };
+    let network = with_service_ports(runtime_bin, &network, &config.service_ports);
     cmd.arg("--network").arg(&network);
 
     // Publish ports, and ask Docker to keep the container alive, when this
@@ -413,6 +556,105 @@ pub async fn hibernate_sandbox(container: &SandboxContainer) -> Result<(), Strin
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("Failed to hibernate container: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Label recording what a sandbox container was created as.
+///
+/// A sandbox's name is fixed per agent and workspace, and the container outlives
+/// the process that made it: a daemon restart, a rebuild, and the idle
+/// hibernation above all leave it in place while the in-memory pool forgets it.
+/// The next call then ran `run --name <same name>` and failed with "name is
+/// already in use", so every agent lost its sandbox after each restart and after
+/// thirty idle minutes. The label is how a later call tells "the same sandbox,
+/// pick it up" from "same name, different sandbox, replace it" without trusting
+/// the name alone.
+const SANDBOX_FINGERPRINT_LABEL: &str = "freeco.sandbox.fingerprint";
+
+/// A container already holding a sandbox's name.
+struct ExistingSandbox {
+    id: String,
+    running: bool,
+    fingerprint: Option<String>,
+}
+
+/// Look up a container by name. `None` when no such container exists.
+///
+/// Reads the JSON form rather than a `--format` template, so nothing depends on
+/// how quotes inside a template survive being passed as an argument on Windows.
+async fn inspect_existing_sandbox(runtime: &str, name: &str) -> Option<ExistingSandbox> {
+    let output = crate::quiet_command::quiet_async(runtime)
+        .arg("container")
+        .arg("inspect")
+        .arg(name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_existing_sandbox(&output.stdout)
+}
+
+/// Read a container's id, run state and sandbox fingerprint from `container
+/// inspect` JSON.
+///
+/// Kept apart from the command so the parsing -- which decides between reusing a
+/// sandbox and deleting it -- can be tested without a container runtime.
+fn parse_existing_sandbox(inspect_json: &[u8]) -> Option<ExistingSandbox> {
+    let parsed: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
+    let container = parsed.get(0)?;
+    let id = container.get("Id")?.as_str()?.to_string();
+    let running = container
+        .pointer("/State/Running")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let fingerprint = container
+        .pointer("/Config/Labels")
+        .and_then(|labels| labels.get(SANDBOX_FINGERPRINT_LABEL))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(ExistingSandbox {
+        id,
+        running,
+        fingerprint,
+    })
+}
+
+/// Start a stopped sandbox, such as one the idle cleanup hibernated.
+async fn start_existing_sandbox(runtime: &str, name: &str) -> bool {
+    matches!(
+        crate::quiet_command::quiet_async(runtime)
+            .arg("start")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await,
+        Ok(status) if status.success()
+    )
+}
+
+/// Remove a container by name, for when the name is held by a sandbox that
+/// cannot be reused.
+async fn remove_sandbox_by_name(runtime: &str, name: &str) -> Result<(), String> {
+    let output = crate::quiet_command::quiet_async(runtime)
+        .arg("rm")
+        .arg("-f")
+        .arg(name)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to remove stale sandbox {name}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to remove stale sandbox {name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -652,10 +894,20 @@ fn sandbox_container_name(
 /// Mutable tags are acceptable for short-lived local sandboxes, but a reused
 /// container or writable workspace must be reproducible and auditable.
 pub fn is_immutable_image_reference(image: &str) -> bool {
-    let Some((_, digest)) = image.rsplit_once("@sha256:") else {
-        return false;
-    };
-    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    // `repo@sha256:<64 hex>` -- a registry image addressed by manifest digest.
+    if let Some((_, digest)) = image.rsplit_once("@sha256:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    // `sha256:<64 hex>` -- an image addressed by its own id, which is what a
+    // locally built image that was never pushed has instead of a repo digest.
+    // It is content-addressed in exactly the same sense: the reference names
+    // one specific image and cannot be repointed at another. Rejecting it
+    // meant a locally built sandbox could never satisfy the rule, so
+    // `docker_exec` refused every call on this machine.
+    if let Some(digest) = image.strip_prefix("sha256:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -782,8 +1034,48 @@ pub fn config_hash(config: &DockerSandboxConfig) -> u64 {
     config.pids_limit.hash(&mut hasher);
     config.persistent_workspace.hash(&mut hasher);
     config.persistent_workspace_agents.hash(&mut hasher);
+    // Part of the fingerprint: a container started before a credential was
+    // shared does not have it, and reusing that one would leave the agent
+    // unauthenticated with no sign of why.
+    config.sandbox_env.hash(&mut hasher);
     config.blocked_mounts.hash(&mut hasher);
+    // A sandbox started before a service port was added cannot reach it.
+    config.service_ports.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Give a networked podman sandbox the local services, and only those.
+///
+/// The services FreEco.ai installs (CRM, voice, speech, accounting) listen on
+/// the VM's loopback interface. A sandbox on podman's default network has its
+/// own loopback and cannot reach them -- tested: every one of them refused --
+/// so an agent sent to use one had no way but to ask for a host shell, which
+/// is exactly what the sandbox exists to prevent.
+///
+/// `pasta -T <port>` forwards the sandbox's own `127.0.0.1:<port>` to the same
+/// port on the host, one port at a time. Host networking, or pasta's
+/// `--map-host-loopback`, would also work, but they open every port on the
+/// host, the services' databases included; this opens the listed service ports
+/// and nothing else, and leaves outbound internet as it was.
+///
+/// Docker has no equivalent, and "none" means no network, so both are left
+/// alone.
+pub(crate) fn with_service_ports(runtime_bin: &str, network: &str, ports: &[u16]) -> String {
+    // Split by hand: `Path` would not treat `\` as a separator on Linux.
+    let name = runtime_bin
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(runtime_bin);
+    let name = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    let podman = name.eq_ignore_ascii_case("podman");
+    if !podman || ports.is_empty() || !(network == "bridge" || network == "pasta") {
+        return network.to_string();
+    }
+    let forwards: Vec<String> = ports.iter().map(|p| format!("-T,{p}")).collect();
+    format!("pasta:{}", forwards.join(","))
 }
 
 #[cfg(test)]
@@ -908,6 +1200,20 @@ mod tests {
         assert_eq!(config.reuse_cool_secs, 0);
         assert!(!config.persistent_workspace);
         assert!(config.persistent_workspace_agents.is_empty());
+        // Nothing from the daemon's environment reaches a sandbox by default.
+        assert!(config.sandbox_env.is_empty());
+    }
+
+    /// Sharing a credential changes what the container is, so a container
+    /// started before it was shared must not be reused afterwards.
+    #[test]
+    fn sandbox_env_changes_the_fingerprint() {
+        let mut a = freeco_types::config::DockerSandboxConfig::default();
+        let mut b = a.clone();
+        b.sandbox_env = vec!["GH_TOKEN".to_string()];
+        assert_ne!(config_hash(&a), config_hash(&b));
+        a.sandbox_env = vec!["GH_TOKEN".to_string()];
+        assert_eq!(config_hash(&a), config_hash(&b));
     }
 
     #[test]
@@ -1081,6 +1387,49 @@ mod tests {
         ));
     }
 
+    /// A locally built image has no repo digest, only its own id. That is
+    /// content-addressed too, and rejecting it meant `docker_exec` refused
+    /// every call on a machine whose sandbox image was built rather than
+    /// pulled.
+    #[test]
+    fn bare_image_id_counts_as_immutable() {
+        assert!(is_immutable_image_reference(
+            "sha256:73169df13d621e9be57cb0064ee40e5cf7d0b81005e758a50386fa87e8ab4d0a"
+        ));
+        assert!(!is_immutable_image_reference("sha256:short"));
+        assert!(!is_immutable_image_reference(
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        ));
+    }
+
+    /// A sandbox this code created: labelled and running, so it is reused.
+    #[test]
+    fn reads_a_labelled_running_sandbox() {
+        let json = br#"[{"Id":"abc123","State":{"Running":true},"Config":{"Labels":{"freeco.sandbox.fingerprint":"00ff-Workspace-rw"}}}]"#;
+        let found = parse_existing_sandbox(json).expect("parsed");
+        assert_eq!(found.id, "abc123");
+        assert!(found.running);
+        assert_eq!(found.fingerprint.as_deref(), Some("00ff-Workspace-rw"));
+    }
+
+    /// A sandbox from before labels existed, stopped by the idle cleanup. With
+    /// no fingerprint it can never match, so it is replaced rather than adopted.
+    #[test]
+    fn unlabelled_stopped_sandbox_has_no_fingerprint() {
+        let json = br#"[{"Id":"old","State":{"Running":false},"Config":{"Labels":null}}]"#;
+        let found = parse_existing_sandbox(json).expect("parsed");
+        assert!(!found.running);
+        assert_eq!(found.fingerprint, None);
+    }
+
+    /// No container, or output that is not inspect JSON, means nothing is there.
+    /// It must never read as a container to delete.
+    #[test]
+    fn absent_or_garbage_inspect_output_is_none() {
+        assert!(parse_existing_sandbox(b"[]").is_none());
+        assert!(parse_existing_sandbox(b"Error: no such container").is_none());
+    }
+
     // ── Bind Mount Validation tests ──────────────────────────────────
 
     #[test]
@@ -1149,6 +1498,33 @@ mod tests {
         let c1 = DockerSandboxConfig::default();
         let mut c2 = c1.clone();
         c2.persistent_workspace_agents.push("agent-1".to_string());
+        assert_ne!(config_hash(&c1), config_hash(&c2));
+    }
+
+    /// The exact network string was tested by hand against the running VM:
+    /// all four services answered from inside the sandbox, the internet still
+    /// did, and database ports stayed closed.
+    #[test]
+    fn podman_sandboxes_get_only_the_service_ports() {
+        assert_eq!(
+            with_service_ports("podman", "bridge", &[3200, 8010]),
+            "pasta:-T,3200,-T,8010"
+        );
+        assert_eq!(
+            with_service_ports("C:\\bin\\podman.exe", "bridge", &[8010]),
+            "pasta:-T,8010"
+        );
+        // No network stays no network; docker has no pasta.
+        assert_eq!(with_service_ports("podman", "none", &[8010]), "none");
+        assert_eq!(with_service_ports("docker", "bridge", &[8010]), "bridge");
+        assert_eq!(with_service_ports("podman", "bridge", &[]), "bridge");
+    }
+
+    #[test]
+    fn test_config_hash_changes_when_service_ports_change() {
+        let c1 = DockerSandboxConfig::default();
+        let mut c2 = c1.clone();
+        c2.service_ports.push(9999);
         assert_ne!(config_hash(&c1), config_hash(&c2));
     }
 }

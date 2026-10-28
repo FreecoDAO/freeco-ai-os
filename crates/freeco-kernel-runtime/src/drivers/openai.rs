@@ -156,6 +156,16 @@ struct OaiRequest {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Sent only to switch reasoning off.
+    ///
+    /// Reasoning models apply their own default, and on
+    /// `/v1/chat/completions` that default is incompatible with function
+    /// tools: "Function tools with reasoning_effort are not supported for
+    /// gpt-5.6-luna ... set reasoning_effort to 'none'". Nothing here ever
+    /// asked for reasoning -- the conflict came from a default we never set,
+    /// which is why the field did not exist at all until it had to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<OaiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +200,26 @@ struct OaiRequest {
 /// `free-models-per-day`, which is the single most likely thing a new user on a
 /// free key will hit -- and it was being shown to them as "something went
 /// wrong".
+/// Whether a failure is the provider explicitly stating it cannot do function
+/// calling — the only justification for taking an agent's tools away.
+///
+/// `body_lower` must already be lowercased.
+///
+/// Narrow on purpose. Disarming an agent makes it narrate instead of act, which
+/// reads to the user as a model that will not work, so anything short of an
+/// explicit statement must not trigger it. In particular a reasoning conflict
+/// ("Function tools with reasoning_effort are not supported for ...") contains
+/// both "tool" and "not supported" while having nothing to do with tool support;
+/// it is answered by switching reasoning off, and must not reach here.
+fn says_tools_unsupported(status: u16, body_lower: &str) -> bool {
+    status == 400
+        && !body_lower.contains("reasoning")
+        && (body_lower.contains("does not support tools")
+            || body_lower.contains("tools are not supported")
+            || body_lower.contains("tool use is not supported")
+            || body_lower.contains("function calling is not supported"))
+}
+
 fn is_exhausted_quota(body: &str) -> bool {
     let b = body.to_lowercase();
     b.contains("per-day")
@@ -647,6 +677,9 @@ impl LlmDriver for OpenAIDriver {
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
+            // Left unset: only the 400 retry turns reasoning off, so
+            // models that combine it with tools keep doing so.
+            reasoning_effort: None,
             temperature: if self.needs_reasoning_content(&request.model) {
                 // Kimi with thinking disabled uses fixed 0.6 for multi-turn compatibility.
                 Some(0.6)
@@ -783,25 +816,107 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // Model doesn't support function calling â€” retry without tools
-                // (e.g. GLM-5 on DashScope returns 500 "internal error" when tools are sent)
                 let body_lower = body.to_lowercase();
-                if !oai_request.tools.is_empty()
+
+                // Some models accept only their default temperature and reject
+                // any explicit value outright.
+                //
+                // Checked before the tools retry below, because that one clears
+                // the tools and continues: a temperature rejection would be
+                // "handled" by silently taking every tool away from the agent,
+                // and the request would still fail for the same reason. The
+                // symptom this fixes looked like a broken model family --
+                // gpt-5.4 worked while 5.5 and 5.6 returned 400 -- and the only
+                // difference was an agent temperature of 0.3.
+                //
+                // Dropping the field asks for the model's default rather than
+                // guessing a value it will accept.
+                if oai_request.temperature.is_some()
                     && attempt < max_retries
-                    && (status == 500
-                        || body_lower.contains("internal error")
-                        || (status == 400
-                            && (body_lower.contains("does not support tools")
-                                || body_lower.contains("tool")
-                                    && body_lower.contains("not supported"))))
+                    && status == 400
+                    && body_lower.contains("temperature")
+                    && (body_lower.contains("does not support")
+                        || body_lower.contains("unsupported"))
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Model rejects an explicit temperature, retrying with its default"
+                    );
+                    oai_request.temperature = None;
+                    continue;
+                }
+
+                // Reasoning conflicts with tools on this endpoint — turn
+                // reasoning off, never the tools.
+                //
+                // Checked before the retry below, which "handles" this by
+                // clearing every tool the agent has. That trade is backwards: a
+                // reasoning model without tools cannot act, and the agent then
+                // tells the user it has no tools -- which is exactly what
+                // happened, across every agent on a gpt-5.6 model, and read as
+                // a permissions bug for a day.
+                if !oai_request.tools.is_empty()
+                    && oai_request.reasoning_effort.is_none()
+                    && attempt < max_retries
+                    && status == 400
+                    && body_lower.contains("reasoning_effort")
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        "Model cannot combine reasoning with tools here — disabling reasoning, keeping tools"
+                    );
+                    oai_request.reasoning_effort = Some("none".to_string());
+                    continue;
+                }
+
+                // Model genuinely cannot do function calling — retry without
+                // tools (e.g. GLM-5 on DashScope rejects requests carrying them).
+                //
+                // Taking an agent's tools away is the most destructive thing
+                // this loop can do: it cannot act afterwards, so it narrates
+                // instead -- "I am checking that now" -- and returns having
+                // done nothing. That is indistinguishable from a stupid model,
+                // and it is what the user sees.
+                //
+                // So the trigger has to be an explicit statement that tools are
+                // unsupported, and nothing else. Two triggers used to be wider
+                // than that and both fired in ordinary operation:
+                //
+                //   - a bare `status == 500`, or the words "internal error"
+                //     anywhere in the body. Every transient provider fault
+                //     silently disarmed the agent for that turn.
+                //   - `"tool"` and `"not supported"` appearing anywhere, which
+                //     the reasoning conflict's own message satisfies
+                //     ("Function tools with reasoning_effort are not supported
+                //     for ..."). The retry above answers that one by switching
+                //     reasoning off; letting this branch see it too meant the
+                //     next failure threw the tools away as well.
+                //
+                // A 500 is now retried as-is, unchanged: the same request may
+                // simply succeed, which is what a transient fault means.
+                let says_tools_unsupported = says_tools_unsupported(status, &body_lower);
+                if !oai_request.tools.is_empty() && attempt < max_retries && says_tools_unsupported
                 {
                     warn!(
                         model = %oai_request.model,
                         status,
-                        "Model may not support tools, retrying without tools"
+                        "Model states it does not support tools, retrying without them"
                     );
                     oai_request.tools.clear();
                     oai_request.tool_choice = None;
+                    continue;
+                }
+
+                // Transient server-side fault: retry the request unchanged
+                // rather than degrading it.
+                if (status == 500 || status == 502 || status == 503 || status == 529)
+                    && attempt < max_retries
+                {
+                    warn!(
+                        model = %oai_request.model,
+                        status,
+                        "Provider returned a server error, retrying the same request"
+                    );
                     continue;
                 }
 
@@ -1088,6 +1203,9 @@ impl LlmDriver for OpenAIDriver {
             messages: oai_messages,
             max_tokens: mt,
             max_completion_tokens: mct,
+            // Left unset: only the 400 retry turns reasoning off, so
+            // models that combine it with tools keep doing so.
+            reasoning_effort: None,
             temperature: if self.needs_reasoning_content(&request.model) {
                 Some(0.6)
             } else if temperature_must_be_one(&request.model) {
@@ -1796,6 +1914,45 @@ mod effective_model_tests {
 
     fn openrouter() -> OpenAIDriver {
         OpenAIDriver::new("k".into(), "https://openrouter.ai/api/v1".into())
+    }
+
+    /// A transient server fault must never cost the agent its tools. This used
+    /// to fire on any 500, so one provider hiccup left the agent unable to act
+    /// for that turn -- it planned, promised, and returned having done nothing.
+    #[test]
+    fn transient_server_errors_do_not_strip_tools() {
+        assert!(!says_tools_unsupported(500, "internal error"));
+        assert!(!says_tools_unsupported(500, "upstream connect error"));
+        assert!(!says_tools_unsupported(502, "bad gateway"));
+        assert!(!says_tools_unsupported(503, "service unavailable"));
+    }
+
+    /// The reasoning conflict names tools and says "not supported", but it is
+    /// answered by turning reasoning off. Letting it strip the tools as well is
+    /// what disarmed every gpt-5.6 agent that held any.
+    #[test]
+    fn reasoning_conflict_does_not_strip_tools() {
+        let body = "function tools with reasoning_effort are not supported for \
+                    gpt-5.6-luna. set reasoning_effort to 'none'.";
+        assert!(!says_tools_unsupported(400, body));
+    }
+
+    /// An explicit statement still works -- this is the case the branch exists
+    /// for, and narrowing it must not break it.
+    #[test]
+    fn explicit_no_tool_support_still_strips() {
+        assert!(says_tools_unsupported(
+            400,
+            "this model does not support tools"
+        ));
+        assert!(says_tools_unsupported(
+            400,
+            "tools are not supported by this endpoint"
+        ));
+        assert!(says_tools_unsupported(
+            400,
+            "function calling is not supported"
+        ));
     }
 
     /// The catalog's `openrouter/` prefix is ours, not OpenRouter's, so it has

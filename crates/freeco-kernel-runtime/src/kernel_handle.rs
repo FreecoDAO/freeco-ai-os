@@ -175,13 +175,22 @@ pub trait KernelHandle: Send + Sync {
 
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
     /// Returns `Ok(true)` if approved, `Ok(false)` if denied or timed out.
+    /// Ask the user to allow one tool call.
+    ///
+    /// `purpose` is the agent's own account of what it is trying to achieve and
+    /// why this tool is needed for it. Without it the user sees a tool name and
+    /// a string of arguments, which is not a question anyone can answer: faced
+    /// with it people approve everything or deny everything. Implementations
+    /// fall back to a generic per-tool description when it is absent, but that
+    /// describes the mechanism rather than the aim, so it is a poor substitute.
     async fn request_approval(
         &self,
         agent_id: &str,
         tool_name: &str,
         action_summary: &str,
+        purpose: Option<&str>,
     ) -> Result<bool, String> {
-        let _ = (agent_id, tool_name, action_summary);
+        let _ = (agent_id, tool_name, action_summary, purpose);
         Ok(true) // Default: auto-approve
     }
 
@@ -220,6 +229,92 @@ pub trait KernelHandle: Send + Sync {
     async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
         let _ = instance_id;
         Err("Hands system not available".to_string())
+    }
+
+    /// The organisation: companies, projects, teams and their members.
+    async fn org_overview(&self) -> Result<serde_json::Value, String> {
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a team, optionally within a project.
+    async fn team_create(&self, name: &str, project_id: Option<&str>) -> Result<String, String> {
+        let _ = (name, project_id);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Put an agent in a team with a stated accountability.
+    async fn team_add_member(
+        &self,
+        team_id: &str,
+        agent_id: &str,
+        role: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (team_id, agent_id, role);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Every team, with its project and its members.
+    ///
+    /// Teams could be created and never read back, so an agent could be put in
+    /// one and had no way to find out, and no way to learn the id its team
+    /// memory is keyed by.
+    async fn team_list(&self) -> Result<serde_json::Value, String> {
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a company — the top of the organisation, which projects belong to.
+    ///
+    /// The store and the HTTP route for this both existed; the tool did not, so
+    /// an agent could be made CEO of an organisation and still had no way to
+    /// create the company it was CEO of. Worse, `project_create` takes a
+    /// `company_id` and the companies table was empty, so any id an agent
+    /// supplied failed on the foreign key with nothing it could do about it.
+    async fn company_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (name, description);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Create a project that teams and conversations attach to.
+    async fn project_create(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        company_id: Option<&str>,
+    ) -> Result<String, String> {
+        let _ = (name, description, company_id);
+        Err("Organisation store not available".to_string())
+    }
+
+    /// Health of the installation, including what containers are running and
+    /// whether any are unaccounted for.
+    async fn system_audit(&self) -> Result<serde_json::Value, String> {
+        Err("System audit not available".to_string())
+    }
+
+    /// Rename the calling agent's current conversation.
+    async fn session_rename(&self, agent_id: &str, label: &str) -> Result<String, String> {
+        let _ = (agent_id, label);
+        Err("Session management not available".to_string())
+    }
+
+    /// Start a new named conversation for the calling agent.
+    ///
+    /// `carry_history` copies the current conversation into the new one and
+    /// deliberately does not remove it from the original: there is no
+    /// recoverable message delete yet, and losing a conversation to a tidying
+    /// operation is far worse than leaving a duplicate behind.
+    async fn session_fork(
+        &self,
+        agent_id: &str,
+        label: &str,
+        carry_history: bool,
+    ) -> Result<String, String> {
+        let _ = (agent_id, label, carry_history);
+        Err("Session management not available".to_string())
     }
 
     /// List discovered external A2A agents as (name, url) pairs.

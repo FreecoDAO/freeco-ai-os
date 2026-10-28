@@ -1,0 +1,14 @@
+{
+  "name": "freeco-plugins",
+  "description": "FreEco.ai integrations for Claude Code",
+  "owner": {
+    "name": "FreecoDAO"
+  },
+  "plugins": [
+    {
+      "name": "freeco",
+      "source": "./",
+      "description": "Work as a member of your FreEco.ai agent team through the daemon's MCP endpoint."
+    }
+  ]
+}

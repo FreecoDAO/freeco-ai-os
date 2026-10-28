@@ -528,6 +528,44 @@ mod tests {
         MeteringEngine::new(store)
     }
 
+    /// The global spend cap is enforced -- and this pins it. It existed and
+    /// was called by nothing, so a configured cap stopped no spending at all.
+    #[test]
+    fn global_daily_cap_refuses_once_spend_reaches_it() {
+        let engine = setup();
+        engine
+            .record(&UsageRecord {
+                agent_id: AgentId::new(),
+                model: "test-model".to_string(),
+                input_tokens: 1000,
+                output_tokens: 1000,
+                cost_usd: 0.50,
+                tool_calls: 0,
+            })
+            .unwrap();
+
+        let under = freeco_types::config::BudgetConfig {
+            max_daily_usd: 1.00,
+            ..Default::default()
+        };
+        assert!(engine.check_global_budget(&under).is_ok());
+
+        let reached = freeco_types::config::BudgetConfig {
+            max_daily_usd: 0.25,
+            ..Default::default()
+        };
+        let err = engine.check_global_budget(&reached).unwrap_err();
+        assert!(
+            matches!(err, FreecoError::QuotaExceeded(_)),
+            "expected QuotaExceeded, got {err:?}"
+        );
+
+        // All limits at zero means no cap configured: never refuses.
+        assert!(engine
+            .check_global_budget(&freeco_types::config::BudgetConfig::default())
+            .is_ok());
+    }
+
     #[test]
     fn test_record_and_check_quota_under() {
         let engine = setup();

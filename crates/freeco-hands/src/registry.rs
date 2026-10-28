@@ -52,6 +52,15 @@ pub struct SettingStatus {
     pub options: Vec<SettingOptionStatus>,
 }
 
+/// One hand saved across a restart: id, settings, the agent it had before the
+/// restart, and whether it was paused.
+pub type SavedHand = (
+    String,
+    HashMap<String, serde_json::Value>,
+    Option<AgentId>,
+    bool,
+);
+
 /// The Hand registry — stores definitions and tracks active instances.
 pub struct HandRegistry {
     /// All known hand definitions, keyed by hand_id.
@@ -101,17 +110,24 @@ impl HandRegistry {
         hash
     }
 
-    /// Persist active hand state to disk so it survives restarts.
+    /// Persist active and paused hand state to disk so it survives restarts.
+    ///
+    /// Read back by [`Self::load_state_with_pause`] as [`SavedHand`] rows.
+    ///
+    /// Paused hands are saved too, marked as such. Only active ones used to be,
+    /// so pausing a hand and restarting dropped it entirely -- the next boot
+    /// neither ran it nor remembered it.
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
         let entries: Vec<serde_json::Value> = self
             .instances
             .iter()
-            .filter(|e| e.status == HandStatus::Active)
+            .filter(|e| matches!(e.status, HandStatus::Active | HandStatus::Paused))
             .map(|e| {
                 serde_json::json!({
                     "hand_id": e.hand_id,
                     "config": e.config,
                     "agent_id": e.agent_id,
+                    "paused": e.status == HandStatus::Paused,
                 })
             })
             .collect();
@@ -129,6 +145,15 @@ impl HandRegistry {
     pub fn load_state(
         path: &std::path::Path,
     ) -> Vec<(String, HashMap<String, serde_json::Value>, Option<AgentId>)> {
+        Self::load_state_with_pause(path)
+            .into_iter()
+            .map(|(hand_id, config, old_agent_id, _)| (hand_id, config, old_agent_id))
+            .collect()
+    }
+
+    /// As [`Self::load_state`], plus whether each hand was paused, so a boot
+    /// restores it paused instead of running it.
+    pub fn load_state_with_pause(path: &std::path::Path) -> Vec<SavedHand> {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
@@ -149,7 +174,8 @@ impl HandRegistry {
                 let old_agent_id: Option<AgentId> = e
                     .get("agent_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                Some((hand_id, config, old_agent_id))
+                let paused = e.get("paused").and_then(|v| v.as_bool()).unwrap_or(false);
+                Some((hand_id, config, old_agent_id, paused))
             })
             .collect()
     }

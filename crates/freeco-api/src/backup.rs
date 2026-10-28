@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 4] = b"OFB1";
 const KEY_NAME: &str = "freeco.backup.archive-key.v1";
-const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct BackupFile {
@@ -45,9 +45,25 @@ fn archive_key(home_dir: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
     let vault_path = home_dir.join("vault.enc");
     let mut vault = freeco_extensions::vault::CredentialVault::new(vault_path.clone());
     if vault_path.exists() {
-        vault
-            .unlock()
-            .map_err(|e| format!("unable to unlock vault: {e}"))?;
+        // A vault that cannot be unlocked stops every backup, and says so in
+        // terms that name the vault rather than the consequence. The master key
+        // lives in the OS keyring, so it goes missing when the keyring entry is
+        // cleared, the user profile changes, or -- as here -- the service name
+        // the entry was filed under changed between releases. The vault file
+        // survives all three, which makes it look like the data is fine.
+        //
+        // Deliberately not re-initialised automatically: that would discard
+        // whatever the vault holds, including the key that decrypts existing
+        // archives, and no backup is worth silently destroying old ones.
+        vault.unlock().map_err(|e| {
+            format!(
+                "unable to unlock vault: {e}. Backups are encrypted with a key kept in this \
+                 vault, so none can be written until it opens. Either set FREECO_AI_VAULT_KEY \
+                 to the existing key, or re-initialise the vault by moving \
+                 {} aside -- which permanently gives up decrypting archives made before now.",
+                vault_path.display()
+            )
+        })?;
     } else {
         vault
             .init()
@@ -202,6 +218,7 @@ pub fn create_backup(
     retention: usize,
 ) -> Result<BackupResult, String> {
     let key = archive_key(home_dir)?;
+    checkpoint_wal(db_path);
     let files = collect_files(home_dir, data_dir, db_path)?;
     let content = serde_json::to_vec(&files).map_err(|e| e.to_string())?;
     let payload = BackupPayload {
@@ -227,6 +244,18 @@ pub fn create_backup(
     let mut archive = MAGIC.to_vec();
     archive.extend_from_slice(&nonce);
     archive.extend_from_slice(&ciphertext);
+    // Never write what restore would refuse. It used to be written anyway,
+    // reported as a success, and then pruning deleted the oldest archive to
+    // make room -- replacing a backup that could be restored with one that
+    // could not.
+    if archive.len() as u64 > MAX_ARCHIVE_BYTES {
+        return Err(format!(
+            "backup would be {} MB, over the {} MB a restore accepts; nothing was written \
+             and no older backup was removed",
+            archive.len() / (1024 * 1024),
+            MAX_ARCHIVE_BYTES / (1024 * 1024)
+        ));
+    }
     fs::write(&path, &archive).map_err(|e| e.to_string())?;
     prune_backups(&backups, retention)?;
     Ok(BackupResult {
@@ -234,6 +263,35 @@ pub fn create_backup(
         files: payload.files.len(),
         bytes: archive.len() as u64,
     })
+}
+
+/// Fold the write-ahead log into the database before copying both.
+///
+/// Uncheckpointed, the log had grown to 106 MB beside a 24 MB database and
+/// took the archive past the size a restore accepts. Best effort: a reader
+/// holding an old snapshot can stop it finishing, and the backup is still
+/// correct without it, only larger.
+fn checkpoint_wal(db_path: &Path) {
+    if !db_path.exists() {
+        return;
+    }
+    match rusqlite::Connection::open(db_path) {
+        Ok(conn) => {
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(10));
+            match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            }) {
+                Ok((busy, log, done)) if busy != 0 => tracing::warn!(
+                    log_pages = log,
+                    checkpointed = done,
+                    "WAL checkpoint before backup was blocked by an open reader; backing up the log as it is"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("WAL checkpoint before backup failed: {e}"),
+            }
+        }
+        Err(e) => tracing::warn!("could not open the database to checkpoint it: {e}"),
+    }
 }
 
 fn prune_backups(backups: &Path, retention: usize) -> Result<(), String> {

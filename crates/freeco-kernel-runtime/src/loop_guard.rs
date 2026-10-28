@@ -170,9 +170,23 @@ impl LoopGuard {
         // Check if this call hash was blocked by outcome detection
         if self.blocked_outcomes.contains(&hash) {
             self.blocked_calls += 1;
+            // Says what this is *not*, deliberately.
+            //
+            // An agent that hits this concludes it lacks the capability, states
+            // that to the user as fact, and then refuses to try again in later
+            // messages -- the block is in its conversation history, so it keeps
+            // citing it. One agent reported "Permission denied: agent does not
+            // have capability to use tool 'shell_exec'", an error this codebase
+            // never produced, while holding every tool it needed.
+            //
+            // The guard is per-run and resets on the next message, so the
+            // correct next step really is to try again differently.
             return LoopGuardVerdict::Block(format!(
-                "Blocked: tool '{}' is returning identical results repeatedly. \
-                 The current approach is not working — try something different.",
+                "Blocked: tool '{}' returned identical results on repeated calls, so this \
+                 attempt was stopped. You DO have this tool and permission to use it — this \
+                 is not a capability or permissions problem, and the block clears on your \
+                 next message. Repeating the same call will not work; change the arguments \
+                 or the approach, and do not tell the user you lack this tool.",
                 tool_name
             ));
         }

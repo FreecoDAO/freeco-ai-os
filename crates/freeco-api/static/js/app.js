@@ -224,10 +224,34 @@ document.addEventListener('alpine:init', function() {
       localStorage.setItem('freeco-focus', this.focusMode);
     },
 
+    // The agent you talk to comes first, everywhere.
+    //
+    // Agents arrived in registry order, so the one that is the point of
+    // contact - the CEO, concierge and executive assistant - sat wherever it
+    // happened to land, and which agent to address was left to be guessed from
+    // a list of names. The daemon already answers that question at
+    // /api/assistant, by role rather than by name, so ask it once and keep the
+    // answer first; the rest stay in the order they came, sorted by name.
     async refreshAgents() {
       try {
         var agents = await FreecoAPI.get('/api/agents');
-        this.agents = Array.isArray(agents) ? agents : [];
+        var list = Array.isArray(agents) ? agents : [];
+        if (this._assistantId === undefined) {
+          this._assistantId = null;
+          try {
+            var who = await FreecoAPI.get('/api/assistant');
+            if (who && who.id) this._assistantId = who.id;
+          } catch (e) { /* fall back to plain ordering */ }
+        }
+        var lead = this._assistantId;
+        list.sort(function (a, b) {
+          if (lead) {
+            if (a.id === lead) return -1;
+            if (b.id === lead) return 1;
+          }
+          return String(a.name || '').localeCompare(String(b.name || ''));
+        });
+        this.agents = list;
         this.agentCount = this.agents.length;
       } catch(e) { /* silent */ }
     },
@@ -241,8 +265,32 @@ document.addEventListener('alpine:init', function() {
           .map(function(a) { return a.id; })
           .sort()
           .join(',');
-        if (pending.length > 0 && signature !== this.lastPendingApprovalSignature && typeof FreecoToast !== 'undefined') {
-          FreecoToast.warn('An agent is waiting for approval. Open Approvals to review.');
+        // Alert only for requests not seen before.
+        //
+        // This compared the whole set, so approving one of two pending
+        // requests changed the set and announced "an agent is waiting" again
+        // for the one already on screen. And it was a toast only: silent, and
+        // gone if the dashboard was not the window in front -- which is exactly
+        // when an agent blocked on a shell approval sits unnoticed.
+        var seen = this._seenApprovalIds || (this._seenApprovalIds = {});
+        var firstLoad = !this._approvalsLoadedOnce;
+        var fresh = pending.filter(function (a) { return !seen[a.id]; });
+        pending.forEach(function (a) { seen[a.id] = true; });
+        this._approvalsLoadedOnce = true;
+        // Nothing announced on the first poll: those were already waiting
+        // before this page opened, and the badge shows them.
+        if (fresh.length && !firstLoad) {
+          var first = fresh[0];
+          var what = first.summary || first.description || first.command ||
+                     first.tool_name || first.action || 'an action';
+          var who = first.agent_name || first.agent || 'An agent';
+          var text = who + ' is waiting for approval: ' + String(what).slice(0, 140) +
+                     (fresh.length > 1 ? ' (+' + (fresh.length - 1) + ' more)' : '');
+          if (typeof FreecoToast !== 'undefined') FreecoToast.warn(text);
+          if (window.FreecoAlert) {
+            window.FreecoAlert.chime();
+            window.FreecoAlert.notify('FreEco.ai needs your approval', text, 'approvals');
+          }
         }
         this.pendingApprovalCount = pending.length;
         this.lastPendingApprovalSignature = signature;
@@ -545,3 +593,348 @@ function app() {
     }
   };
 }
+
+// Dictation settings, shared by the chat page and the assistant widget.
+//
+// The language used to come from navigator.language. A browser's recogniser
+// only offers certain languages, and one it does not offer fails with
+// `language-not-supported` -- which is what the locale of a machine set to a
+// language the vendor does not serve produces, every time, with no way for the
+// user to choose otherwise.
+//
+// `browserSttBroken` records that this browser's recogniser cannot be used at
+// all. Brave defines SpeechRecognition but removed the vendor key behind it, so
+// it is present, always fails, and the "no recogniser here" fallback that keyed
+// off its absence could never run. Once it has failed for a reason that will
+// not change, dictation goes straight to record-and-upload instead of failing
+// again on every press.
+window.FreecoVoiceCfg = {
+  // Languages offered in Settings. 'Browser default' keeps the old behaviour.
+  LANGUAGES: [
+    { code: '', label: 'Browser default' },
+    { code: 'en-US', label: 'English (US)' },
+    { code: 'en-GB', label: 'English (UK)' },
+    { code: 'uk-UA', label: 'Українська' },
+    { code: 'fr-FR', label: 'Français' },
+    { code: 'de-DE', label: 'Deutsch' },
+    { code: 'it-IT', label: 'Italiano' }
+  ],
+  lang: function () {
+    try {
+      return localStorage.getItem('freeco-stt-lang') || navigator.language || 'en-US';
+    } catch (e) { return navigator.language || 'en-US'; }
+  },
+  savedLang: function () {
+    try { return localStorage.getItem('freeco-stt-lang') || ''; } catch (e) { return ''; }
+  },
+  setLang: function (v) {
+    try {
+      if (v) { localStorage.setItem('freeco-stt-lang', v); }
+      else { localStorage.removeItem('freeco-stt-lang'); }
+      // A different language may well be one this browser can serve.
+      localStorage.removeItem('freeco-stt-browser-broken');
+    } catch (e) { /* private mode */ }
+  },
+  browserSttBroken: function () {
+    try { return localStorage.getItem('freeco-stt-browser-broken') === '1'; } catch (e) { return false; }
+  },
+  // Errors that mean this browser will never transcribe, however many times it
+  // is asked: no vendor service, or no support for the chosen language.
+  isPermanentSttError: function (why) {
+    return why === 'language-not-supported' || why === 'service-not-allowed' ||
+           why === 'network' || why === 'not-supported';
+  },
+  markBrowserSttBroken: function () {
+    try { localStorage.setItem('freeco-stt-browser-broken', '1'); } catch (e) { /* private mode */ }
+  },
+  // Text as it should be heard. Replies are Markdown; read raw, every `**`
+  // came out as "asterisk asterisk". Shared by the main chat and the popup.
+  cleanForSpeech: function (text) {
+    return String(text || '')
+      .replace(/```[\s\S]*?```/g, ' code block ')      // don't read code aloud
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')             // images
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')          // links -> link text
+      .replace(/^\s{0,3}[-*+]\s+/gm, '')                // list bullets
+      .replace(/^\s{0,3}\d+[.)]\s+/gm, '')              // numbered list markers
+      .replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, '')      // table separator rows
+      .replace(/[*_~#>|]/g, ' ')
+      .replace(/https?:\/\/\S+/g, 'link')
+      .replace(/\s+/g, ' ')
+      .trim();
+  },
+  // The voice to speak with: the one chosen in the assistant's settings, else
+  // the best local voice for the language. "Natural" voices first -- the
+  // browser default is the robotic one. Voices that send text off the machine
+  // ("Online") are never picked automatically.
+  pickVoice: function () {
+    if (!window.speechSynthesis) return null;
+    var voices = window.speechSynthesis.getVoices() || [];
+    if (!voices.length) return null;
+    var chosen = '';
+    try { chosen = localStorage.getItem('freeco-voice-name') || ''; } catch (e) { /* private mode */ }
+    if (chosen) {
+      var hit = voices.find(function (v) { return v.name === chosen; });
+      if (hit) return hit;
+    }
+    var local = voices.filter(function (v) {
+      return v.localService !== false && !/\bonline\b/i.test(v.name || '');
+    });
+    var pool = local.length ? local : voices;
+    var lang = (this.lang() || navigator.language || 'en-US').toLowerCase();
+    var base = lang.split('-')[0];
+    var sameLang = pool.filter(function (v) { return (v.lang || '').toLowerCase() === lang; });
+    if (!sameLang.length) {
+      sameLang = pool.filter(function (v) { return (v.lang || '').toLowerCase().split('-')[0] === base; });
+    }
+    var cands = sameLang.length ? sameLang : pool;
+    return cands.find(function (v) { return /natural|neural/i.test(v.name || ''); }) || cands[0];
+  }
+};
+
+// Open a specific agent's chat from anywhere.
+//
+// The assistant can hand a message to another agent's conversation, and a
+// message delivered somewhere the user cannot reach is worse than one not
+// delivered: they are told it was sent and have no way to see it. The chat page
+// already opens whatever `pendingAgent` names, so this points that at the agent
+// and switches to the chat.
+window.addEventListener('freeco-open-agent', function (ev) {
+  var id = ev && ev.detail;
+  if (!id || typeof Alpine === 'undefined') return;
+  var store = Alpine.store('app');
+  if (!store) return;
+  var agent = (store.agents || []).filter(function (a) { return a.id === id; })[0];
+  if (agent) store.pendingAgent = agent;
+  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'chat' }));
+});
+
+// Deep links: /?ask=...&agent=...
+//
+// This is what makes the assistant's action reachable from outside the
+// dashboard. A link dropped into a note, a chat, or another device opens
+// FreEco.ai with the text already in the box, so the thing carried across is a
+// working request rather than a reminder to retype one. The text is only ever
+// placed in the input -- never sent -- because a link that acts on open would
+// let any page act as the user.
+(function () {
+  function readDeepLink() {
+    var p;
+    try { p = new URLSearchParams(window.location.search); } catch (e) { return null; }
+    var ask = p.get('ask');
+    var agent = p.get('agent');
+    if (!ask && !agent) return null;
+    return { ask: ask || '', agent: agent || '' };
+  }
+  var link = readDeepLink();
+  if (!link) return;
+  // Drop the parameters so a refresh does not repeat this.
+  try {
+    window.history.replaceState({}, '', window.location.pathname + window.location.hash);
+  } catch (e) { /* ignore */ }
+  window.addEventListener('DOMContentLoaded', function () {
+    setTimeout(function () {
+      if (link.agent) {
+        window.dispatchEvent(new CustomEvent('freeco-open-agent', { detail: link.agent }));
+        if (link.ask) window.dispatchEvent(new CustomEvent('freeco-prefill-chat', { detail: link.ask }));
+      } else {
+        window.dispatchEvent(new CustomEvent('freeco-open'));
+        if (link.ask) window.dispatchEvent(new CustomEvent('freeco-prefill', { detail: link.ask }));
+      }
+    }, 400);
+  });
+})();
+
+// Widget mode: /?widget=1 shows only the assistant, filling its own window.
+//
+// The desktop "FreEco Assistant" shortcut opens this in a small app window, so
+// the assistant can sit beside other work without the whole dashboard. The
+// parameter stays in the address (unlike a deep link) so a reload keeps the
+// mode. Styling is in components.css under `html.widget-mode`.
+(function () {
+  var widget = false;
+  try { widget = new URLSearchParams(window.location.search).get('widget') === '1'; } catch (e) { /* ignore */ }
+  if (!widget) return;
+  document.documentElement.classList.add('widget-mode');
+  try { document.title = 'FreEco Assistant'; } catch (e) { /* ignore */ }
+  window.addEventListener('DOMContentLoaded', function () {
+    setTimeout(function () { window.dispatchEvent(new CustomEvent('freeco-open')); }, 300);
+  });
+})();
+
+// Keep secrets out of conversations.
+//
+// A key pasted into a chat goes to the model provider with the message and is
+// resent with the history on every later call. Before any chat or popup
+// message is sent it is checked here; if it holds a key, the user is offered
+// to store it in the vault instead, and the message goes out with the key
+// replaced by its vault name. check() resolves to the text to send, or null
+// if the user chose to go back and edit.
+window.FreecoSecretGuard = (function () {
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function ask(found) {
+    return new Promise(function (resolve) {
+      var overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      var rows = found.map(function (f, i) {
+        return '<label style="display:block;margin:10px 0 4px;font-size:12px;color:var(--text-secondary)">' +
+          'Key ' + (i + 1) + ' (' + esc(f.masked) + ') — save as</label>' +
+          '<input class="form-input" data-i="' + i + '" value="' + esc(f.suggested_name) + '" ' +
+          'autocomplete="off" spellcheck="false" style="width:100%;font-family:var(--font-mono,monospace)">' +
+          // Saving over a stored key replaces it -- say so, never do it quietly.
+          (f.exists ? '<div style="font-size:12px;color:var(--warning,#b45309);margin-top:3px">' +
+            esc(f.suggested_name) + ' already holds a key. Saving replaces it; ' +
+            'change the name to keep both.</div>' : '');
+      }).join('');
+      overlay.innerHTML =
+        '<div class="modal" role="dialog" aria-modal="true" style="max-width:480px">' +
+        '<div class="modal-header"><h3>This message contains a key</h3></div>' +
+        '<p style="font-size:13px;margin:0 0 6px">Sent as it is, the key would go to the model provider ' +
+        'and be resent with every later message in this chat.</p>' +
+        '<p style="font-size:13px;margin:0">Save it in the vault instead. The message is sent with the key ' +
+        'replaced by its name, and the tools that need it read it from the vault.</p>' +
+        rows +
+        '<div class="fsg-err" style="color:var(--error);font-size:12px;margin-top:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
+        '<button class="btn btn-ghost btn-sm fsg-cancel">Back to editing</button>' +
+        '<button class="btn btn-primary btn-sm fsg-save">Save in vault and send</button>' +
+        '</div></div>';
+      document.body.appendChild(overlay);
+      var saveBtn = overlay.querySelector('.fsg-save');
+      saveBtn.focus();
+      function done(v) { overlay.remove(); resolve(v); }
+      overlay.querySelector('.fsg-cancel').onclick = function () { done(null); };
+      overlay.addEventListener('keydown', function (e) { if (e.key === 'Escape') done(null); });
+      saveBtn.onclick = function () {
+        var names = Array.prototype.map.call(overlay.querySelectorAll('input[data-i]'), function (el) {
+          return el.value.trim().toUpperCase();
+        });
+        var bad = names.filter(function (n) { return !/^[A-Z][A-Z0-9_]{1,63}$/.test(n); });
+        if (bad.length) {
+          overlay.querySelector('.fsg-err').textContent =
+            'Names use capital letters, digits and _, starting with a letter (for example CRM_API_KEY).';
+          return;
+        }
+        // Two keys under one name: the second save would overwrite the first.
+        var dup = names.filter(function (n, i) { return names.indexOf(n) !== i; });
+        if (dup.length) {
+          overlay.querySelector('.fsg-err').textContent =
+            'Each key needs its own name: ' + dup[0] + ' is used twice.';
+          return;
+        }
+        done(names);
+      };
+    });
+  }
+
+  async function check(text) {
+    if (!text || text.length < 16) return text;
+    var found;
+    try {
+      found = (await FreecoAPI.post('/api/gateway/scan', { text: text })).secrets || [];
+    } catch (e) {
+      // The gateway still masks keys on the way out; failing to ask here must
+      // not stop the user from sending.
+      return text;
+    }
+    if (!found.length) return text;
+    found.forEach(function (f) {
+      var v = text.slice(f.start, f.end);
+      f.value = v;
+      f.masked = v.length > 10 ? v.slice(0, 4) + '…' + v.slice(-3) : '…';
+    });
+    var names = await ask(found);
+    if (!names) return null;
+    // Save each, then replace from the end so earlier offsets stay valid.
+    for (var i = 0; i < found.length; i++) {
+      try {
+        await FreecoAPI.post('/api/vault/secrets', { name: names[i], value: found[i].value });
+      } catch (e) {
+        FreecoToast.error('Could not save the key: ' + (e.message || 'error') + '. Nothing was sent.');
+        return null;
+      }
+    }
+    var out = text;
+    for (var j = found.length - 1; j >= 0; j--) {
+      out = out.slice(0, found[j].start) + '[' + names[j] + ' saved in the vault]' + out.slice(found[j].end);
+    }
+    FreecoToast.success('Saved in the vault: ' + names.join(', '));
+    return out;
+  }
+
+  return { check: check };
+})();
+
+// Get the user's attention when an agent is blocked on them.
+//
+// A toast is visible only while the dashboard is the window in front. An agent
+// waiting on a shell approval with the dashboard behind another window waits
+// indefinitely, and the user concludes the agent is slow. A short tone and a
+// desktop notification reach them wherever they are.
+window.FreecoAlert = (function () {
+  var ctx = null;
+  function muted() {
+    try { return localStorage.getItem('freeco-alert-sound') === 'off'; } catch (e) { return false; }
+  }
+  // Browsers only allow audio and notification permission after a user gesture,
+  // so prepare both on the first click anywhere instead of failing silently
+  // the first time they are needed.
+  function prime() {
+    document.removeEventListener('click', prime, true);
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && !ctx) ctx = new AC();
+    } catch (e) { /* no audio here */ }
+    try {
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+    } catch (e) { /* no notifications here */ }
+  }
+  document.addEventListener('click', prime, true);
+
+  return {
+    // Two short rising tones: noticeable, not alarming.
+    chime: function () {
+      if (muted() || !ctx) return;
+      try {
+        if (ctx.state === 'suspended') ctx.resume();
+        [660, 880].forEach(function (freq, i) {
+          var t0 = ctx.currentTime + i * 0.16;
+          var osc = ctx.createOscillator();
+          var gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.start(t0); osc.stop(t0 + 0.15);
+        });
+      } catch (e) { /* sound is a courtesy, never an error */ }
+    },
+    // Only when the page is not already in front: a notification on top of
+    // the window the user is looking at is noise.
+    notify: function (title, body, page) {
+      try {
+        if (!('Notification' in window) || Notification.permission !== 'granted') return;
+        if (document.visibilityState === 'visible' && document.hasFocus()) return;
+        var n = new Notification(title, { body: body, tag: 'freeco-approval' });
+        n.onclick = function () {
+          window.focus();
+          if (page) window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: page }));
+          n.close();
+        };
+      } catch (e) { /* ignore */ }
+    },
+    setSound: function (on) {
+      try { localStorage.setItem('freeco-alert-sound', on ? 'on' : 'off'); } catch (e) { /* ignore */ }
+    },
+    soundOn: function () { return !muted(); }
+  };
+})();

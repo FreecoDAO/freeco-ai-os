@@ -639,6 +639,8 @@
               <p class="text-xs text-dim" style="margin:4px 0 0">
                 <span x-show="companyName(p.company_id)" x-text="companyName(p.company_id) + ' \u00b7 '"></span>
                 <span x-text="countFor(p.id)"></span> conversation<span x-show="countFor(p.id) !== 1">s</span>
+                <span x-show="teamsFor(p.id).length"
+                      x-text="' \u00b7 ' + teamsFor(p.id).length + ' team' + (teamsFor(p.id).length === 1 ? '' : 's')"></span>
               </p>
             </div>
           </template>
@@ -653,6 +655,28 @@
             <input class="form-input" style="flex:1;max-width:280px;font-size:12px" x-model="newTeam"
                    placeholder="Add a team to this project..." @keydown.enter="createTeam()">
             <button class="btn btn-ghost btn-sm" @click="createTeam()" :disabled="!newTeam.trim()">Add team</button>
+          </div>
+
+          <!-- The teams on this project, and who is in them. Teams were
+               creatable here and invisible everywhere, so nobody could tell
+               whether one already existed. -->
+          <div x-show="selected && teamsFor(selected.id).length" style="margin-bottom:16px">
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <template x-for="t in teamsFor(selected ? selected.id : '')" :key="t.id">
+                <div class="card" style="padding:8px 12px;min-width:180px">
+                  <div style="display:flex;align-items:baseline;gap:8px">
+                    <strong style="font-size:13px" x-text="t.name"></strong>
+                    <span class="text-xs text-dim"
+                          x-text="t.member_count + ' member' + (t.member_count === 1 ? '' : 's')"></span>
+                  </div>
+                  <p class="text-xs text-dim" style="margin:3px 0 0;word-break:break-all"
+                     x-text="'memory scope: team:' + t.id"></p>
+                  <p class="text-xs text-dim" style="margin:2px 0 0"
+                     x-show="t.members && t.members.length"
+                     x-text="t.members.map(function(m){return m.role ? m.agent_id + ' (' + m.role + ')' : m.agent_id;}).join(', ')"></p>
+                </div>
+              </template>
+            </div>
           </div>
           <div x-show="sessionsLoading" class="text-dim">Loading conversations...</div>
           <div x-show="!sessionsLoading && !sessions.length" class="text-dim" style="font-size:13px">
@@ -688,7 +712,8 @@
 
         <!-- MODE 1: Inline Chat (agent selected) -->
         <template x-if="activeChatAgent">
-          <div x-data="chatPage" class="chat-wrapper">
+          <div x-data="chatPage" class="chat-wrapper"
+               @freeco-prefill-chat.window="inputText = $event.detail; $nextTick(function(){ var el=document.getElementById('msg-input'); if(el) el.focus(); })">
             <!-- Chat header with back button -->
             <div class="page-header" x-show="currentAgent">
               <div class="flex items-center gap-2" style="min-width:0">
@@ -715,6 +740,10 @@
                   <button class="btn btn-ghost btn-sm" @click="sessionsOpen = !sessionsOpen" title="Sessions" style="position:relative">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
                     <span class="session-count-badge" x-show="sessions.length > 1" x-text="sessions.length"></span>
+                    <!-- Which conversation this is: the switcher was an unlabeled
+                         icon, so nobody could tell which one they were in. -->
+                    <span x-show="sessionLabel" x-text="sessionLabel" class="truncate"
+                          style="max-width:180px;margin-left:6px;font-size:12px"></span>
                   </button>
                   <div class="session-dropdown" x-show="sessionsOpen" @click.outside="sessionsOpen = false" x-transition>
                     <div class="session-dropdown-header">
@@ -739,10 +768,180 @@
                 <button class="btn btn-ghost btn-sm" @click="$store.app.toggleFocusMode()" title="Ctrl+Shift+F">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g x-show="!$store.app.focusMode"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></g><g x-show="$store.app.focusMode"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></g></svg>
                 </button>
+                <!-- Working panel: files, changes, artifacts, terminal, browser, background -->
+                <button class="btn btn-ghost btn-sm" @click="panelOpen ? (panelOpen = false) : openPanel()" :title="panelOpen ? 'Close panel' : 'Files, changes, terminal, browser…'"
+                        :style="panelOpen ? 'color:var(--accent)' : ''">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>
+                </button>
+                <!-- Conversation menu -->
+                <div style="position:relative">
+                  <button class="btn btn-ghost btn-sm" @click="convMenuOpen = !convMenuOpen; loadOutputStyles()" title="Conversation" aria-label="Conversation menu">⋯</button>
+                  <div x-show="convMenuOpen" x-cloak @click.outside="convMenuOpen = false" x-transition
+                       class="session-dropdown" style="right:0;left:auto;min-width:240px">
+                    <button class="conv-menu-item" @click="openInNewWindow()">↗ Open in new window</button>
+                    <button class="conv-menu-item" @click="renameConversation()">✎ Rename</button>
+                    <button class="conv-menu-item" @click="forkConversation()">⑂ Fork into a copy of this agent</button>
+                    <button class="conv-menu-item" @click="archiveConversation()">🗄 Archive</button>
+                    <button class="conv-menu-item" @click="openPanel('archive')">↺ Restore from archive…</button>
+                    <button class="conv-menu-item" style="color:var(--danger)" @click="deleteConversation()">🗑 Delete</button>
+                    <div class="conv-menu-sep"></div>
+                    <div class="conv-menu-label">Output style</div>
+                    <template x-for="s in outputStyles" :key="s.id">
+                      <button class="conv-menu-item" @click="setOutputStyle(s.id)" :title="s.description">
+                        <span x-text="(currentOutputStyle() === s.id ? '● ' : '○ ') + s.id"></span>
+                      </button>
+                    </template>
+                    <div class="conv-menu-sep"></div>
+                    <div class="conv-menu-label">Transcript view</div>
+                    <label class="conv-menu-item"><input type="checkbox" :checked="viewShowTools" @change="setView('viewShowTools', $event.target.checked)"> Show tool steps</label>
+                    <label class="conv-menu-item"><input type="checkbox" :checked="viewTimestamps" @change="setView('viewTimestamps', $event.target.checked)"> Show timestamps</label>
+                    <label class="conv-menu-item"><input type="checkbox" :checked="viewCompact" @change="setView('viewCompact', $event.target.checked)"> Compact</label>
+                  </div>
+                </div>
                 <button class="btn btn-danger btn-sm" @click="killAgent()">Stop</button>
                 <button class="btn btn-danger btn-sm" @click="uninstallAgent()" title="Stop and remove agent files from workspace">Uninstall</button>
               </div>
             </div>
+
+            <!-- Working panel. Everything the agent did, without asking it:
+                 its files, what changed, what it made, a terminal into its own
+                 sandbox (never the host), its browser, and its background work. -->
+            <aside x-show="panelOpen && currentAgent" x-cloak class="chat-side-panel" x-transition>
+              <div class="chat-side-tabs">
+                <template x-for="t in [['files','Files'],['changes','Changes'],['artifacts','Artifacts'],['terminal','Terminal'],['browser','Browser'],['background','Background'],['archive','Archive']]" :key="t[0]">
+                  <button :class="{ active: panelTab === t[0] }" @click="panelTab = t[0]; refreshPanel()" x-text="t[1]"></button>
+                </template>
+                <button class="chat-side-close" @click="panelOpen = false" aria-label="Close panel">&times;</button>
+              </div>
+              <div class="chat-side-body">
+                <!-- Files -->
+                <template x-if="panelTab === 'files'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <button class="btn btn-ghost btn-sm" @click="filesUp()" :disabled="!filesPath">↑ Up</button>
+                      <span class="text-xs text-dim truncate" x-text="'/workspace/' + (filesPath || '')"></span>
+                      <button class="btn btn-ghost btn-sm" @click="loadFiles(filesPath)" title="Refresh">⟳</button>
+                    </div>
+                    <template x-if="!fileView">
+                      <div>
+                        <template x-for="e in filesEntries" :key="e.path">
+                          <div class="chat-side-row" @click="e.is_dir ? loadFiles(e.path) : openFile(e.path)">
+                            <span x-text="(e.is_dir ? '📁 ' : '📄 ') + e.name" class="truncate" style="flex:1"></span>
+                            <span class="text-xs text-dim" x-text="e.is_dir ? '' : fmtBytes(e.size)"></span>
+                          </div>
+                        </template>
+                        <div class="text-xs text-dim" style="padding:12px" x-show="!filesEntries.length">Empty folder.</div>
+                      </div>
+                    </template>
+                    <template x-if="fileView">
+                      <div>
+                        <div class="chat-side-bar">
+                          <button class="btn btn-ghost btn-sm" @click="fileView = null">← Back</button>
+                          <span class="text-xs truncate" style="flex:1" x-text="fileView.path"></span>
+                          <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(fileView.path)">Download</a>
+                        </div>
+                        <pre class="chat-side-pre" x-show="fileView.content !== null" x-text="fileView.content"></pre>
+                        <div class="text-xs text-dim" style="padding:12px" x-show="fileView.content === null">Not a text file — use Download.</div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <!-- Changes -->
+                <template x-if="panelTab === 'changes'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs">Changed in the last</span>
+                      <select class="input" style="width:auto;padding:2px 6px" x-model.number="changesHours" @change="loadChanges()">
+                        <option value="1">hour</option><option value="24">24 hours</option><option value="168">7 days</option>
+                      </select>
+                    </div>
+                    <template x-for="c in changesList" :key="c.path">
+                      <div class="chat-side-row" @click="panelTab = 'files'; openFile(c.path)">
+                        <span class="truncate" style="flex:1" x-text="c.path"></span>
+                        <span class="text-xs text-dim" x-text="fmtAgo(c.modified)"></span>
+                      </div>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!changesList.length">No changes in that period.</div>
+                  </div>
+                </template>
+                <!-- Artifacts -->
+                <template x-if="panelTab === 'artifacts'">
+                  <div>
+                    <template x-for="a in artifactsList" :key="a.path">
+                      <div class="chat-side-row">
+                        <span class="truncate" style="flex:1;cursor:pointer" @click="panelTab = 'files'; openFile(a.path)" x-text="a.path"></span>
+                        <span class="text-xs text-dim" x-text="fmtBytes(a.size)"></span>
+                        <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(a.path)" title="Download">⭳</a>
+                      </div>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!artifactsList.length">Nothing produced yet.</div>
+                  </div>
+                </template>
+                <!-- Terminal -->
+                <template x-if="panelTab === 'terminal'">
+                  <div style="display:flex;flex-direction:column;height:100%">
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">Runs in this agent's sandbox — never on your computer.</span>
+                      <select class="input" style="width:auto;padding:2px 6px" x-model="termTier" title="exec: throwaway, no network. workspace: writable, with network.">
+                        <option value="exec">exec</option><option value="workspace">workspace</option>
+                      </select>
+                    </div>
+                    <pre id="chat-terminal-out" class="chat-side-pre" style="flex:1;min-height:200px"><template x-for="(l, i) in termLines" :key="i"><span :style="l.kind === 'cmd' ? 'color:var(--accent)' : (l.kind === 'err' ? 'color:var(--danger)' : '')" x-text="l.text + '\n'"></span></template></pre>
+                    <div style="display:flex;gap:6px;padding:6px 0">
+                      <input class="input" style="flex:1;font-family:var(--font-mono)" x-model="termInput" @keydown.enter="runTerminal()" placeholder="ls -la /workspace" :disabled="termBusy">
+                      <button class="btn btn-sm" @click="runTerminal()" :disabled="termBusy" x-text="termBusy ? '…' : 'Run'"></button>
+                    </div>
+                  </div>
+                </template>
+                <!-- Browser -->
+                <template x-if="panelTab === 'browser'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">What the agent's browser shows now</span>
+                      <button class="btn btn-ghost btn-sm" @click="loadBrowser()">⟳</button>
+                    </div>
+                    <img x-show="browserShot" :src="browserShot" alt="Agent browser" style="width:100%;border:1px solid var(--border);border-radius:6px">
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!browserShot" x-text="browserMsg"></div>
+                  </div>
+                </template>
+                <!-- Background -->
+                <template x-if="panelTab === 'background'">
+                  <div>
+                    <div class="conv-menu-label">Processes</div>
+                    <template x-for="p in (backgroundInfo.processes || [])" :key="p.id">
+                      <div class="chat-side-row">
+                        <span class="truncate" style="flex:1;font-family:var(--font-mono)" x-text="p.command"></span>
+                        <span class="text-xs" :style="p.alive ? 'color:var(--success)' : 'color:var(--text-dim)'" x-text="p.alive ? 'running' : 'stopped'"></span>
+                      </div>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:6px 12px" x-show="!(backgroundInfo.processes || []).length">None.</div>
+                    <div class="conv-menu-label">Scheduled</div>
+                    <template x-for="j in (backgroundInfo.scheduled || [])" :key="j.id">
+                      <div class="chat-side-row">
+                        <span class="truncate" style="flex:1" x-text="j.name || j.id"></span>
+                        <span class="text-xs text-dim" x-text="j.enabled === false ? 'paused' : 'active'"></span>
+                      </div>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:6px 12px" x-show="!(backgroundInfo.scheduled || []).length">None.</div>
+                  </div>
+                </template>
+                <!-- Archive -->
+                <template x-if="panelTab === 'archive'">
+                  <div>
+                    <template x-for="a in archivesList" :key="a.file">
+                      <div class="chat-side-row">
+                        <div style="flex:1;min-width:0">
+                          <div class="truncate" x-text="a.label || 'Untitled conversation'"></div>
+                          <div class="text-xs text-dim" x-text="a.reason + ' · ' + a.message_count + ' messages · ' + (a.archived_at || '').slice(0, 16).replace('T', ' ')"></div>
+                        </div>
+                        <button class="btn btn-ghost btn-sm" @click="restoreArchive(a)">Restore</button>
+                      </div>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!archivesList.length">Nothing archived.</div>
+                  </div>
+                </template>
+              </div>
+            </aside>
 
             <!-- Search bar -->
             <div class="chat-search-bar" x-show="searchOpen" x-transition:enter="transition ease-out duration-150" x-transition:enter-start="opacity-0 transform -translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0">
@@ -753,7 +952,17 @@
             </div>
 
             <!-- Messages area -->
-            <div class="messages" id="messages" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop($event); dragOver = false">
+            <div class="messages" id="messages" :class="{ 'view-hide-tools': !viewShowTools, 'view-no-ts': !viewTimestamps, 'view-compact': viewCompact, 'with-side-panel': panelOpen }" @scroll.passive="onMessagesScroll()" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop($event); dragOver = false">
+              <!-- The rest of a long conversation, on request. Showing only the
+                   end of one with no sign there is more is indistinguishable
+                   from having lost the beginning. -->
+              <template x-if="currentAgent && historyHasMore">
+                <div style="text-align:center;padding:8px 0 12px">
+                  <button class="btn btn-ghost btn-sm" style="font-size:12px" @click="loadEarlierHistory()" :disabled="historyLoading">
+                    <span x-text="historyLoading ? 'Loading…' : ('Show earlier messages (' + (historyTotal - messages.length) + ' more of ' + historyTotal + ')')"></span>
+                  </button>
+                </div>
+              </template>
               <!-- Empty state: no agent selected -->
               <template x-if="!currentAgent">
                 <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;padding:32px;opacity:0.8">
@@ -765,6 +974,18 @@
               <!-- Message list -->
               <template x-if="currentAgent">
                 <div>
+                  <!-- Pick a recipient for "send to". Listed by name, and the
+                       current agent is excluded: forwarding an answer to the
+                       agent that just wrote it is never what was meant. -->
+                  <div x-show="sendToOpen" x-cloak class="card" style="margin-bottom:10px">
+                    <div class="card-header">Send this answer to</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">
+                      <template x-for="a in ($store.app.agents || []).filter(function(x){ return !currentAgent || x.id !== currentAgent.id })" :key="a.id">
+                        <button class="btn btn-sm" :disabled="sendToBusy" @click="confirmSendTo(a.id)" x-text="a.name"></button>
+                      </template>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" style="margin-top:8px" @click="sendToOpen = false">Cancel</button>
+                  </div>
                   <template x-for="(msg, $index) in filteredMessages" :key="msg.id">
                     <div class="message" :class="msg.role + (msg.thinking ? ' thinking' : '') + (msg.streaming ? ' streaming' : '') + (isGrouped($index) ? ' grouped' : '')">
                       <div class="message-avatar" x-show="msg.role === 'agent'">
@@ -776,6 +997,20 @@
                           <button class="message-action-btn" :class="{ copied: msg._copied }" @click="copyMessage(msg)" :title="msg._copied ? 'Copied!' : 'Copy message'">
                             <svg x-show="!msg._copied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                             <svg x-show="msg._copied" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                          </button>
+                          <!-- Read aloud. Toggles, because a long answer has to
+                               be stoppable without waiting it out. -->
+                          <button class="message-action-btn" @click="speakMessage(msg)" title="Read aloud / stop">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 010 7"/><path d="M19 5a9 9 0 010 14"/></svg>
+                          </button>
+                          <!-- Save as Markdown, not rendered HTML: the source is
+                               what the user can edit and re-use. -->
+                          <button class="message-action-btn" @click="saveMessage(msg)" title="Save as .md">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                          </button>
+                          <!-- Hand this answer to another agent. -->
+                          <button class="message-action-btn" @click="sendMessageTo(msg)" title="Send to another agent">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
                           </button>
                         </div>
                         <!-- Thinking indicator with animated dots -->
@@ -817,7 +1052,7 @@
                             <div x-show="tool._audioFile" style="padding:8px 12px">
                               <div class="audio-player">
                                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-                                <span class="text-xs" x-text="'Audio: ' + tool._audioFile.split('/').pop()"></span>
+                                <span class="text-xs" x-text="'Audio: ' + String(tool._audioFile || '').split('/').pop()"></span>
                                 <span class="text-xs text-dim" x-show="tool._audioDuration" x-text="'~' + Math.round((tool._audioDuration || 0) / 1000) + 's'"></span>
                               </div>
                             </div>
@@ -852,6 +1087,13 @@
 
             <!-- Input area -->
             <div class="input-area" x-show="currentAgent" style="position:relative">
+              <!-- Shown while you are reading further up and the agent keeps
+                   writing: the view no longer jumps to the end on its own. -->
+              <button x-show="hasUnseenBelow" x-cloak @click="jumpToBottom()"
+                      class="btn btn-sm"
+                      style="position:absolute;top:-44px;left:50%;transform:translateX(-50%);z-index:5;border-radius:16px;box-shadow:0 2px 8px rgba(0,0,0,.25)">
+                ↓ New messages
+              </button>
               <!-- Attachment previews -->
               <div x-show="attachments.length > 0" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 0 8px 0">
                 <template x-for="(att, aidx) in attachments" :key="aidx">
@@ -883,12 +1125,35 @@
                   </div>
                 </template>
               </div>
+
+              <!-- Permission requests, answered here rather than on another page.
+                   A task blocked on an approval used to stop with no sign of why,
+                   because this was only rendered in the floating assistant. -->
+              <template x-for="a in approvals" :key="a.id || a.request_id">
+                <div class="freeco-approval">
+                  <div class="freeco-approval-txt">
+                    <strong>Permission needed</strong>
+                    <div class="freeco-approval-aim" style="font-weight:600;margin-bottom:4px" x-text="approvalAim(a)"></div>
+                    <div x-show="approvalConsequence(a)" class="text-xs text-dim" style="margin-bottom:6px" x-text="'If you allow it: ' + approvalConsequence(a)"></div>
+                    <div x-show="a.reversible === false" class="text-xs" style="color:var(--danger);margin-bottom:6px">This cannot be undone.</div>
+                    <div class="text-xs text-dim" style="font-family:monospace;word-break:break-all" x-text="a.action_summary || a.action || ''"></div>
+                    <div class="freeco-approval-meta" x-show="a.agent_name" x-text="(a.agent_name || '') + (a.tool_name ? ' · ' + a.tool_name : '')"></div>
+                  </div>
+                  <div class="freeco-approval-btns">
+                    <button class="fa-once" @click="answerApproval(a.id || a.request_id, 'once')">Allow once</button>
+                    <button class="fa-always" @click="answerApproval(a.id || a.request_id, 'always')">Allow always</button>
+                    <button class="fa-deny" @click="answerApproval(a.id || a.request_id, 'deny')">Deny</button>
+                    <button class="fa-pause" @click="answerApproval(a.id || a.request_id, 'pause')">Pause</button>
+                  </div>
+                </div>
+              </template>
+
               <!-- Input row -->
               <div class="input-row">
                 <button class="btn btn-ghost btn-sm" @click="$refs.fileInput.click()" title="Attach file" style="padding:6px 8px;flex-shrink:0">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
-                <input type="file" x-ref="fileInput" multiple accept="image/*,.txt,.pdf,.md,.json,.csv,.mp3,.wav,.ogg,.webm,.m4a,.flac" @change="addFiles($event.target.files); $event.target.value = ''" style="display:none">
+                <input type="file" x-ref="fileInput" multiple accept="image/*,.txt,.pdf,.md,.json,.csv,.mp3,.wav,.ogg,.webm,.m4a,.flac,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.zip" @change="addFiles($event.target.files); $event.target.value = ''" style="display:none">
                 <!-- Mic button -->
                 <button class="btn btn-ghost btn-sm" :class="{ 'btn-recording': recording }" @mousedown="startRecording()" @mouseup="stopRecording()" @mouseleave="if(recording) stopRecording()" title="Hold to record voice" style="padding:6px 8px;flex-shrink:0">
                   <svg x-show="!recording" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
@@ -899,8 +1164,29 @@
                   <span class="recording-dot"></span>
                   <span class="text-xs" style="color:var(--danger)" x-text="formatRecordingTime()"></span>
                 </div>
+                <!-- Live vs. HTTP. When the socket gives up reconnecting,
+                     every message silently falls back to a plain request: no
+                     streaming, and the whole reply arrives at once when the
+                     turn ends. That reads as the chat hanging. Saying which
+                     mode you are in is what makes the difference legible. -->
+                <!-- Speak replies. The popup had this and the chat did not, so
+                     the same conversation spoke in one window and not the
+                     other; both now read the same setting. -->
+                <button class="btn btn-ghost btn-sm" @click="toggleVoiceOut()" style="padding:6px 8px;flex-shrink:0"
+                        :title="voiceOut ? 'Replies are read aloud — click to mute' : 'Replies are silent — click to have them read aloud'"
+                        :aria-label="voiceOut ? 'Mute spoken replies' : 'Read replies aloud'">
+                  <span x-show="voiceOut">&#128266;</span>
+                  <span x-show="!voiceOut" x-cloak>&#128263;</span>
+                </button>
+                <span x-show="currentAgent" style="flex-shrink:0;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:0 4px"
+                      :style="{ color: $store.app.wsConnected ? 'var(--success, #18B810)' : 'var(--warning, #d98a00)' }"
+                      :title="$store.app.wsConnected ? 'Live: replies stream as they are written' : 'Not live: replies arrive all at once when the turn finishes. Reload to reconnect.'">
+                  <span style="width:7px;height:7px;border-radius:50%;display:inline-block"
+                        :style="{ background: $store.app.wsConnected ? 'var(--success, #18B810)' : 'var(--warning, #d98a00)' }"></span>
+                  <span x-text="$store.app.wsConnected ? 'live' : 'not live'"></span>
+                </span>
                 <textarea id="msg-input" rows="1" :placeholder="recording ? 'Recording... release to send' : 'Message FreEco.ai... (/ for commands)'"
-                          @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229 && !$event.shiftKey){$event.preventDefault();if(showModelPicker && filteredModelPicker.length){pickModel(filteredModelPicker[modelPickerIdx].id)}else if(showSlashMenu && filteredSlashCommands.length){executeSlashCommand(filteredSlashCommands[slashIdx].cmd)}else{sendMessage()}}"
+                          @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229 && !$event.shiftKey){if(showModelPicker && filteredModelPicker.length){$event.preventDefault();pickModel(filteredModelPicker[modelPickerIdx].id)}else if(showSlashMenu && filteredSlashCommands.length){$event.preventDefault();executeSlashCommand(filteredSlashCommands[slashIdx].cmd)}else if(enterSends($event)){$event.preventDefault();sendMessage()}}"
                           @keydown.escape="showSlashMenu = false; showModelPicker = false"
                           @keydown.arrow-up.prevent="if(showModelPicker){modelPickerIdx = Math.max(0, modelPickerIdx - 1)}else if(showSlashMenu){slashIdx = Math.max(0, slashIdx - 1)}"
                           @keydown.arrow-down.prevent="if(showModelPicker){modelPickerIdx = Math.min(filteredModelPicker.length - 1, modelPickerIdx + 1)}else if(showSlashMenu){slashIdx = Math.min(filteredSlashCommands.length - 1, slashIdx + 1)}"
@@ -908,6 +1194,19 @@
                           x-model="inputText"
                           :class="{ 'streaming-active': sending }"></textarea>
                 <!-- Send button (normal) or Stop button (during streaming) -->
+                <!-- Dictation. Present in the floating assistant and missing
+                     here, so the same product behaved differently depending on
+                     which window you were in. Speech lands in the box for
+                     review; it never sends itself. -->
+                <button class="btn-send" style="background:transparent"
+                        @click="toggleVoice()"
+                        :title="recording ? 'Stop dictation' : 'Dictate a message'"
+                        :style="recording ? 'background:transparent;color:var(--danger,#dc2626)' : 'background:transparent'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+                  </svg>
+                </button>
                 <template x-if="!sending">
                   <button class="btn-send" @click="sendMessage()" :disabled="!inputText.trim() && !attachments.length">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
@@ -1186,8 +1485,20 @@
                         </template>
                         <template x-if="editingFallback">
                           <div class="flex gap-1" style="align-items:center">
-                            <input class="form-input" style="width:220px;font-size:12px" x-model="newFallbackValue" placeholder="provider/model" @keydown.enter="addFallback()" @keydown.escape="editingFallback = false">
-                            <button class="btn btn-primary btn-sm" @click="addFallback()" style="padding:2px 10px;font-size:11px">Add</button>
+                            <!-- Chosen, not typed. The old box asked for
+                                 "provider/model" and split on the slash, so
+                                 "nvidia/nemotron-3-ultra-550b-a55b" was stored
+                                 as model "nemotron-3-ultra-550b-a55b" -- with
+                                 the "nvidia/" that is part of the real id
+                                 thrown away. The backup then 404s, and only
+                                 when the primary is already down. -->
+                            <select class="form-input" style="width:320px;font-size:12px" x-model="newFallbackValue" @focus="loadWorkingModels()">
+                              <option value="">Choose a working model…</option>
+                              <template x-for="m in workingModels" :key="m.id">
+                                <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                              </template>
+                            </select>
+                            <button class="btn btn-primary btn-sm" @click="addFallback()" style="padding:2px 10px;font-size:11px" :disabled="!newFallbackValue">Add</button>
                             <button class="btn btn-ghost btn-sm" @click="editingFallback = false" style="padding:2px 8px;font-size:11px">Cancel</button>
                           </div>
                         </template>
@@ -1234,8 +1545,25 @@
                   <div class="form-group"><label>System Prompt</label><textarea class="form-textarea" x-model="configForm.system_prompt" style="height:80px"></textarea></div>
                   <div class="mt-4" style="border-top:1px solid var(--border);padding-top:16px">
                     <h4 style="margin-bottom:8px;font-size:13px">Model Tuning</h4>
-                    <div class="form-group"><label>Provider</label><input class="form-input" x-model="configForm.provider" placeholder="e.g. openrouter"></div>
-                    <div class="form-group"><label>Model</label><input class="form-input" x-model="configForm.model" placeholder="e.g. llama-3.3-70b-versatile"></div>
+                    <!-- Picked from what the configured keys can actually
+                         call, not typed. Two free-text boxes are how this
+                         agent's backup came to be "nemotron", which is not a
+                         model id any provider answers to -- the id only fails
+                         when the primary is already down. Choosing the model
+                         sets the provider and the key with it, so Info and
+                         Config cannot disagree about what is running. -->
+                    <div class="form-group">
+                      <label>Model</label>
+                      <select class="form-input" x-model="configForm.model" @change="onConfigModelChange()">
+                        <template x-for="m in workingModelOptions(configForm.model)" :key="m.id">
+                          <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                        </template>
+                      </select>
+                      <div class="text-dim" style="font-size:12px;margin-top:4px">
+                        Provider: <span x-text="configForm.provider || '—'"></span>
+                        <template x-if="workingModelsLoading"><span> · loading…</span></template>
+                      </div>
+                    </div>
                     <div class="form-group"><label>Max Output Tokens</label><input class="form-input" type="number" min="1" step="1" x-model.number="configForm.max_tokens"></div>
                     <div class="form-group"><label>Temperature <span class="text-dim">(0.0–2.0)</span></label><input class="form-input" type="number" min="0" max="2" step="0.1" x-model.number="configForm.temperature"></div>
                     <!-- This was a free-text box that wanted the NAME of an
@@ -1474,7 +1802,16 @@
                     </div>
                     <div class="form-group">
                       <label>Model</label>
-                      <input class="form-input" x-model="spawnForm.model" placeholder="e.g. llama-3.3-70b-versatile">
+                      <!-- Chosen from what the configured keys can call. A
+                           typed id is only discovered to be wrong on the
+                           agent's first turn, which reads as the agent being
+                           broken rather than the name being a guess. -->
+                      <select class="form-input" x-model="spawnForm.model" @focus="loadWorkingModels()">
+                        <option value="">Default model</option>
+                        <template x-for="m in workingModelOptions(spawnForm.model)" :key="m.id">
+                          <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                        </template>
+                      </select>
                     </div>
                     <div class="form-group">
                       <label>System Prompt</label>
@@ -4035,14 +4372,49 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <!-- Docker prerequisite -->
               <div x-show="servicesLoaded && !dockerReady" class="card" style="border-color:var(--warning,#f59e0b);margin-bottom:14px">
-                <div style="font-size:13px">
-                  <strong>Docker isn't running yet.</strong>
-                  These services run in Docker. Install
-                  <a href="https://docker.com/products/docker-desktop" target="_blank" rel="noopener">Docker Desktop</a>
-                  (one installer), start it, then press Install — everything else is automatic.
+                <!-- Installed-but-stopped is the common case and has a one-line
+                     fix, so it gets its own message instead of a download link. -->
+                <div style="font-size:13px" x-show="runtimeStatus && runtimeStatus.state === 'stopped'">
+                  <strong>Podman is installed but not running.</strong>
+                  Start it with <code>podman machine start</code>, then press Install.
+                  Freeco also tries this automatically when it needs a container.
+                </div>
+                <div style="font-size:13px" x-show="!runtimeStatus || runtimeStatus.state !== 'stopped'">
+                  <strong>No container runtime is running yet.</strong>
+                  These services run in containers, and Freeco uses whichever runtime you
+                  have — you do not need both. If Podman is already installed, start it with
+                  <code>podman machine start</code>. Otherwise install either
+                  <a href="https://podman.io/docs/installation" target="_blank" rel="noopener">Podman</a>
+                  (free, no account, runs without admin rights) or
+                  <a href="https://docker.com/products/docker-desktop" target="_blank" rel="noopener">Docker Desktop</a>.
+                  Then press Install — everything else is automatic.
                 </div>
               </div>
 
+              <!-- Podman VM problems. Each fix runs sudo inside the VM, so it is
+                   offered as a button beside its exact command and never run by
+                   the daemon on its own. -->
+              <template x-for="issue in vmIssues" :key="issue.id">
+                <div class="card" style="border-color:var(--warning,#f59e0b);margin-bottom:14px">
+                  <div style="font-size:13px">
+                    <strong x-text="issue.title"></strong>
+                    <p style="margin:4px 0" x-text="issue.problem"></p>
+                    <p style="margin:4px 0;color:var(--text-dim)">
+                      <strong>Fixing it:</strong> <span x-text="issue.what_fixing_changes"></span>
+                    </p>
+                    <p style="margin:4px 0;color:var(--text-dim)">
+                      Runs inside the Podman VM: <code style="word-break:break-all" x-text="issue.command"></code>
+                    </p>
+                    <button class="btn btn-primary btn-sm" style="margin-top:6px"
+                            @click="fixVmIssue(issue)" :disabled="!!vmFixing"
+                            x-text="vmFixing === issue.id ? 'Fixing…' : 'Fix'"></button>
+                  </div>
+                </div>
+              </template>
+
+              <div x-show="servicesLoaded && dockerReady && containerRuntime" class="text-xs text-dim" style="margin-bottom:10px">
+                Using <strong x-text="containerRuntime"></strong> — detected automatically.
+              </div>
               <div x-show="!servicesLoaded" class="text-xs text-dim">Checking what's available…</div>
 
               <!-- Service cards -->
@@ -4061,6 +4433,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span x-text="s.auto_connects ? 'connects automatically' : 'needs one manual step'"></span>
                       </div>
                       <div class="text-xs" x-show="s.manual_step" style="margin-top:4px;color:var(--text-secondary)" x-text="s.manual_step"></div>
+                      <!-- Key-connected services (the CRM): the key goes to the vault, checked first. -->
+                      <div x-show="s.connect_with_key && s.running" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                        <input type="password" class="form-input" autocomplete="off" style="flex:1;min-width:200px;max-width:360px"
+                               :placeholder="s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat'"
+                               x-model="svcKeys[s.id]" @keydown.enter="connectService(s.id)">
+                        <button class="btn btn-primary btn-sm" @click="connectService(s.id)"
+                                :disabled="svcConnecting === s.id || !(svcKeys[s.id] || '').trim()"
+                                x-text="svcConnecting === s.id ? 'Checking…' : (s.connected ? 'Replace key' : 'Connect')"></button>
+                      </div>
                     </div>
                     <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
                       <button class="btn btn-sm" style="background:var(--accent);color:var(--text-on-accent)"
@@ -4511,6 +4892,47 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
           <!-- Tools tab -->
           <div x-show="tab === 'tools'">
+            <!-- Dictation: which language, and where the audio goes. -->
+            <div class="card mb-4">
+              <div class="card-header">Dictation</div>
+              <p class="text-xs text-dim" style="margin:6px 0 12px">
+                The language the microphone listens for, and the language replies are read
+                aloud in. This used to follow the browser's own locale, which fails with
+                <code>language-not-supported</code> whenever the browser's speech service
+                does not offer that language.
+              </p>
+              <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+                <div style="min-width:220px">
+                  <label class="text-xs text-dim">Dictation language</label>
+                  <select class="input" style="width:100%"
+                          x-init="sttLang = (window.FreecoVoiceCfg ? window.FreecoVoiceCfg.savedLang() : '')"
+                          x-model="sttLang"
+                          @change="window.FreecoVoiceCfg && window.FreecoVoiceCfg.setLang(sttLang); FreecoToast.success('Dictation language saved')">
+                    <template x-for="l in (window.FreecoVoiceCfg ? window.FreecoVoiceCfg.LANGUAGES : [])" :key="l.code">
+                      <option :value="l.code" x-text="l.label"></option>
+                    </template>
+                  </select>
+                </div>
+              </div>
+              <label style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:13px">
+                <input type="checkbox"
+                       x-init="$el.checked = !window.FreecoAlert || window.FreecoAlert.soundOn()"
+                       @change="window.FreecoAlert && window.FreecoAlert.setSound($el.checked)">
+                Play a sound when an agent is waiting for your approval
+              </label>
+              <p class="text-xs text-dim" style="margin:4px 0 0">
+                A desktop notification is also shown when the dashboard is not the window
+                in front — your browser asks for permission the first time.
+              </p>
+              <p class="text-xs text-dim" style="margin:10px 0 0">
+                Your browser transcribes on its own servers unless it supports on-device
+                recognition. When it cannot transcribe at all, FreEco.ai records instead and
+                transcribes it — locally if <code>[media].audio_base_url</code> points at a
+                speech-to-text server on this machine, otherwise through whichever provider
+                you configured.
+              </p>
+            </div>
+
             <!-- Voice AI + MCP tool servers -->
             <div class="card mb-4" x-init="loadMcpServers()">
               <div class="card-header">Voice AI &amp; tool servers (MCP)</div>
@@ -4915,6 +5337,21 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- Budget tab -->
           <div x-show="tab === 'budget'" x-data="{
             budgetData: null, agentRanking: [], budgetLoading: true,
+            bd: null, bdPeriod: '30d', bdLoading: false, bdView: 'agent',
+            async loadBreakdown() {
+              this.bdLoading = true;
+              try { this.bd = await FreecoAPI.get('/api/usage/breakdown?period=' + this.bdPeriod); }
+              catch(e) { FreecoToast.error('Could not load usage: ' + (e.message || e)); }
+              this.bdLoading = false;
+            },
+            bdRows() {
+              if (!this.bd) return [];
+              var k = { agent: 'by_agent', team: 'by_team', project: 'by_project', company: 'by_company', model: 'by_model' }[this.bdView];
+              return this.bd[k] || [];
+            },
+            rowName(r) { return r.name || r.model || r.agent_id || ''; },
+            money(v) { return '$' + (v || 0).toFixed(v >= 100 ? 0 : 2); },
+            toks(v) { return v >= 1e6 ? (v/1e6).toFixed(1) + 'M' : v >= 1e3 ? (v/1e3).toFixed(0) + 'K' : String(v || 0); },
             editMode: false,
             editHourly: '', editDaily: '', editMonthly: '', editAlert: '', editTokenLimit: '',
             saving: false,
@@ -4957,7 +5394,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             fmtTokens(v) { return v > 0 ? (v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v) : 'per-agent'; },
             pctColor(pct) { return pct >= 0.8 ? '#ef4444' : pct >= 0.5 ? '#eab308' : '#22c55e'; },
             fmtUsd(v) { return v > 0 ? '$' + v.toFixed(4) : 'unlimited'; }
-          }" x-init="loadBudget()">
+          }" x-init="loadBudget(); loadBreakdown()">
             <div class="info-card" style="display:flex;justify-content:space-between;align-items:start">
               <div>
                 <h4>Budget & Spending Limits</h4>
@@ -5030,8 +5467,64 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <button class="btn btn-sm mt-2" @click="editMode = false" style="margin-right:8px">Cancel</button>
                 </div>
 
-                <!-- Per-agent cost ranking -->
-                <h4 style="margin-top:16px;margin-bottom:8px">Top Spenders (Today)</h4>
+                <!-- Where the money and tokens went -->
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:18px;margin-bottom:8px">
+                  <h4 style="margin:0">Where it went</h4>
+                  <div style="display:flex;gap:4px;flex-wrap:wrap">
+                    <template x-for="p in [['today','Today'],['7d','7 days'],['30d','30 days'],['all','All time']]" :key="p[0]">
+                      <button class="btn btn-sm" :class="bdPeriod === p[0] ? 'btn-primary' : 'btn-ghost'" @click="bdPeriod = p[0]; loadBreakdown()" x-text="p[1]"></button>
+                    </template>
+                  </div>
+                </div>
+                <div x-show="bdLoading" class="text-xs text-dim">Loading usage…</div>
+                <template x-if="bd && !bdLoading">
+                  <div>
+                    <div class="stats-row" style="margin-bottom:10px">
+                      <div class="stat-card" style="flex:1"><div class="stat-label">Spent</div><div class="stat-value" style="font-size:18px" x-text="money(bd.totals.cost_usd)"></div>
+                        <div class="text-xs text-dim" x-show="bd.totals.estimated_usd > 0" x-text="'incl. ' + money(bd.totals.estimated_usd) + ' estimated'"></div></div>
+                      <div class="stat-card" style="flex:1"><div class="stat-label">Model calls</div><div class="stat-value" style="font-size:18px" x-text="bd.totals.calls"></div></div>
+                      <div class="stat-card" style="flex:1"><div class="stat-label">Tokens in / out</div><div class="stat-value" style="font-size:18px" x-text="toks(bd.totals.input_tokens) + ' / ' + toks(bd.totals.output_tokens)"></div></div>
+                    </div>
+                    <div class="tabs" style="margin-bottom:8px">
+                      <template x-for="v in [['agent','By agent'],['team','By team'],['project','By project'],['company','By company'],['model','By model']]" :key="v[0]">
+                        <div class="tab tab-secondary" :class="{ active: bdView === v[0] }" @click="bdView = v[0]" x-text="v[1]"></div>
+                      </template>
+                    </div>
+                    <div class="table-wrap" x-show="bdRows().length">
+                      <table>
+                        <thead><tr><th x-text="bdView === 'model' ? 'Model' : 'Name'"></th><th x-show="bdView === 'team' || bdView === 'project' || bdView === 'company'">Agents</th><th>Spent</th><th>Calls</th><th>Tokens in</th><th>Tokens out</th></tr></thead>
+                        <tbody>
+                          <template x-for="r in bdRows()" :key="rowName(r) + (r.agent_id || r.team_id || r.project_id || r.company_id || '')">
+                            <tr>
+                              <td>
+                                <span class="font-bold" x-text="rowName(r)"></span>
+                                <span class="text-xs text-dim" x-show="r.project" x-text="' · ' + r.project"></span>
+                                <span class="text-xs text-dim" x-show="r.teams && r.teams.length" x-text="' · ' + (r.teams || []).join(', ')"></span>
+                              </td>
+                              <td x-show="bdView === 'team' || bdView === 'project' || bdView === 'company'" x-text="r.agents"></td>
+                              <td>
+                                <span x-text="money(r.totals.cost_usd)"></span>
+                                <span class="text-xs text-dim" x-show="r.totals.estimated_usd > 0" title="Recorded at $0 before the model's price was known; estimated at today's price">*</span>
+                              </td>
+                              <td x-text="r.totals.calls"></td>
+                              <td x-text="toks(r.totals.input_tokens)"></td>
+                              <td x-text="toks(r.totals.output_tokens)"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div class="text-xs text-dim" x-show="!bdRows().length" x-text="bdView === 'company' || bdView === 'project' || bdView === 'team' ? 'No ' + bdView + 's with spending in this period. Agents count towards a team once they are members of it.' : 'Nothing recorded in this period.'"></div>
+                    <div class="text-xs text-dim" style="margin-top:6px" x-show="bdView !== 'agent' && bdView !== 'model' && bd.not_in_any_team && bd.not_in_any_team.calls">
+                      <span x-text="'Not in any team: ' + money(bd.not_in_any_team.cost_usd) + ' over ' + bd.not_in_any_team.calls + ' calls.'"></span>
+                      A team's figure is its members' total; an agent in two teams counts in both.
+                    </div>
+                    <div class="text-xs text-dim" style="margin-top:4px" x-show="bd.totals.estimated_usd > 0">* Calls recorded at $0 before their model's price was known, estimated at today's price.</div>
+                  </div>
+                </template>
+
+                <!-- Per-agent limits -->
+                <h4 style="margin-top:16px;margin-bottom:8px">Agents with spending limits (today)</h4>
                 <div class="table-wrap" x-show="agentRanking.length">
                   <table>
                     <thead><tr><th>Agent</th><th>Today</th><th>Hourly Limit</th><th>Daily Limit</th><th>Monthly Limit</th><th>Token Limit/hr</th></tr></thead>
@@ -5049,7 +5542,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </tbody>
                   </table>
                 </div>
-                <div class="text-xs text-dim" x-show="!agentRanking.length">No spending recorded today.</div>
+                <div class="text-xs text-dim" x-show="!agentRanking.length">No agent has its own spending limit. Set one in the agent's settings.</div>
               </div>
             </template>
           </div>
@@ -6230,10 +6723,50 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <div class="stat-label">Version</div>
                 <div class="stat-value" x-text="version"></div>
               </div>
+              <!-- The default decides what every agent created from here on
+                   runs, so it is changed here rather than by hand-editing
+                   config.toml and restarting. -->
               <div class="card stat-card">
                 <div class="stat-label">Default Model</div>
                 <div class="stat-value" style="font-size:13px" x-text="defaultModel"></div>
+                <button class="btn btn-ghost btn-sm" style="margin-top:8px"
+                        @click="openDefaultModelPicker()">Change</button>
+                <div x-show="defaultModelMsg" class="text-xs" style="margin-top:6px"
+                     :style="defaultModelMsgOk ? 'color:var(--success,#16a34a)' : 'color:var(--danger,#dc2626)'"
+                     x-text="defaultModelMsg"></div>
               </div>
+            </div>
+
+            <!-- Default model picker -->
+            <div class="card" style="margin-bottom:16px" x-show="showDefaultModelPicker" x-cloak>
+              <div class="card-header">Choose the default model</div>
+              <div class="text-xs text-dim" style="margin-bottom:8px">
+                New agents inherit this. Existing agents keep the model they already have.
+                Only models whose provider has a key, and which support tools, are listed —
+                an agent needs tools to do anything.
+              </div>
+              <input type="text" class="input" placeholder="Search models..."
+                     x-model="defaultModelQuery" style="margin-bottom:8px">
+              <div style="max-height:320px;overflow-y:auto">
+                <template x-for="m in filteredDefaultModels" :key="m.provider + '/' + m.id">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border,#2a2a2a)">
+                    <div>
+                      <div style="font-size:13px" x-text="m.display_name || m.id"></div>
+                      <div class="text-xs text-dim">
+                        <span x-text="m.provider"></span>
+                        <span x-show="m.is_free"> · free</span>
+                      </div>
+                    </div>
+                    <button class="btn btn-sm" @click="chooseDefaultModel(m)"
+                            :disabled="defaultModelSaving">Use</button>
+                  </div>
+                </template>
+                <div x-show="!filteredDefaultModels.length" class="text-xs text-dim" style="padding:8px 0">
+                  No matching model with a configured provider and tool support.
+                </div>
+              </div>
+              <button class="btn btn-ghost btn-sm" style="margin-top:8px"
+                      @click="showDefaultModelPicker = false">Cancel</button>
             </div>
 
             <div class="card" style="margin-bottom:16px">
@@ -6338,7 +6871,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 </div>
 
 <!-- Freeco Assistant — global concierge widget, present on every page -->
-<div x-data="freecoAssistant" x-init="init(); restoreGeometry()" @resize.window="restoreGeometry()" @freeco-navigate.window="navigate($event.detail)" @freeco-open.window="if(!open) toggle()" class="freeco-dock">
+<div x-data="freecoAssistant" x-init="init(); restoreGeometry()" @resize.window="restoreGeometry()" @freeco-navigate.window="navigate($event.detail)" @freeco-open.window="if(!open) toggle()" @freeco-prefill.window="input = $event.detail; $nextTick(function(){ var el=document.getElementById('freeco-input'); if(el) el.focus(); })" class="freeco-dock">
   <!-- Panel -->
   <div class="freeco-panel" :class="{ 'freeco-fullscreen': fullscreen }" x-show="open" x-cloak :style="panelStyle()" x-transition.origin.bottom.right>
     <div class="freeco-panel-header" @mousedown="startDrag($event)" style="cursor:move" title="Drag to move">
@@ -6573,6 +7106,41 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
       </template>
     </div>
 
+    <!-- Where should this go?
+         Shown only when there is a real alternative: a conversation that
+         already covers the subject, or a task unrelated to this thread. A
+         plain follow-up is delivered without asking. Nothing is sent, and no
+         project or company is created, until one of these is clicked. -->
+    <div x-show="pendingRoute" x-cloak class="freeco-route-card"
+         style="margin:0 10px 8px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev, var(--bg))">
+      <div class="text-xs text-dim" style="margin-bottom:8px">
+        Where should this go?
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <template x-for="c in (pendingRoute ? pendingRoute.candidates : [])" :key="c.agent_id">
+          <button class="btn btn-sm" style="text-align:left;width:100%"
+                  @click="routeToThread(c)">
+            <span>→ <strong x-text="c.label || 'existing conversation'"></strong></span>
+            <span class="text-dim" x-text="' — ' + (c.agent_name || '') + ' · ' + (c.message_count || 0) + ' messages'"></span>
+          </button>
+        </template>
+        <button x-show="pendingRoute && pendingRoute.newTask" class="btn btn-sm" style="text-align:left;width:100%"
+                @click="routeNewTask()">
+          <span>＋ New task: <strong x-text="pendingRoute ? (pendingRoute.title || 'untitled') : ''"></strong></span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewProject()">
+          <span>📁 New project…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewCompany()">
+          <span>🏢 New company…</span>
+        </button>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-sm" style="flex:1" @click="routeHere()">Continue here</button>
+          <button class="btn btn-ghost btn-sm" @click="routeCancel()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <div class="freeco-input-row">
       <!-- Attach ( + ) menu: file, folder, photo -->
       <div style="position:relative">
@@ -6585,6 +7153,20 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button @click="takePhoto()"><span>📷</span> Take / choose photo</button>
         </div>
       </div>
+      <!-- Take this somewhere else: drag onto another app, device or page, or
+           copy it. Drag carries a link, an HTML anchor and a shell command at
+           once; the destination keeps whichever it understands. -->
+      <div class="freeco-share-row" style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+        <span draggable="true" @dragstart="onActionDrag($event, 'ask')" @click="copyAction('ask')"
+              title="Drag to another app, or click to copy a link that opens FreEco.ai with this text"
+              style="cursor:grab;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:6px;user-select:none">Ask</span>
+        <span draggable="true" @dragstart="onActionDrag($event, 'translate')" @click="copyAction('translate')"
+              title="Drag or click to copy a translate-this link"
+              style="cursor:grab;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:6px;user-select:none">Translate</span>
+        <span draggable="true" @dragstart="onActionDrag($event, 'shell')" @click="copyAction('shell')"
+              title="Drag or click to copy a shell command that sends this to the agent"
+              style="cursor:grab;font-size:11px;padding:2px 6px;border:1px solid var(--border);border-radius:6px;user-select:none">Shell</span>
+      </div>
       <textarea id="freeco-input" class="freeco-input" :class="{ 'freeco-input-review': awaitingConfirm }" rows="1" x-model="input" @keydown="onKey($event)"
         :placeholder="recording ? ('Listening… ' + voiceTime()) : 'Ask Freeco to set something up…'"></textarea>
       <button class="freeco-mic" :class="{ 'freeco-mic-on': recording }" @mousedown="startVoice()" @mouseup="stopVoice()" @mouseleave="if(recording) stopVoice()" title="Hold to talk" aria-label="Hold to talk">
@@ -6594,6 +7176,20 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
       <button class="freeco-send" @click="send()" :disabled="!input.trim() && !attachments.length" :title="sending ? 'Queue this message' : 'Send'" aria-label="Send">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
       </button>
+    </div>
+
+    <!-- Which model is answering, and how to change it.
+         The list was already being fetched into `models` and never rendered,
+         so the only way to switch the assistant's model was to leave the chat
+         and find it on another page. -->
+    <div class="freeco-model-row">
+      <select class="freeco-model-select" x-model="currentModel" @change="setModel($event.target.value)"
+              :title="'Model answering in this chat: ' + (currentModel || 'default')" aria-label="Model">
+        <template x-for="m in models" :key="m.id">
+          <option :value="m.id" x-text="m.label || m.id" :selected="m.id === currentModel"></option>
+        </template>
+      </select>
+      <span class="freeco-model-note" x-show="modelNote" x-cloak x-text="modelNote"></span>
     </div>
 
     <!-- Resize handles: bottom-right corner and the left edge -->
