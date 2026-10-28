@@ -675,6 +675,22 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+### Spend limits and secrets.env -- from the 2026-09-14 audit
+
+Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
+secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
+
+- 🟨 Streaming calls -- the chat, the popup, the OpenAI-compatible API -- are
+  refused once the agent's cost quota or the global `[budget]` cap is reached.
+  Before, only the non-streaming path checked either.
+- 🟨 Every `secrets.env` writer refuses line breaks and NUL in values and
+  anything but letters, digits and `_` in names; the API answers 400.
+- 🟨 Release builds add each target to the pinned toolchain, so cross-compiled
+  installers and CLIs build again.
+- ⬜ Still open: `PUT /api/budget` is not enforced until restart (enforcement
+  reads the boot-time config); handlers still call `std::env::set_var`;
+  `freeco-migrate` keeps its own secrets writer, which does not validate.
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase

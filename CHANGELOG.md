@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Spending limits hold in the chat. The agent's cost quota was checked only
+  on the non-streaming path, which background ticks use; the dashboard chat,
+  the popup and the OpenAI-compatible API stream, so they kept calling the
+  provider after an agent's quota was used up. The global `[budget]` cap was
+  checked on the non-streaming path only. Both paths now refuse the call once
+  either limit is reached.
+- A saved key can no longer add lines to `secrets.env`. A value containing a
+  line break was written as is, and `secrets.env` is loaded into the
+  environment at start, so one key could define other variables (such as
+  `LD_PRELOAD`) that every child process inherits. Every writer -- the
+  provider-key and channel endpoints, the agents' key tool and the vault --
+  now refuses line breaks and NUL in values and anything but letters, digits
+  and `_` in names; the API answers 400.
+- Release builds for other architectures work again. `rust-toolchain.toml`
+  pins the compiler, but the release workflow added each target to the
+  stable toolchain, so every cross-compiled installer and CLI in v0.9.8
+  failed with "can't find crate for `core`".
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed
