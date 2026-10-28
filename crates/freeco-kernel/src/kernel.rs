@@ -2742,6 +2742,16 @@ impl FreecoKernel {
         self.metering
             .check_quota(agent_id, resources)
             .map_err(KernelError::Freeco)?;
+
+        // Then the whole-installation ceiling. This existed, worked, and had no
+        // caller anywhere in the repository: the dashboard showed an hourly and
+        // a daily limit while nothing on any path could refuse a run for
+        // exceeding them. It was a speedometer presented as a cap, and the
+        // consequence is not hypothetical -- a single conversation spent $12
+        // against a provider while the recorded total for the month read $0.33.
+        //
+        // Per-agent quotas cannot substitute for it: they bound one agent, and
+        // the bill is the sum over all of them.
         self.metering
             .check_global_budget(&self.config.budget)
             .map_err(KernelError::Freeco)
@@ -2760,19 +2770,6 @@ impl FreecoKernel {
         sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
         self.check_spend_limits(agent_id, &entry.manifest.resources)?;
-
-        // Then the whole-installation ceiling. This existed, worked, and had no
-        // caller anywhere in the repository: the dashboard showed an hourly and
-        // a daily limit while nothing on any path could refuse a run for
-        // exceeding them. It was a speedometer presented as a cap, and the
-        // consequence is not hypothetical -- a single conversation spent $12
-        // against a provider while the recorded total for the month read $0.33.
-        //
-        // Per-agent quotas cannot substitute for it: they bound one agent, and
-        // the bill is the sum over all of them.
-        self.metering
-            .check_global_budget(&self.config.budget)
-            .map_err(KernelError::Freeco)?;
 
         let mut session = self
             .memory

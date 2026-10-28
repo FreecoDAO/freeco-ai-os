@@ -140,6 +140,8 @@ pub(crate) fn valid_secret_name(name: &str) -> bool {
 /// `secrets.env` (which survives a vault problem), and this process's
 /// environment, so it works now rather than after a restart.
 pub(crate) fn store_secret(state: &AppState, name: &str, value: &str) -> Result<(), String> {
+    // Before the vault, so a value secrets.env would refuse is not half-stored.
+    freeco_types::secrets::validate_secret_env_entry(name, value)?;
     state.kernel.store_credential(name, value);
     let secrets_path = state.kernel.config.home_dir.join("secrets.env");
     freeco_types::secrets::write_secret_env(&secrets_path, name, value)
