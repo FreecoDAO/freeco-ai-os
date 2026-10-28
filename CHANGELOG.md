@@ -22,10 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider-key and channel endpoints, the agents' key tool and the vault --
   now refuses line breaks and NUL in values and anything but letters, digits
   and `_` in names; the API answers 400.
-- Release builds for other architectures work again. `rust-toolchain.toml`
+- Windows ARM64 and macOS Intel builds work again. `rust-toolchain.toml`
   pins the compiler, but the release workflow added each target to the
-  stable toolchain, so every cross-compiled installer and CLI in v0.9.8
-  failed with "can't find crate for `core`".
+  stable toolchain, so in v0.9.8 the installer and CLI for both failed with
+  "can't find crate for `core`".
 
 ## [0.9.8] - 2026-10-28
 

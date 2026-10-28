@@ -133,8 +133,8 @@ jobs:
 
       # rust-toolchain.toml pins the compiler, so cargo builds with that
       # toolchain, not the stable one above, and the target has to be added to
-      # it. Without this every cross-compiled target failed with "can't find
-      # crate for `core`" (v0.9.8).
+      # it. Without this the Windows ARM64 and macOS x86_64 builds failed
+      # with "can't find crate for `core`" (v0.9.8).
       - name: Add the target to the pinned toolchain
         shell: bash
         run: |
@@ -277,8 +277,8 @@ jobs:
           targets: ${{ matrix.target }}
       # rust-toolchain.toml pins the compiler, so cargo builds with that
       # toolchain, not the stable one above, and the target has to be added to
-      # it. Without this every cross-compiled target failed with "can't find
-      # crate for `core`" (v0.9.8).
+      # it. Without this the Windows ARM64 and macOS x86_64 builds failed
+      # with "can't find crate for `core`" (v0.9.8).
       - name: Add the target to the pinned toolchain
         shell: bash
         run: |

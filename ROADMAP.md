@@ -685,8 +685,8 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   Before, only the non-streaming path checked either.
 - 🟨 Every `secrets.env` writer refuses line breaks and NUL in values and
   anything but letters, digits and `_` in names; the API answers 400.
-- 🟨 Release builds add each target to the pinned toolchain, so cross-compiled
-  installers and CLIs build again.
+- 🟨 Release builds add each target to the pinned toolchain, so the Windows
+  ARM64 and macOS Intel installers and CLIs build again.
 - ⬜ Still open: `PUT /api/budget` is not enforced until restart (enforcement
   reads the boot-time config); handlers still call `std::env::set_var`;
   `freeco-migrate` keeps its own secrets writer, which does not validate.
