@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stable toolchain, so in v0.9.8 the installer and CLI for both failed with
   "can't find crate for `core`".
 
+### Changed
+
+- Release images go to their own private package,
+  `ghcr.io/freecodao/freeco-ai-os`. The `freeco-ai` package is public, and the
+  release refused to push into it, so v0.9.8 shipped no image. Nothing built
+  from this repository lands in a public image.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

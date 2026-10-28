@@ -687,6 +687,8 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   anything but letters, digits and `_` in names; the API answers 400.
 - 🟨 Release builds add each target to the pinned toolchain, so the Windows
   ARM64 and macOS Intel installers and CLIs build again.
+- 🟨 Release images go to the private `ghcr.io/freecodao/freeco-ai-os`; the
+  public `freeco-ai` package is never pushed to.
 - ⬜ Still open: `PUT /api/budget` is not enforced until restart (enforcement
   reads the boot-time config); handlers still call `std::env::set_var`;
   `freeco-migrate` keeps its own secrets writer, which does not validate.
