@@ -31,4 +31,18 @@ ignore = [
     "RUSTSEC-2025-0100",  # gio-sys unmaintained
     "RUSTSEC-2026-0002",  # serde_cbor unmaintained
     "RUSTSEC-2023-0086",  # lexopt unmaintained (if present)
+    # zip 4.6.1, fixed in zip 9: all three concern ZipArchive::extract(). Only
+    # tauri-plugin-updater calls it, on Windows, after the update's signature
+    # is verified; it does not accept zip 9 yet. freeco-skills walks the
+    # entries itself and never calls extract().
+    "RUSTSEC-2026-0367",  # zip: SUID/SGID bits kept on extraction
+    "RUSTSEC-2026-0368",  # zip: extract() follows symlink targets outside the destination
+    "RUSTSEC-2026-0369",  # zip: extract() applies permissions through symlinks
+    # zstd 0.13 / zstd-safe 7: linked only through wasmtime-internal-cache,
+    # which runs only when a wasmtime cache is configured. The WASM sandbox
+    # (freeco-kernel-runtime/src/sandbox.rs) never configures one, and no
+    # wasmtime 49 release moves to zstd 0.14.
+    "RUSTSEC-2026-0391",  # zstd: abandoned stream leaks into a reused context
+    "RUSTSEC-2026-0398",  # zstd-safe: Seekable::decompress sets Vec length past capacity
+    "RUSTSEC-2026-0403",  # zstd-safe: uninitialised memory on a failed legacy frame
 ]
