@@ -180,6 +180,13 @@ pub async fn save_secret(
             Json(serde_json::json!({"error": "Nothing to save."})),
         );
     }
+    // A line break or NUL is the caller's mistake, not a storage failure.
+    if let Err(e) = freeco_types::secrets::validate_secret_env_entry(&name, &value) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
     match store_secret(&state, &name, &value) {
         Ok(()) => (
             StatusCode::OK,
