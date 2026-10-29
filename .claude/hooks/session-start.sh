@@ -31,8 +31,10 @@ fetch_pinned() {
 }
 
 # Install only if this script (which holds the pins) changed since the last
-# successful install.
-if ! sha256sum --check --status "$hashes" 2>/dev/null; then
+# successful install. Compare contents, not a recorded path, so a second
+# checkout or worktree with newer pins still installs them.
+want=$(sha256sum < "$script" | cut -d' ' -f1)
+if [ "$(cat "$hashes" 2>/dev/null)" != "$want" ]; then
   rm -f "$hashes"
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
@@ -55,6 +57,10 @@ if ! sha256sum --check --status "$hashes" 2>/dev/null; then
     rm -rf "$skills_dir/$skill/scripts/tests" "$skills_dir/$skill/scripts/__pycache__"
     cp "$work/uiux/LICENSE" "$skills_dir/$skill/LICENSE"
   done
+  # Upstream writes its script paths for a plugin install; point them at the
+  # user skills folder instead.
+  sed -i 's|\${CLAUDE_PLUGIN_ROOT}/\.claude/skills/|$HOME/.claude/skills/|g' \
+    "$skills_dir/ui-ux-pro-max/SKILL.md"
 
-  sha256sum "$script" > "$hashes"
+  echo "$want" > "$hashes"
 fi
