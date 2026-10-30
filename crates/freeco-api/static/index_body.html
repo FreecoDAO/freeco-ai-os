@@ -3161,7 +3161,7 @@
                     </div>
                     <div class="flex gap-2">
                       <button class="btn btn-ghost btn-sm" x-show="skill.config_declared_count > 0" @click="openSkillConfig(skill)" title="Configure skill variables">&#9881; Configure</button>
-                      <button class="btn btn-danger btn-sm" @click="uninstallSkill(skill.name)">Uninstall</button>
+                      <button class="btn btn-danger btn-sm" x-show="skill.source.type !== 'bundled'" @click="uninstallSkill(skill.name)">Uninstall</button>
                     </div>
                   </div>
                 </div>

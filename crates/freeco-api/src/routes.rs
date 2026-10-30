@@ -4399,10 +4399,6 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 
 /// GET /api/skills — List installed skills.
 pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
-    let mut registry = freeco_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
-
     // Snapshot of user-provided overrides for the `config_resolved_count`.
     // Matches `reload_skills()` fallback order so the count reflects what
     // agents will actually see.
@@ -4418,8 +4414,18 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
             .unwrap_or_else(|| state.kernel.config.skills.clone())
     };
 
-    let skills: Vec<serde_json::Value> = registry
-        .list()
+    // Load the same way the kernel does: bundled skills first, then user
+    // skills from disk (which override bundled ones with the same name).
+    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let mut registry = freeco_skills::registry::SkillRegistry::new(skills_dir);
+    registry.set_skill_configs(user_configs.clone());
+    registry.load_bundled();
+    let _ = registry.load_all();
+
+    let mut installed = registry.list();
+    installed.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+
+    let skills: Vec<serde_json::Value> = installed
         .iter()
         .map(|s| {
             let source = match &s.manifest.source {

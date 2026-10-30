@@ -50,7 +50,7 @@ if [ "$(cat "$hashes" 2>/dev/null)" != "$want" ]; then
   # (nextlevelbuilder/ui-ux-pro-max-skill, MIT). The search scripts use the
   # Python standard library only and make no network calls.
   fetch_pinned https://github.com/nextlevelbuilder/ui-ux-pro-max-skill \
-    28b3b8dee8c976df4fa3e94aed4e092ad43fcb03 "$work/uiux"
+    9a3f14f7423037ccb8feeb4fee7482291b9c820e "$work/uiux"
   for skill in ui-ux-pro-max design-system slides; do
     rm -rf "${skills_dir:?}/$skill"
     cp -RL "$work/uiux/.claude/skills/$skill" "$skills_dir/$skill"
