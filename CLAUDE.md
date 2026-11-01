@@ -176,6 +176,22 @@ full key into chat, an issue, or a commit to "confirm" a finding.
 `NOT RUN` is a real verdict. A check that did not complete must be reported as
 incomplete, never rounded up to a pass.
 
+### founder skills
+
+`.claude/skills/founder-*/` — eleven skills that test the business before money
+is spent: `founder-board`, `founder-competitors`, `founder-consumer`,
+`founder-pricing`, `founder-offer`, `founder-cfo`, `founder-marketing`,
+`founder-brand`, `founder-ops`, `founder-launch`, `founder-plan`. Run them in
+that order; each reads what the others wrote in `founder/`, which is
+gitignored so business plans and panel answers never get committed.
+
+Copied from `FreecoDAO/founder-skill` at fd9385b (Jake Schincariol, MIT; the
+licence is in each folder). The four Python tools use the standard library
+only and make no network calls. To update, read the upstream diff first.
+
+The consumer panel is simulated buyers and the numbers are projections. Never
+quote panel answers as customer testimonials.
+
 ### karpathy-guidelines
 
 `.claude/skills/karpathy-guidelines/` — behavioural guidelines that cut the
