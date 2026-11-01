@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 
 FIRST_NAMES = [
@@ -129,6 +130,21 @@ def _write_json(path, obj):
         fh.write("\n")
 
 
+def _archive_previous_run(d):
+    """Move an earlier run into previous-N/ so a re-test gets fresh answers and keeps the baseline."""
+    if not os.path.exists(_path(d, "panel.json")):
+        return None
+    k = 1
+    while os.path.exists(_path(d, "previous-%d" % k)):
+        k += 1
+    old = _path(d, "previous-%d" % k)
+    os.makedirs(old)
+    for name in ("panel.json", "personas.json", "briefs", "answers", "results.md", "results.json"):
+        if os.path.exists(_path(d, name)):
+            shutil.move(_path(d, name), os.path.join(old, name))
+    return old
+
+
 def init(d, customer_path, pitch_path, n=100, seed=None):
     try:
         customer = _read_json(customer_path)
@@ -144,6 +160,7 @@ def init(d, customer_path, pitch_path, n=100, seed=None):
     if seed is None:
         seed = random.SystemRandom().randrange(1, 10 ** 6)
     cards = deal(customer, n, seed)
+    _archive_previous_run(d)
     _write_json(_path(d, "panel.json"), {"n": n, "seed": seed, "customer": customer, "pitch": pitch})
     _write_json(_path(d, "personas.json"), cards)
     os.makedirs(_path(d, "briefs"), exist_ok=True)
@@ -217,6 +234,8 @@ def _answer_ok(path, pid):
         a = _read_json(path)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return "not valid JSON"
+    if not isinstance(a, dict):
+        return "not a JSON object"
     missing = ANSWER_FIELDS - set(a)
     if missing:
         return "missing " + ", ".join(sorted(missing))
@@ -226,6 +245,10 @@ def _answer_ok(path, pid):
         return "'buys' must be true or false"
     if a.get("reason_code") not in REASONS:
         return "reason_code %r is not one of %s" % (a.get("reason_code"), ", ".join(REASONS))
+    if not isinstance(a.get("reason"), str):
+        return "'reason' must be text"
+    if not isinstance(a.get("would_change_my_mind") or "", str):
+        return "'would_change_my_mind' must be text"
     return None
 
 

@@ -21,6 +21,7 @@ The input (see example.json in this folder):
     fixed_monthly     [{label, cost}]  costs you pay every month whatever you sell:
                       rent, salaries, software, insurance
     startup           [{label, cost}]  one-off spend before you open
+                      (all three lists are required; give [] for none)
     days_per_month    selling days in a month (default 30)
     capacity_per_day  the most units a day you can physically sell (optional)
     plan_per_day      the volume you plan for once you are up and running
@@ -84,6 +85,9 @@ def analyse(spec, price=None, volume=1.0):
     if p <= 0:
         raise NumbersError("price must be above zero")
     days = float(spec.get("days_per_month", 30))
+    for field in ("variable", "fixed_monthly", "startup"):
+        if not isinstance(spec.get(field), list):
+            raise NumbersError("'%s' is missing: list its costs, or give [] if there are none" % field)
     var = _sum(spec.get("variable"), "variable")
     fixed = _sum(spec.get("fixed_monthly"), "fixed_monthly")
     startup = _sum(spec.get("startup"), "startup")

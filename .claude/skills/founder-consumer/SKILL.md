@@ -63,6 +63,9 @@ PANEL prompts
 ```
 
 `init` deals the persona cards (same seed, same cards; the seed is recorded).
+Running `init` again on the same folder (a re-test with a new pitch) moves the
+earlier run, answers and results included, into `previous-1/`, `previous-2/` and
+so on, so the re-test gets fresh answers and the baseline is kept.
 `prompts` writes one brief per buyer and lists them in waves of 10. For each wave,
 send ONE message with one Agent tool call per buyer in that wave (the Agent tool
 is called Task in older Claude Code versions):

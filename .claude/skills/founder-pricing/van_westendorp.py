@@ -31,6 +31,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import sys
 
@@ -46,7 +47,7 @@ def _f(v):
         x = float(str(v).replace("$", "").replace(",", "").strip())
     except (TypeError, ValueError):
         return None
-    return x if x > 0 else None
+    return x if math.isfinite(x) and x > 0 else None
 
 
 def read(path):
@@ -58,6 +59,9 @@ def read(path):
                 with open(fp, encoding="utf-8") as fh:
                     a = json.load(fh)
             except (json.JSONDecodeError, UnicodeDecodeError):
+                raw.append(None)
+                continue
+            if not isinstance(a, dict):
                 raw.append(None)
                 continue
             raw.append(tuple(_f(a.get("price_" + k)) for k in KEYS))

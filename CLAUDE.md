@@ -188,6 +188,11 @@ gitignored so business plans and panel answers never get committed.
 Copied from `FreecoDAO/founder-skill` at fd9385b (Jake Schincariol, MIT; the
 licence is in each folder). The four Python tools use the standard library
 only and make no network calls. To update, read the upstream diff first.
+Our copy differs from upstream in four tools, all input checks: missing cost
+lists are refused instead of read as zero, a re-run of `panel.py init` moves
+the earlier run to `previous-N/`, the plan and ramp must fit inside capacity,
+and infinite prices and malformed answer files are dropped. Keep these when
+updating unless upstream has fixed them.
 
 The consumer panel is simulated buyers and the numbers are projections. Never
 quote panel answers as customer testimonials.

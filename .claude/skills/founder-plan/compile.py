@@ -87,6 +87,10 @@ def verdict(d, min_buy_rate=0.25):
             fits = not math.isinf(be) and be <= float(cap)
             checks.append((fits, "Break-even is %s %ss a day against a capacity of %s." % (
                 "never reached" if math.isinf(be) else "{:,.0f}".format(math.ceil(be)), u, cap)))
+            peak = max([numbers["plan_per_day"]] + [m["per_day"] for m in numbers["months"]])
+            if peak > float(cap):
+                checks.append((False, "The plan needs %s %ss a day at its peak, above the capacity of %s." % (
+                    "{:,.0f}".format(peak), u, cap)))
     raw = _read(os.path.join(d, "panel", "results.json"))
     if raw:
         panel = json.loads(raw)
