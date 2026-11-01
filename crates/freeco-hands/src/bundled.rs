@@ -263,6 +263,38 @@ mod tests {
         assert!(!def.dashboard.metrics.is_empty());
         assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(def.agent.max_iterations, Some(80));
+        for key in [
+            "day_toolkit",
+            "max_loss_per_trade_usd",
+            "max_trades_per_day",
+            "flat_by",
+            "pdt_guard",
+            "sec_user_agent",
+        ] {
+            assert!(
+                def.settings.iter().any(|s| s.key == key),
+                "trader hand is missing the day-trader toolkit setting '{key}'"
+            );
+        }
+    }
+
+    /// The trader hand installs FreecoDAO/day-trader-skill at a pinned commit,
+    /// and that commit is written in SKILL.md's install commands. Bumping the
+    /// pin means re-reviewing the toolkit's code, so the pin must appear in
+    /// SKILL.md and the toolkit must never be installed unpinned.
+    #[test]
+    fn trader_toolkit_is_pinned() {
+        const PIN: &str = "3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd";
+        let (_, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "trader")
+            .unwrap();
+        assert!(toml_content.contains("pinned commit"));
+        assert!(
+            skill_content.contains(&format!("checkout {PIN}")),
+            "SKILL.md must check out the pinned toolkit commit"
+        );
+        assert!(skill_content.contains(&format!("tar.gz/{PIN}")));
     }
 
     #[test]
