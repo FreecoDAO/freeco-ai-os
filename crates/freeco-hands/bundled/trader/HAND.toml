@@ -189,6 +189,50 @@ description = "Require explicit user approval before executing any live trade �
 setting_type = "toggle"
 default = "true"
 
+# ─── Day-trader toolkit (FreecoDAO/day-trader-skill) ─────────────────────────
+
+[[settings]]
+key = "day_toolkit"
+label = "Day-Trader Toolkit"
+description = "For Day Trading or Scalping on US stocks, run the 11 day-trader tools (scanner, entry timer, exit planner, 10,000-replay time machine, sizing, risk check, tickets, alerts). Also enables the earnings reader and the Congress trade tracker in every style."
+setting_type = "toggle"
+default = "true"
+
+[[settings]]
+key = "max_loss_per_trade_usd"
+label = "Max Loss Per Trade (USD)"
+description = "The most a single day trade may lose at its stop, in dollars. Sizing never exceeds it."
+setting_type = "text"
+default = "50"
+
+[[settings]]
+key = "max_trades_per_day"
+label = "Max Day Trades Per Day"
+description = "New day-trade entries allowed per session. Exits are never blocked."
+setting_type = "text"
+default = "3"
+
+[[settings]]
+key = "flat_by"
+label = "Flat-By Time"
+description = "New York time (HH:MM) by which every day trade is closed. Moves earlier on 1:00 p.m. early closes."
+setting_type = "text"
+default = "15:55"
+
+[[settings]]
+key = "pdt_guard"
+label = "PDT Guard"
+description = "Count day trades against the old $25,000 pattern-day-trader rule. Turn on if your broker still applies it (brokers may phase out the rule until Oct 20, 2027)."
+setting_type = "toggle"
+default = "false"
+
+[[settings]]
+key = "sec_user_agent"
+label = "SEC User-Agent"
+description = "Name and email that SEC EDGAR requires on every request, e.g. \"Jane Doe jane@example.com\". Needed for 8-K news and the earnings reader."
+setting_type = "text"
+default = ""
+
 # ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
@@ -230,6 +274,37 @@ Then recover state:
 4. file_read `trade_journal.json` if it exists — your trade history
 5. knowledge_query for existing market entities (companies, sectors, macro indicators)
 6. Check circuit breaker status: if `trader_hand_circuit_breaker` is set and not expired, respect the cooldown
+
+### Day-Trader Toolkit setup (when Day-Trader Toolkit is Enabled)
+1. If `day-trader-skill/` does not exist, install it at the pinned commit (SKILL.md Section 12, "Install"). Never pull a newer commit on your own.
+2. Write `trader/config.json` from the User Configuration (mapping table in SKILL.md Section 12). Rewrite it whenever a setting changes.
+3. Run `alerts.py clock` to learn whether NYSE is open, the next open/close, and any early close today.
+
+### Which pipeline to run
+- **Day-trading pipeline** (below) when Day-Trader Toolkit is Enabled AND Strategy Style is Day Trading or Scalping AND Market Focus includes US stocks. It replaces Phases 2-6 for US stocks. Crypto in a Multi-Asset focus still goes through Phases 2-6.
+- **Phases 2-6** in every other case. With the toolkit Enabled, Phase 2 also runs `facts.py` (earnings) for stocks reporting this week and `ptr.py new --tickers <watchlist>` (Congress trades) as extra signals.
+
+---
+
+## Day-Trading Pipeline (Day-Trader Toolkit)
+
+Every step is a shell_exec of a tool in SKILL.md Section 12. Each tool reads what the last one wrote in `trader/`. Never fabricate a tool's output. If a tool errors, report the error and HOLD.
+
+1. **Universe** (first run, then weekly): `scan.py universe`.
+2. **Pre-market** (before 09:30 ET): `scan.py daily` on the universe, or `--symbols` for the watchlist only. Then `news.py`. Drop any ticker with earnings today or a halt, bankruptcy or restatement 8-K.
+3. **Opening range** (from 09:45 ET): `scan.py orb --watchlist trader/watchlist.json`, then `entry.py watchlist`. Continue only for a ticker that returns `triggered`.
+4. **Exit plan**: `exit.py plan --write`. A refusal means no trade.
+5. **Time Machine**: `timemachine.py run --write`. HOLD if stop-first ≥ target-first or average R ≤ 0.
+6. **Adversarial check**: run Phase 4 Steps 1-3 (bull, bear, bias check) on the ticker, using the scanner, news and Time Machine output as the evidence. HOLD if the bear case wins.
+7. **Size**: `size.py --limit --write`. A refusal means no trade.
+8. **Risk**: `check.py`. BLOCK is final. Also apply Phase 5B and 5C. Never edit `orders.json` or `config.json` to get a PASS.
+9. **Ticket**: `ticket.py show`, then execute by Trading Mode:
+   - **analysis**: write the ticket to `shadow_trades.json`. No order.
+   - **paper**: simulate the fill against `portfolio.json` as in Phase 6, then record it with `ticket.py fill` so the toolkit's daily limits count it.
+   - **live**: ALWAYS require approval for toolkit orders, whatever Approval Mode says. event_publish the ticket text as the trade proposal, STOP and wait. Record the user's reply word for word with `ticket.py approve --index N --reply "<reply>"` (or `decline`). Only after an approval, POST the ticket's `order` JSON unchanged to Alpaca's orders endpoint, then `ticket.py result` and `ticket.py fill`.
+10. **Alerts**: `alerts.py add --from-plan`, then `alerts.py check` every scan cycle. event_publish each alert that rings.
+11. **Flat by close**: at Flat-By Time, run `ticket.py flatten --symbol <TICKER>` for every open day trade and execute the sell the same way as step 9 (exits are never blocked by daily limits). In live mode, if the user has not replied, event_publish the flatten ticket again every cycle until the position is closed.
+12. Continue with Phase 7. Log every toolkit trade in `trade_journal.json` with the Time Machine odds and the risk verdict.
 
 ---
 
