@@ -47,6 +47,11 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(name, "shell_exec" | "process_start")
 }
 
+/// Tools that always need a human's approval, whatever `[approval]` says and
+/// whichever agent calls them (hand agents included). Installing skills
+/// changes what every agent is told and can run, so it is never automatic.
+pub const ALWAYS_ASK_TOOLS: &[&str] = &["skill_install_github"];
+
 /// Check if a shell command should be blocked by taint tracking.
 ///
 /// Layer 1: Shell metacharacter injection (backticks, `$(`, `${`, etc.)
@@ -189,7 +194,9 @@ pub async fn execute_tool(
     }
 
     if let Some(kh) = kernel {
-        if !exec_policy_bypasses_approval && kh.requires_approval(tool_name) {
+        if !exec_policy_bypasses_approval
+            && (kh.requires_approval(tool_name) || ALWAYS_ASK_TOOLS.contains(&tool_name))
+        {
             let agent_id_str = caller_agent_id.unwrap_or("unknown");
             let input_str = input.to_string();
             let summary = format!(
@@ -468,6 +475,10 @@ pub async fn execute_tool(
         "process_write" => tool_process_write(input, process_manager).await,
         "process_kill" => tool_process_kill(input, process_manager).await,
         "process_list" => tool_process_list(process_manager, caller_agent_id).await,
+
+        // Skill install from GitHub (preview is read-only; install is approval-gated)
+        "skill_github_preview" => tool_skill_github_preview(input, kernel).await,
+        "skill_install_github" => tool_skill_install_github(input, kernel).await,
 
         // Hand tools (curated autonomous capability packages)
         "hand_list" => tool_hand_list(kernel).await,
@@ -1556,6 +1567,33 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["channel", "recipient"]
             }),
         },
+        // --- Skill install from GitHub ---
+        ToolDefinition {
+            name: "skill_github_preview".to_string(),
+            description: "Scan the skills in a GitHub repository WITHOUT installing them. Returns the exact commit SHA scanned and, per skill, its name, description, security warnings and whether it is blocked. Always run this before skill_install_github and show the user what it found.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "owner/repo, owner/repo/path/to/skills, optionally @branch-or-tag, or a github.com URL (e.g. 'FreecoDAO/ponytail/skills')" }
+                },
+                "required": ["source"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_install_github".to_string(),
+            description: "Install skills from a GitHub repository at the exact commit a skill_github_preview returned. Always asks the user for approval first. Skills the scan blocked are never installed.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "Same source string given to skill_github_preview" },
+                    "commit": { "type": "string", "description": "The full 40-character commit SHA from skill_github_preview" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Names of the skills to install (from the preview). Omit to install every unblocked skill found." },
+                    "overwrite": { "type": "boolean", "description": "Replace an installed or built-in skill of the same name. Default false." },
+                    "purpose": { "type": "string", "description": "Why these skills are needed — shown to the user in the approval request" }
+                },
+                "required": ["source", "commit", "purpose"]
+            }),
+        },
         // --- Hand tools (curated autonomous capability packages) ---
         ToolDefinition {
             name: "hand_list".to_string(),
@@ -2264,6 +2302,48 @@ fn require_kernel(
     kernel.ok_or_else(|| {
         "Kernel handle not available. Inter-agent tools require a running kernel.".to_string()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Skill install from GitHub
+// ---------------------------------------------------------------------------
+
+async fn tool_skill_github_preview(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let source = input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+    let preview = kh.skill_github_preview(source).await?;
+    serde_json::to_string_pretty(&preview).map_err(|e| format!("Serialize preview: {e}"))
+}
+
+async fn tool_skill_install_github(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let source = input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+    let commit = input["commit"]
+        .as_str()
+        .ok_or("Missing 'commit' parameter — run skill_github_preview first")?;
+    let skills: Vec<String> = input["skills"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let overwrite = input["overwrite"].as_bool().unwrap_or(false);
+    let outcome = kh
+        .skill_github_install(source, commit, &skills, overwrite)
+        .await?;
+    serde_json::to_string_pretty(&outcome).map_err(|e| format!("Serialize result: {e}"))
 }
 
 async fn tool_agent_send(
@@ -4697,6 +4777,56 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn test_github_skill_tools_are_defined_and_gated() {
+        let tools = builtin_tool_definitions();
+        let preview = tools
+            .iter()
+            .find(|t| t.name == "skill_github_preview")
+            .expect("skill_github_preview defined");
+        assert_eq!(
+            preview.input_schema["required"],
+            serde_json::json!(["source"])
+        );
+
+        let install = tools
+            .iter()
+            .find(|t| t.name == "skill_install_github")
+            .expect("skill_install_github defined");
+        let required = install.input_schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("commit")));
+        assert!(required.contains(&serde_json::json!("purpose")));
+
+        // Installs always ask a human; the read-only preview never needs to.
+        assert!(ALWAYS_ASK_TOOLS.contains(&"skill_install_github"));
+        assert!(!ALWAYS_ASK_TOOLS.contains(&"skill_github_preview"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_github_without_kernel_errors() {
+        let result = execute_tool(
+            "test-id",
+            "skill_install_github",
+            &serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "test"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
     }
 
     #[tokio::test]

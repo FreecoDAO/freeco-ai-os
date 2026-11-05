@@ -4426,6 +4426,9 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 Some(freeco_skills::SkillSource::ClawHub { slug, version }) => {
                     serde_json::json!({"type": "clawhub", "slug": slug, "version": version})
                 }
+                Some(freeco_skills::SkillSource::GitHub { repo, commit, path }) => {
+                    serde_json::json!({"type": "github", "repo": repo, "commit": commit, "path": path})
+                }
                 Some(freeco_skills::SkillSource::OpenClaw) => {
                     serde_json::json!({"type": "openclaw"})
                 }
@@ -5025,6 +5028,77 @@ pub async fn clawhub_install(
             };
             tracing::warn!("ClawHub install failed: {msg}");
             (status, Json(serde_json::json!({"error": msg})))
+        }
+    }
+}
+
+/// Map a skill-install error to the HTTP status the dashboard expects.
+fn skill_error_status(e: &freeco_skills::SkillError) -> StatusCode {
+    match e {
+        freeco_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+        freeco_skills::SkillError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        freeco_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+        freeco_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+        freeco_skills::SkillError::InvalidManifest(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// POST /api/skills/github/preview — Scan a GitHub repo's skills; installs nothing.
+pub async fn github_skill_preview(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GitHubSkillPreviewRequest>,
+) -> impl IntoResponse {
+    match state.kernel.github_skill_preview(&req.source).await {
+        Ok(preview) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&preview).unwrap_or_default()),
+        ),
+        Err(e) => {
+            tracing::warn!("GitHub skill preview failed: {e}");
+            (
+                skill_error_status(&e),
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+        }
+    }
+}
+
+/// POST /api/skills/github/install — Install skills from a GitHub repo at one commit.
+pub async fn github_skill_install(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GitHubSkillInstallRequest>,
+) -> impl IntoResponse {
+    let opts = freeco_skills::installer::InstallOptions {
+        require_signed: req.require_signed,
+        allowed_signer_keys: req.allowed_signer_keys.clone(),
+    };
+    match state
+        .kernel
+        .github_skill_install(
+            &req.source,
+            req.commit.as_deref(),
+            &req.skills,
+            req.overwrite,
+            &opts,
+        )
+        .await
+    {
+        Ok(outcome) => {
+            let mut body = serde_json::to_value(&outcome).unwrap_or_default();
+            body["status"] = serde_json::json!(if outcome.installed.is_empty() {
+                "nothing_installed"
+            } else {
+                "installed"
+            });
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            tracing::warn!("GitHub skill install failed: {e}");
+            (
+                skill_error_status(&e),
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
         }
     }
 }

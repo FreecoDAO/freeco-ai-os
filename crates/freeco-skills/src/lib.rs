@@ -10,6 +10,7 @@
 pub mod bundled;
 pub mod clawhub;
 pub mod config_injection;
+pub mod github;
 pub mod installer;
 pub mod loader;
 pub mod marketplace;
@@ -81,6 +82,16 @@ pub enum SkillSource {
     OpenClaw,
     /// Downloaded from ClawHub marketplace.
     ClawHub { slug: String, version: String },
+    /// Installed from a GitHub repository, pinned to one commit.
+    #[serde(rename = "github")]
+    GitHub {
+        /// `owner/repo`.
+        repo: String,
+        /// Full 40-character commit SHA the files came from.
+        commit: String,
+        /// Folder inside the repository ("" = repository root).
+        path: String,
+    },
 }
 
 /// A tool provided by a skill.
@@ -255,6 +266,16 @@ capabilities = ["NetConnect(*)"]
         let json = serde_json::to_string(&src).unwrap();
         let back: SkillSource = serde_json::from_str(&json).unwrap();
         assert_eq!(back, src);
+
+        let gh = SkillSource::GitHub {
+            repo: "FreecoDAO/ponytail".to_string(),
+            commit: "96608e0".repeat(5) + "aaaaa",
+            path: "skills/ponytail".to_string(),
+        };
+        let json = serde_json::to_string(&gh).unwrap();
+        assert!(json.contains("\"type\":\"github\""));
+        let back: SkillSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, gh);
 
         let native = SkillSource::Native;
         let json = serde_json::to_string(&native).unwrap();

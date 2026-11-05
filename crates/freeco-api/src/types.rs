@@ -158,6 +158,35 @@ pub struct ClawHubInstallRequest {
     pub slug: String,
 }
 
+/// Request to scan a GitHub repository's skills without installing.
+#[derive(Debug, Deserialize)]
+pub struct GitHubSkillPreviewRequest {
+    /// `owner/repo[/path][@ref]` or a github.com URL.
+    pub source: String,
+}
+
+/// Request to install skills from a GitHub repository.
+#[derive(Debug, Deserialize)]
+pub struct GitHubSkillInstallRequest {
+    /// Same source string as the preview.
+    pub source: String,
+    /// Full commit SHA from the preview. Omitted = resolve the ref now.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Skill names to install; empty = every unblocked skill found.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Replace an installed or built-in skill with the same name.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Reject skills without a valid Ed25519 signature.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Optional hex-encoded allow-list of signer public keys.
+    #[serde(default)]
+    pub allowed_signer_keys: Vec<String>,
+}
+
 /// Query parameters for `GET /api/commands`.
 #[derive(Debug, Deserialize)]
 pub struct CommandsQuery {

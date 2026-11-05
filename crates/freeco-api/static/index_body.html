@@ -3134,6 +3134,7 @@
               Installed <span class="badge badge-dim" x-show="skills.length" x-text="skills.length" style="margin-left:4px"></span>
             </div>
             <div class="tab" :class="{ active: tab === 'clawhub' }" @click="tab = 'clawhub'; if (!clawhubBrowseResults.length && !clawhubSearch) browseClawHub('trending')">ClawHub</div>
+            <div class="tab" :class="{ active: tab === 'github' }" @click="tab = 'github'">GitHub</div>
             <div class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'; loadMcpServers()">MCP Servers</div>
             <div class="tab" :class="{ active: tab === 'create' }" @click="tab = 'create'">Quick Start</div>
           </div>
@@ -3152,6 +3153,9 @@
                     <div class="toggle" :class="{ active: skill.enabled }" @click="skill.enabled = !skill.enabled"></div>
                   </div>
                   <div class="card-meta" x-text="skill.description"></div>
+                  <div class="text-xs text-dim mt-1" x-show="skill.source && skill.source.type === 'github'">
+                    <a :href="githubSourceUrl(skill.source)" target="_blank" rel="noopener noreferrer" x-text="githubSourceLabel(skill.source)"></a>
+                  </div>
                   <div class="flex justify-between items-center mt-2">
                     <div class="flex gap-2 items-center">
                       <span class="text-xs text-dim" x-text="skill.tools_count + ' tool(s)'"></span>
@@ -3278,6 +3282,83 @@
               <p class="hint mt-1">Try a different search term or browse by category.</p>
               <button class="btn btn-ghost btn-sm mt-2" @click="clearSearch()">Back to browse</button>
             </div>
+          </div>
+
+          <!-- TAB: GitHub (install any repo's skills, pinned to a commit) -->
+          <div x-show="tab === 'github'">
+            <div class="info-card mb-4">
+              <h4>Install skills from GitHub</h4>
+              <p>Paste a repository, a folder of skills, or a link. Preview scans the exact commit first: prompt injection, scripts that download and run code, hidden characters. Blocked skills can't be installed, and the install uses the same commit you previewed.</p>
+              <p class="mt-2" style="font-size:0.8rem;color:var(--text-dim)">Examples: <code>FreecoDAO/ponytail/skills</code>, <code>owner/repo/skills/name@v1.2</code>, <code>https://github.com/owner/repo/tree/main/skills</code></p>
+            </div>
+
+            <div class="flex gap-2 mb-2">
+              <div class="search-input" style="flex:1">
+                <input placeholder="owner/repo[/path][@branch]" x-model="githubSource" @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229) previewGitHub()" aria-label="GitHub source">
+              </div>
+              <button class="btn btn-primary" @click="previewGitHub()" :disabled="githubLoading || !githubSource.trim()" x-text="githubLoading ? 'Scanning…' : 'Preview'"></button>
+            </div>
+            <div class="filter-pills mb-4">
+              <template x-for="pick in githubQuickPicks" :key="pick.source">
+                <span class="filter-pill" @click="githubSource = pick.source; previewGitHub()" :title="pick.source" x-text="pick.label"></span>
+              </template>
+            </div>
+
+            <div class="error-state mb-4" x-show="githubError">
+              <span x-text="githubError"></span>
+            </div>
+            <div x-show="githubLoading" class="loading-state"><div class="spinner"></div><span>Downloading and scanning…</span></div>
+
+            <template x-if="githubPreview && !githubLoading">
+              <div>
+                <div class="flex justify-between items-center mb-2">
+                  <div class="text-sm">
+                    <strong x-text="githubPreview.repo"></strong>
+                    <span class="text-dim" x-show="githubPreview.path" x-text="'/' + githubPreview.path"></span>
+                    <span class="badge badge-dim" style="font-size:0.65rem" :title="githubPreview.commit" x-text="'@' + githubPreview.commit.substring(0, 7)"></span>
+                    <span class="text-dim text-xs" x-text="githubPreview.skills.length + ' skill(s) found, ' + githubBlockedCount() + ' blocked'"></span>
+                  </div>
+                  <div class="flex gap-2 items-center">
+                    <button class="btn btn-ghost btn-sm" @click="githubSelectAll(true)">Select all</button>
+                    <button class="btn btn-ghost btn-sm" @click="githubSelectAll(false)">None</button>
+                    <label class="text-xs flex items-center gap-1" title="Replace installed or built-in skills with the same name">
+                      <input type="checkbox" x-model="githubOverwrite"> Replace existing
+                    </label>
+                    <button class="btn btn-primary btn-sm" @click="installGitHub()" :disabled="githubInstalling || !githubSelected.length" x-text="githubInstalling ? 'Installing…' : ('Install ' + githubSelected.length)"></button>
+                  </div>
+                </div>
+
+                <div class="card-grid">
+                  <template x-for="s in githubPreview.skills" :key="s.repo_path + ':' + s.name">
+                    <div class="card" :style="s.blocked ? 'opacity:0.7' : ''">
+                      <div class="flex justify-between items-center mb-2">
+                        <label class="flex items-center gap-2" style="cursor:pointer">
+                          <input type="checkbox" :value="s.name" x-model="githubSelected" :disabled="!!s.blocked">
+                          <span class="card-header" style="margin:0" x-text="s.name"></span>
+                        </label>
+                        <div class="flex gap-1">
+                          <span class="badge badge-error" style="font-size:0.65rem" x-show="s.blocked">Blocked</span>
+                          <span class="badge badge-warn" style="font-size:0.65rem" x-show="!s.blocked && githubWarningCount(s) > 0" x-text="githubWarningCount(s) + ' warning(s)'"></span>
+                          <span class="badge badge-dim" style="font-size:0.65rem" x-show="s.already_installed">Installed</span>
+                          <span class="badge badge-dim" style="font-size:0.65rem" x-show="s.shadows_bundled">Replaces built-in</span>
+                        </div>
+                      </div>
+                      <div class="card-meta" x-text="s.description"></div>
+                      <div class="text-xs mt-1" style="color:var(--danger)" x-show="s.blocked" x-text="s.blocked"></div>
+                      <details class="text-xs mt-1" x-show="s.warnings.length">
+                        <summary class="text-dim" x-text="'Scan details (' + s.warnings.length + ')'"></summary>
+                        <ul style="margin:4px 0 0 16px">
+                          <template x-for="w in s.warnings">
+                            <li><span x-text="w.severity"></span>: <span x-text="w.message"></span></li>
+                          </template>
+                        </ul>
+                      </details>
+                      <div class="text-xs text-dim mt-1" x-text="s.repo_path + ' · ' + s.files + ' file(s)'"></div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
           </div>
 
           <!-- TAB: MCP Servers -->

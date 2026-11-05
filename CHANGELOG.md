@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Skills install straight from GitHub. The Skills page has a GitHub tab:
+  paste `owner/repo/skills` or a link, preview, tick the skills, install.
+  Every install is pinned to the commit that was previewed, and every skill
+  folder is scanned first (prompt injection, scripts that download and run
+  code, hidden Unicode, compiled binaries); a Critical finding blocks it.
+  Installed skills show their repo and commit on the Installed tab.
+- The CEO agent (`agents/ceo.toml`) can add skills with two new tools:
+  `skill_github_preview`, which only reads, and `skill_install_github`, which
+  always asks you first, even for hand agents and even with approvals turned
+  off, and is denied to subagents.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

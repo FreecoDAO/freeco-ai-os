@@ -194,6 +194,26 @@ pub trait KernelHandle: Send + Sync {
         Ok(true) // Default: auto-approve
     }
 
+    /// Scan the skills in a GitHub repository without installing anything.
+    /// Returns the pinned commit plus a security report per skill.
+    async fn skill_github_preview(&self, source: &str) -> Result<serde_json::Value, String> {
+        let _ = source;
+        Err("Skill installs not available".to_string())
+    }
+
+    /// Install skills from a GitHub repository at exactly `commit` (a full
+    /// SHA from a preview). `skills` limits the install to those names.
+    async fn skill_github_install(
+        &self,
+        source: &str,
+        commit: &str,
+        skills: &[String],
+        overwrite: bool,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (source, commit, skills, overwrite);
+        Err("Skill installs not available".to_string())
+    }
+
     /// List available Hands and their activation status.
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         Err("Hands system not available".to_string())

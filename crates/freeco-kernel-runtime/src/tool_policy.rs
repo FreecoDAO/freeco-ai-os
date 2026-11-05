@@ -241,6 +241,7 @@ const SUBAGENT_DENY_ALWAYS: &[&str] = &[
     "hand_activate",
     "hand_deactivate",
     "process_start",
+    "skill_install_github",
 ];
 
 /// Tools denied to leaf subagents (depth >= max_depth - 1). Prevents deep spawn chains.
