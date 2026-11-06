@@ -783,7 +783,8 @@ window.FreecoSecretGuard = (function () {
       overlay.className = 'modal-overlay';
       var rows = found.map(function (f, i) {
         return '<label style="display:block;margin:10px 0 4px;font-size:12px;color:var(--text-secondary)">' +
-          'Key ' + (i + 1) + ' (' + esc(f.masked) + ') — save as</label>' +
+          'Key ' + (i + 1) + ' (' + esc(f.masked) + ') is taken from your message. ' +
+          'Name to save it under (the name only, not the key):</label>' +
           '<input class="form-input" data-i="' + i + '" value="' + esc(f.suggested_name) + '" ' +
           'autocomplete="off" spellcheck="false" style="width:100%;font-family:var(--font-mono,monospace)">' +
           // Saving over a stored key replaces it -- say so, never do it quietly.
@@ -811,9 +812,21 @@ window.FreecoSecretGuard = (function () {
       overlay.querySelector('.fsg-cancel').onclick = function () { done(null); };
       overlay.addEventListener('keydown', function (e) { if (e.key === 'Escape') done(null); });
       saveBtn.onclick = function () {
-        var names = Array.prototype.map.call(overlay.querySelectorAll('input[data-i]'), function (el) {
-          return el.value.trim().toUpperCase();
+        var raw = Array.prototype.map.call(overlay.querySelectorAll('input[data-i]'), function (el) {
+          return el.value.trim();
         });
+        // The box reads like a place to put the key, and the key was pasted
+        // into it. Say that rather than only quoting the naming rule.
+        var keyInName = raw.some(function (n, i) {
+          return found[i].value.length > 8 && n.indexOf(found[i].value.slice(0, 8)) !== -1;
+        });
+        if (keyInName) {
+          overlay.querySelector('.fsg-err').textContent =
+            'This box is for the name only: the key is already taken from your message. ' +
+            'Leave just the name in it, for example ' + found[0].suggested_name + '.';
+          return;
+        }
+        var names = raw.map(function (n) { return n.toUpperCase(); });
         var bad = names.filter(function (n) { return !/^[A-Z][A-Z0-9_]{1,63}$/.test(n); });
         if (bad.length) {
           overlay.querySelector('.fsg-err').textContent =

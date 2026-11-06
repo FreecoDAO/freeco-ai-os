@@ -145,7 +145,19 @@ pub struct PathQuery {
     pub path: String,
     #[serde(default)]
     pub download: bool,
+    /// Show an HTML file as a page rather than as its source.
+    #[serde(default)]
+    pub open: bool,
 }
+
+/// The policy an agent's HTML page runs under when opened.
+///
+/// A map or report an agent builds needs its scripts and its tiles from the
+/// web, so plain `sandbox` (no scripts) left it blank. It still gets an
+/// opaque origin, so it cannot read the dashboard's storage, and `connect-src
+/// https:` keeps it from calling FreEco's own API on plain-http localhost.
+const OPEN_PAGE_CSP: &str = "sandbox allow-scripts allow-popups; \
+default-src https: data: blob: 'unsafe-inline'; connect-src https:";
 
 /// GET /api/agents/{id}/workspace/tree?path= — one directory of the workspace.
 pub async fn workspace_tree(
@@ -230,7 +242,10 @@ pub async fn workspace_file(
     let mime = mime_guess(&name);
 
     let is_text = mime.starts_with("text/") || mime == "application/json";
-    if q.download || meta.len() > MAX_TEXT_BYTES || !is_text {
+    // `open` serves the file itself (a link a person clicks wants the file,
+    // not JSON); only an HTML page gets to run its scripts.
+    let open_page = q.open && !q.download && mime.starts_with("text/html");
+    if q.download || q.open || meta.len() > MAX_TEXT_BYTES || !is_text {
         if meta.len() > MAX_DOWNLOAD_BYTES {
             return err(StatusCode::PAYLOAD_TOO_LARGE, "file is larger than 200 MB");
         }
@@ -258,7 +273,10 @@ pub async fn workspace_file(
                 ),
                 // Never let a file from an agent's workspace run as a page on
                 // the dashboard's origin.
-                (header::CONTENT_SECURITY_POLICY, "sandbox".to_string()),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    if open_page { OPEN_PAGE_CSP } else { "sandbox" }.to_string(),
+                ),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
             ],
             bytes,
@@ -933,6 +951,16 @@ pub async fn set_output_style(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An opened agent page runs scripts, but stays off the dashboard's
+    /// origin and cannot reach FreEco's API on plain-http localhost.
+    #[test]
+    fn an_opened_page_is_sandboxed_away_from_the_dashboard() {
+        assert!(OPEN_PAGE_CSP.starts_with("sandbox "));
+        assert!(!OPEN_PAGE_CSP.contains("allow-same-origin"));
+        assert!(OPEN_PAGE_CSP.contains("connect-src https:"));
+        assert!(!OPEN_PAGE_CSP.contains("http:"));
+    }
 
     #[test]
     fn mime_types_are_sensible() {

@@ -119,6 +119,32 @@ const MAX_CONTINUATIONS: u32 = 5;
 #[allow(dead_code)]
 const MAX_HISTORY_MESSAGES: usize = freeco_types::agent::DEFAULT_MAX_HISTORY_MESSAGES;
 
+/// Manifest metadata key, set by the kernel: the index in the session where
+/// the last compaction ended. History before it reaches the model as the
+/// compaction summary instead of verbatim.
+pub const HISTORY_FROM_KEY: &str = "history_from";
+
+/// The stored conversation as it is sent: from the compaction point on,
+/// starting at a request, without system messages.
+fn history_for_model(session_messages: &[Message], manifest: &AgentManifest) -> Vec<Message> {
+    let from = manifest
+        .metadata
+        .get(HISTORY_FROM_KEY)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .filter(|&v| v < session_messages.len())
+        .unwrap_or(0);
+    // Start at a request, so no tool result arrives without its call.
+    let from = (from..session_messages.len())
+        .find(|&i| is_user_turn(&session_messages[i]))
+        .unwrap_or(from);
+    session_messages[from..]
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect()
+}
+
 /// Detect when the LLM claims to have performed an action (sent, posted, emailed)
 /// without actually calling any tools. Prevents hallucinated completions.
 fn phantom_action_detected(text: &str) -> bool {
@@ -573,12 +599,7 @@ pub async fn run_agent_loop(
     // System prompt goes into the separate `system` field.
     // NOTE: We build llm_messages BEFORE stripping images so the LLM
     // sees the full image data for the current turn.
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let llm_messages: Vec<Message> = history_for_model(&session.messages, manifest);
 
     // Strip Image blocks from session to prevent base64 bloat.
     // The LLM already received them via llm_messages above.
@@ -597,6 +618,14 @@ pub async fn run_agent_loop(
                 }
             }
         }
+    }
+
+    // Store the request now, not only when the turn ends. A turn can take
+    // minutes; until it was saved, a chat window that reloaded the
+    // conversation (after switching to another chat and back) found no trace
+    // of the message just sent, and the owner saw it vanish.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!("Failed to save session with the new request: {e}");
     }
 
     // Validate and repair session history (drop orphans, merge consecutive)
@@ -636,30 +665,14 @@ pub async fn run_agent_loop(
     // stored session; this only governs what goes back over the wire.
     messages = crate::context_budget::compact_historical_tool_results(messages);
 
-    // Safety valve: trim excessively long message histories to prevent context overflow.
-    // The full compaction system handles sophisticated summarization, but this prevents
-    // the catastrophic case where 200+ messages cause instant context overflow.
-    // Per-agent cap: manifest override -> runtime default (issue #871).
-    let max_history = manifest.effective_max_history_messages();
-    if messages.len() > max_history {
-        let trim_count = messages.len() - max_history;
-        warn!(
-            agent = %manifest.name,
-            total_messages = messages.len(),
-            trimming = trim_count,
-            max_history = max_history,
-            "Trimming old messages to prevent context overflow"
-        );
-        messages.drain(..trim_count);
-        // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
-        // pair across the cut boundary, leaving orphaned blocks that cause the LLM
-        // to return empty responses (input_tokens=0).
-        messages = crate::session_repair::validate_and_repair(&messages);
-        // Ensure history starts with a user turn: trimming may have left an
-        // assistant turn at position 0, which strict providers (e.g. Gemini)
-        // reject with INVALID_ARGUMENT on function-call turns.
-        messages = crate::session_repair::ensure_starts_with_user(messages);
-    }
+    // The whole conversation is sent unless the agent sets a turn cap (issue
+    // #871). Size is handled by compaction near the context window and by the
+    // overflow recovery below, not by counting messages.
+    messages = trim_to_recent_turns(
+        messages,
+        manifest.effective_max_history_messages(),
+        &manifest.name,
+    );
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -1361,6 +1374,62 @@ pub async fn run_agent_loop(
     Err(FreecoError::MaxIterationsExceeded(max_iterations))
 }
 
+/// Is this message something the user said, as opposed to a tool result
+/// (which also travels with the user role)?
+pub(crate) fn is_user_turn(m: &Message) -> bool {
+    if m.role != Role::User {
+        return false;
+    }
+    match &m.content {
+        MessageContent::Text(t) => !t.trim().is_empty(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if !text.trim().is_empty())),
+    }
+}
+
+/// Keep the last `max_turns` turns of the conversation for the model.
+///
+/// A turn is one thing the user said plus everything that followed it: the
+/// agent's tool calls, their results, its reply. The cap counted raw messages,
+/// and every tool call is two of them, so a single answer with nine tool
+/// calls pushed the request it answered out of the window -- the next message
+/// ("build it and test") arrived without the conversation it referred to, and
+/// the agent said, truthfully, that it had no context. Cutting only where the
+/// user spoke keeps a request and its steps together.
+///
+/// This shapes what is sent, not what is stored: the saved conversation keeps
+/// every message.
+pub(crate) fn trim_to_recent_turns(
+    messages: Vec<Message>,
+    max_turns: usize,
+    agent: &str,
+) -> Vec<Message> {
+    let starts: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_user_turn(m))
+        .map(|(i, _)| i)
+        .collect();
+    if max_turns == 0 || starts.len() <= max_turns {
+        return messages;
+    }
+    let cut = starts[starts.len() - max_turns];
+    warn!(
+        agent = %agent,
+        total_messages = messages.len(),
+        kept_turns = max_turns,
+        dropped_messages = cut,
+        "Sending only the most recent turns to the model"
+    );
+    let mut kept = messages;
+    kept.drain(..cut);
+    // The cut is at a user message, so no tool call is separated from its
+    // result; the repair pass stays as a guard for malformed stored history.
+    let kept = crate::session_repair::validate_and_repair(&kept);
+    crate::session_repair::ensure_starts_with_user(kept)
+}
+
 /// Run every message in a request through the gateway.
 ///
 /// Returns the masked request, or the reason it was refused. Tool definitions
@@ -1488,6 +1557,15 @@ fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut Complet
 ///
 /// Shared by the streaming and non-streaming paths so they cannot drift apart
 /// again -- they had, and the streaming one is the path the dashboard uses.
+/// The request never reached the provider: no connection, no DNS. Nothing
+/// was sent or streamed, so trying again cannot duplicate anything.
+fn is_connect_failure(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("dns error")
+        || lower.contains("connection refused")
+}
+
 pub fn should_try_fallback(category: llm_errors::LlmErrorCategory) -> bool {
     matches!(
         category,
@@ -1614,6 +1692,19 @@ async fn call_with_retry(
                 // models were configured. Any error that another model could
                 // plausibly succeed at now triggers the chain, a reached limit
                 // included; only Auth does not (see `should_try_fallback`).
+                // The connection itself failed (network down for a moment):
+                // try the same model again shortly before anything else. A
+                // brief blip used to end the turn with "error sending request".
+                if attempt < MAX_RETRIES && is_connect_failure(&raw_error) {
+                    warn!(
+                        attempt,
+                        "Could not reach the model provider, retrying in 2s"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    last_error = Some(raw_error);
+                    continue;
+                }
+
                 let should_fall_back = should_try_fallback(classified.category);
                 if should_fall_back && !fallback_models.is_empty() {
                     warn!(
@@ -2001,12 +2092,7 @@ pub async fn run_agent_loop_streaming(
         .messages
         .push(build_user_turn_message(user_message, user_content_blocks));
 
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let llm_messages: Vec<Message> = history_for_model(&session.messages, manifest);
 
     // Strip Image blocks from session to prevent base64 bloat.
     // The LLM already received them via llm_messages above.
@@ -2025,6 +2111,14 @@ pub async fn run_agent_loop_streaming(
                 }
             }
         }
+    }
+
+    // Store the request now, not only when the turn ends. A turn can take
+    // minutes; until it was saved, a chat window that reloaded the
+    // conversation (after switching to another chat and back) found no trace
+    // of the message just sent, and the owner saw it vanish.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!("Failed to save session with the new request: {e}");
     }
 
     // Validate and repair session history (drop orphans, merge consecutive)
@@ -2048,26 +2142,11 @@ pub async fn run_agent_loop_streaming(
 
     // Safety valve: trim excessively long message histories to prevent context overflow.
     // Per-agent cap: manifest override -> runtime default (issue #871).
-    let max_history = manifest.effective_max_history_messages();
-    if messages.len() > max_history {
-        let trim_count = messages.len() - max_history;
-        warn!(
-            agent = %manifest.name,
-            total_messages = messages.len(),
-            trimming = trim_count,
-            max_history = max_history,
-            "Trimming old messages to prevent context overflow (streaming)"
-        );
-        messages.drain(..trim_count);
-        // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
-        // pair across the cut boundary, leaving orphaned blocks that cause the LLM
-        // to return empty responses (input_tokens=0).
-        messages = crate::session_repair::validate_and_repair(&messages);
-        // Ensure history starts with a user turn: trimming may have left an
-        // assistant turn at position 0, which strict providers (e.g. Gemini)
-        // reject with INVALID_ARGUMENT on function-call turns.
-        messages = crate::session_repair::ensure_starts_with_user(messages);
-    }
+    messages = trim_to_recent_turns(
+        messages,
+        manifest.effective_max_history_messages(),
+        &manifest.name,
+    );
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -3938,7 +4017,9 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        // No cap by default: the whole conversation is sent, and compaction
+        // near the context window keeps it in size.
+        assert_eq!(MAX_HISTORY_MESSAGES, 0);
         assert_eq!(
             freeco_types::agent::DEFAULT_MAX_HISTORY_MESSAGES,
             MAX_HISTORY_MESSAGES
@@ -4615,7 +4696,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 0);
     }
 
     #[tokio::test]
@@ -5959,5 +6040,105 @@ mod gateway_wiring_tests {
             panic!("expected text");
         };
         assert!(!sent.contains("4242 4242"), "card still present: {sent}");
+    }
+
+    fn tool_round(id: &str) -> Vec<Message> {
+        vec![
+            Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "file_write".to_string(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: "file_write".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+            }]),
+        ]
+    }
+
+    /// The case that lost a conversation: one answer with nine tool calls is
+    /// eighteen messages, and a 20-message cap then dropped the request that
+    /// answer belonged to. Counting turns keeps the request with its steps.
+    #[test]
+    fn a_tool_heavy_answer_does_not_push_its_request_out_of_view() {
+        let mut history = vec![
+            Message::user("What can you do?"),
+            Message::assistant("Plenty."),
+            Message::user("A quick dev setup for a local WhatsApp gateway"),
+        ];
+        for i in 0..9 {
+            history.extend(tool_round(&format!("t{i}")));
+        }
+        history.push(Message::assistant("Files created in whatsapp-gateway/."));
+        history.push(Message::user("build it and test"));
+
+        let kept = trim_to_recent_turns(history, 2, "test");
+        let said: Vec<String> = kept
+            .iter()
+            .filter(|m| is_user_turn(m))
+            .map(|m| m.content.text_content())
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                "A quick dev setup for a local WhatsApp gateway".to_string(),
+                "build it and test".to_string()
+            ],
+            "the request the tool calls answered must survive the trim"
+        );
+        // Every tool call kept still has its result.
+        let uses = kept
+            .iter()
+            .filter(|m| matches!(&m.content, MessageContent::Blocks(b) if b.iter().any(|x| matches!(x, ContentBlock::ToolUse { .. }))))
+            .count();
+        assert_eq!(uses, 9);
+    }
+
+    /// After compaction the model gets the summary plus what follows the
+    /// compaction point -- never the whole stored history again, and never a
+    /// tool result whose call was left behind the cut.
+    #[test]
+    fn history_starts_at_the_compaction_point_on_a_request() {
+        let mut stored = vec![
+            Message::user("old request"),
+            Message::assistant("old answer"),
+        ];
+        stored.push(Message::user(
+            "A quick dev setup for a local WhatsApp gateway",
+        ));
+        stored.extend(tool_round("t0"));
+        stored.push(Message::assistant("Files created."));
+        stored.push(Message::user("build it and test"));
+
+        let mut manifest = AgentManifest::default();
+        assert_eq!(history_for_model(&stored, &manifest).len(), stored.len());
+
+        // A cursor inside the WhatsApp request's tool calls moves on to the
+        // next request rather than starting on an orphaned tool result.
+        manifest
+            .metadata
+            .insert(HISTORY_FROM_KEY.to_string(), serde_json::json!(4));
+        let sent = history_for_model(&stored, &manifest);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.text_content(), "build it and test");
+
+        manifest
+            .metadata
+            .insert(HISTORY_FROM_KEY.to_string(), serde_json::json!(2));
+        let sent = history_for_model(&stored, &manifest);
+        assert_eq!(
+            sent[0].content.text_content(),
+            "A quick dev setup for a local WhatsApp gateway"
+        );
+        assert_eq!(sent.len(), stored.len() - 2);
+    }
+
+    #[test]
+    fn a_short_conversation_is_left_alone() {
+        let history = vec![Message::user("hi"), Message::assistant("hello")];
+        assert_eq!(trim_to_recent_turns(history, 12, "test").len(), 2);
     }
 }

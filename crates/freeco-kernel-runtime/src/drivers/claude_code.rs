@@ -68,6 +68,11 @@ pub struct ClaudeCodeDriver {
     container: Option<(String, String)>,
 }
 
+/// Node options for the CLI in its container: connect over IPv4 first and
+/// do not race IPv6. See `build_command`.
+const NODE_NET_OPTIONS: &str =
+    "NODE_OPTIONS=--no-network-family-autoselection --dns-result-order=ipv4first";
+
 /// Claude Code's own tools, switched off for every call.
 ///
 /// FreEco runs the tools: the agent's sandbox, the CRM, the task board, each
@@ -111,6 +116,27 @@ impl ClaudeCodeDriver {
         }
     }
 
+    /// What to do when the CLI could not be started.
+    ///
+    /// Never "install it on this machine": the CLI belongs in FreEco's
+    /// `freeco-claude` container, and the old advice to `npm install -g` it
+    /// on the host is exactly what owners have asked agents never to do.
+    fn spawn_error(&self, e: std::io::Error) -> LlmError {
+        LlmError::Http(match &self.container {
+            Some((runtime, name)) => format!(
+                "Claude Code could not start in its container '{name}' ({e}). \
+                 Check that {runtime} is running and the container is up \
+                 ({runtime} start {name})."
+            ),
+            None => format!(
+                "Claude Code is not set up ({e}). FreEco runs it in its \
+                 freeco-claude container: add claude-code = \"podman:freeco-claude\" \
+                 under [provider_urls] in config.toml and restart FreEco. \
+                 Do not install it on this computer."
+            ),
+        })
+    }
+
     /// `podman:<name>` or `docker:<name>` — run the CLI in that container.
     fn parse_container(cli_path: &str) -> Option<(String, String)> {
         let (runtime, name) = cli_path.split_once(':')?;
@@ -148,6 +174,12 @@ impl ClaudeCodeDriver {
                     "-i",
                     "-e",
                     "CLAUDE_CODE_OAUTH_TOKEN",
+                    // IPv4 first, without Node's 250 ms switch to IPv6. Over
+                    // a VPN the IPv4 connection takes longer than that, Node
+                    // moved on to IPv6, which the container cannot route,
+                    // and every call failed: "api.anthropic.com timed out".
+                    "-e",
+                    NODE_NET_OPTIONS,
                     name,
                     "claude",
                 ]);
@@ -168,6 +200,9 @@ impl ClaudeCodeDriver {
         }
         if let Some(model) = Self::model_flag(&request.model) {
             cmd.arg("--model").arg(model);
+        }
+        if let Some(effort) = Self::effort_flag(&request.model) {
+            cmd.arg("--effort").arg(effort);
         }
         Self::apply_env_filter(&mut cmd);
         if self.container.is_none() {
@@ -403,8 +438,19 @@ impl ClaudeCodeDriver {
     }
 
     /// Map a model ID like "claude-code/opus" to CLI --model flag value.
+    /// The effort in an id such as `claude-code/claude-opus-5-5@high`, when
+    /// it is one the CLI accepts (low, medium, high, xhigh, max).
+    fn effort_flag(model: &str) -> Option<&'static str> {
+        let effort = model.rsplit_once('@')?.1;
+        ["low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .find(|e| *e == effort)
+    }
+
     fn model_flag(model: &str) -> Option<String> {
         let stripped = model.strip_prefix("claude-code/").unwrap_or(model);
+        // The effort travels as its own flag.
+        let stripped = stripped.split_once('@').map(|(m, _)| m).unwrap_or(stripped);
         match stripped {
             "opus" => Some("opus".to_string()),
             "sonnet" => Some("sonnet".to_string()),
@@ -508,6 +554,43 @@ struct ClaudeStreamEvent {
     message: Option<ClaudeAssistantMessage>,
     #[serde(default)]
     usage: Option<ClaudeUsage>,
+    /// Set on a `result` event that reports a failure ("Not logged in").
+    #[serde(default)]
+    is_error: bool,
+}
+
+/// The message for a failed CLI run, from whatever the CLI said.
+///
+/// The CLI reports most failures, "Not logged in" among them, as a JSON
+/// result on stdout with nothing on stderr, so the user saw only "exited with
+/// code 1: no stderr". The sign-in advice names the container command, not a
+/// host install.
+fn failure_message(code: i32, detail: &str) -> String {
+    let lower = detail.to_lowercase();
+    if lower.contains("not logged in")
+        || lower.contains("not authenticated")
+        || lower.contains("/login")
+        || lower.contains("credentials")
+        || lower.contains("invalid api key")
+    {
+        format!(
+            "Claude Code is not signed in ({detail}). In a terminal run: \
+             podman exec -it freeco-claude claude setup-token -- then paste the \
+             token into the FreEco chat; it is stored as CLAUDE_CODE_OAUTH_TOKEN."
+        )
+    } else if detail.is_empty() {
+        format!("Claude Code exited with code {code} without saying why.")
+    } else {
+        format!("Claude Code exited with code {code}: {detail}")
+    }
+}
+
+/// The `result` text of a JSON reply, when the CLI put its error there.
+fn result_text(stdout: &str) -> Option<String> {
+    stdout.lines().rev().find_map(|line| {
+        let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        v.get("result")?.as_str().map(str::to_string)
+    })
 }
 
 #[async_trait]
@@ -518,13 +601,7 @@ impl LlmDriver for ClaudeCodeDriver {
         debug!(cli = %self.cli_path, skip_permissions = self.skip_permissions, "Spawning Claude Code CLI");
 
         // Spawn child process instead of cmd.output() so we can track PID and timeout
-        let mut child = cmd.spawn().map_err(|e| {
-            LlmError::Http(format!(
-                "Claude Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @anthropic-ai/claude-code && claude auth",
-                e
-            ))
-        })?;
+        let mut child = cmd.spawn().map_err(|e| self.spawn_error(e))?;
 
         Self::feed_stdin(&mut child, input);
 
@@ -595,10 +672,11 @@ impl LlmDriver for ClaudeCodeDriver {
             let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
             let stdout_str = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
             let detail = if !stderr.is_empty() {
-                &stderr
+                stderr
             } else {
-                &stdout_str
+                result_text(&stdout_str).unwrap_or(stdout_str)
             };
+            let detail = &detail;
             let code = status.code().unwrap_or(1);
 
             warn!(
@@ -609,13 +687,7 @@ impl LlmDriver for ClaudeCodeDriver {
             );
 
             // Provide actionable error messages
-            let message = if detail.contains("not authenticated")
-                || detail.contains("auth")
-                || detail.contains("login")
-                || detail.contains("credentials")
-            {
-                format!("Claude Code CLI is not authenticated. Run: claude auth\nDetail: {detail}")
-            } else if detail.contains("permission")
+            let message = if detail.contains("permission")
                 || detail.contains("--dangerously-skip-permissions")
             {
                 format!(
@@ -623,7 +695,7 @@ impl LlmDriver for ClaudeCodeDriver {
                      Run: claude --dangerously-skip-permissions (once to accept)\nDetail: {detail}"
                 )
             } else {
-                format!("Claude Code CLI exited with code {code}: {detail}")
+                failure_message(code, detail)
             };
 
             return Err(LlmError::Api {
@@ -679,13 +751,7 @@ impl LlmDriver for ClaudeCodeDriver {
 
         debug!(cli = %self.cli_path, "Spawning Claude Code CLI (streaming)");
 
-        let mut child = cmd.spawn().map_err(|e| {
-            LlmError::Http(format!(
-                "Claude Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @anthropic-ai/claude-code && claude auth",
-                e
-            ))
-        })?;
+        let mut child = cmd.spawn().map_err(|e| self.spawn_error(e))?;
 
         // Track PID
         Self::feed_stdin(&mut child, input);
@@ -705,6 +771,7 @@ impl LlmDriver for ClaudeCodeDriver {
         let mut lines = reader.lines();
 
         let mut full_text = String::new();
+        let mut error_result: Option<String> = None;
         let mut final_usage = TokenUsage {
             input_tokens: 0,
             output_tokens: 0,
@@ -746,6 +813,12 @@ impl LlmDriver for ClaudeCodeDriver {
                                 }
                             }
                             "result" | "done" | "complete" => {
+                                // A failure ("Not logged in") is the error,
+                                // not the reply: keep it out of the chat text.
+                                if event.is_error {
+                                    error_result = event.result.clone();
+                                    continue;
+                                }
                                 if let Some(ref result) = event.result {
                                     if full_text.is_empty() {
                                         full_text = result.clone();
@@ -825,16 +898,14 @@ impl LlmDriver for ClaudeCodeDriver {
                 stderr = %stderr_text,
                 "Claude Code CLI streaming subprocess exited with error"
             );
+            let detail = if stderr_text.is_empty() {
+                error_result.unwrap_or_default()
+            } else {
+                stderr_text
+            };
             return Err(LlmError::Api {
                 status: code as u16,
-                message: format!(
-                    "Claude Code CLI streaming exited with code {code}: {}",
-                    if stderr_text.is_empty() {
-                        "no stderr"
-                    } else {
-                        &stderr_text
-                    }
-                ),
+                message: failure_message(code, &detail),
             });
         }
 
@@ -1008,6 +1079,22 @@ mod tests {
         assert_eq!(
             ClaudeCodeDriver::model_flag("custom-model"),
             Some("custom-model".to_string())
+        );
+    }
+
+    /// A versioned model with an effort becomes `--model <name> --effort <level>`.
+    #[test]
+    fn version_and_effort_reach_the_cli() {
+        let id = "claude-code/claude-opus-5-5@xhigh";
+        assert_eq!(
+            ClaudeCodeDriver::model_flag(id),
+            Some("claude-opus-5-5".to_string())
+        );
+        assert_eq!(ClaudeCodeDriver::effort_flag(id), Some("xhigh"));
+        assert_eq!(ClaudeCodeDriver::effort_flag("claude-code/opus"), None);
+        assert_eq!(
+            ClaudeCodeDriver::effort_flag("claude-code/opus@turbo"),
+            None
         );
     }
 

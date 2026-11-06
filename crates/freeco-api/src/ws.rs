@@ -394,7 +394,11 @@ pub async fn agent_ws(
     }
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    // Room for a 16 MB message plus its JSON envelope in one frame.
+    let room = crate::routes::MAX_MESSAGE_BYTES + 1024 * 1024;
+    ws.max_frame_size(room)
+        .max_message_size(room)
+        .on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
         .into_response()
 }
 
@@ -505,10 +509,13 @@ async fn handle_agent_ws(
             }
             _ = tokio::time::sleep(WS_IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
                 info!(agent_id = %id_str, "WebSocket idle timeout (30 min)");
+                // Its own type, not "error": closing an unused socket is
+                // housekeeping. The dashboard reconnects without telling the
+                // user, who otherwise saw a failure in a chat that had none.
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
-                        "type": "error",
+                        "type": "idle_timeout",
                         "content": "Connection closed due to inactivity (30 min timeout)",
                     }),
                 ).await;
@@ -528,14 +535,15 @@ async fn handle_agent_ws(
             Message::Text(text) => {
                 last_activity = std::time::Instant::now();
 
-                // SECURITY: Reject oversized WebSocket messages (64KB max)
-                const MAX_WS_MSG_SIZE: usize = 64 * 1024;
-                if text.len() > MAX_WS_MSG_SIZE {
+                // SECURITY: Reject oversized WebSocket messages. Long ones are
+                // accepted and kept in the agent's workspace (see
+                // `stage_long_message`); the cap only guards memory.
+                if text.len() > crate::routes::MAX_MESSAGE_BYTES {
                     let _ = send_json(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
-                            "content": "Message too large (max 64KB)",
+                            "content": "Message too large (max 16 MB)",
                         }),
                     )
                     .await;
@@ -648,7 +656,7 @@ async fn handle_text_message(
             // Resolve file attachments into image content blocks
             let mut has_images = false;
             let mut ws_content_blocks: Option<Vec<freeco_types::message::ContentBlock>> = None;
-            let mut content = content;
+            let mut content = crate::routes::stage_long_message(&state.kernel, agent_id, &content);
             if let Some(attachments) = parsed["attachments"].as_array() {
                 let refs: Vec<crate::types::AttachmentRef> = attachments
                     .iter()
@@ -701,6 +709,69 @@ async fn handle_text_message(
                 }
             }
 
+            // Where this message goes. Without these fields it goes to the
+            // agent's current conversation, as before.
+            //   session_id   -- that conversation of this agent
+            //   new_session  -- a new conversation, named `title`
+            //   parallel     -- if the agent is busy, a worker copy takes it
+            //                   in a new conversation instead of waiting
+            let mut target = agent_id;
+            let mut pinned = parsed["session_id"]
+                .as_str()
+                .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                .map(freeco_types::agent::SessionId);
+            let mut new_session = parsed["new_session"].as_bool().unwrap_or(false);
+            let title = parsed["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.chars().take(60).collect::<String>());
+            if parsed["parallel"].as_bool().unwrap_or(false)
+                && pinned.is_none()
+                && state.kernel.is_busy(agent_id)
+            {
+                if let Ok(Some(worker)) = state.kernel.worker_for(agent_id) {
+                    target = worker;
+                    new_session = true;
+                    let name = state
+                        .kernel
+                        .registry
+                        .get(worker)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default();
+                    let _ = send_json(
+                        sender,
+                        &serde_json::json!({
+                            "type": "delegated",
+                            "agent_id": worker.to_string(),
+                            "agent_name": name,
+                        }),
+                    )
+                    .await;
+                }
+            }
+            if new_session && pinned.is_none() {
+                match state.kernel.create_agent_session(target, title.as_deref()) {
+                    Ok(v) => {
+                        pinned = v["session_id"]
+                            .as_str()
+                            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                            .map(freeco_types::agent::SessionId);
+                        let _ = send_json(
+                            sender,
+                            &serde_json::json!({
+                                "type": "session",
+                                "agent_id": target.to_string(),
+                                "session_id": v["session_id"],
+                                "label": v["label"],
+                            }),
+                        )
+                        .await;
+                    }
+                    Err(e) => warn!(agent_id = %target, "Could not start a new conversation: {e}"),
+                }
+            }
+
             // Send typing lifecycle: start
             let _ = send_json(
                 sender,
@@ -714,14 +785,24 @@ async fn handle_text_message(
             // Send message to agent with streaming
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
-            match state.kernel.send_message_streaming(
-                agent_id,
-                &content,
-                Some(kernel_handle),
-                None,
-                None,
-                ws_content_blocks,
-            ) {
+            let started = match pinned {
+                Some(sid) => state.kernel.send_message_streaming_in_session(
+                    target,
+                    sid,
+                    &content,
+                    Some(kernel_handle),
+                    ws_content_blocks,
+                ),
+                None => state.kernel.send_message_streaming(
+                    target,
+                    &content,
+                    Some(kernel_handle),
+                    None,
+                    None,
+                    ws_content_blocks,
+                ),
+            };
+            match started {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing.
                     //
@@ -1418,8 +1499,17 @@ fn classify_streaming_error(err: &freeco_kernel::error::KernelError) -> String {
     if inner.contains("Agent not found") {
         return "Agent not found. It may have been stopped or deleted.".to_string();
     }
+    // FreEco's own limits explain themselves: which one, when it lifts, and
+    // where to change it. Compacting does not lift any of them.
+    if let freeco_kernel::error::KernelError::Freeco(
+        freeco_types::error::FreecoError::QuotaExceeded(why),
+    ) = err
+    {
+        return why.clone();
+    }
     if inner.contains("quota") || inner.contains("Quota") {
-        return "Token quota exceeded. Try /compact or /new to free up space.".to_string();
+        return "A usage limit was reached. Check Settings → Budget, or wait and try again."
+            .to_string();
     }
 
     // Use the LLM error classifier for everything else

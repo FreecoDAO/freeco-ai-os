@@ -562,7 +562,11 @@ tr:hover td { background: var(--surface2); }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  overflow: hidden;
+  /* A long list ran off the bottom of the screen with no way to reach its
+     end: the box had no height limit and hid its overflow. */
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .session-dropdown-header {
   display: flex;
@@ -570,6 +574,11 @@ tr:hover td { background: var(--surface2); }
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
+  /* Stays in view, with "+ New", while the list scrolls. */
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
 }
 .session-item {
   display: flex;
@@ -3713,8 +3722,8 @@ html.widget-mode .freeco-x { display: none !important; }
   background: #c1121f; color: #fff; border: 3px solid #fff;
   font-weight: 800; font-size: 12px; letter-spacing: .5px;
   display: flex; align-items: center; justify-content: center;
-  /* Octagon, like a real STOP sign — recognisable at a glance. */
-  clip-path: polygon(30% 0,70% 0,100% 30%,100% 70%,70% 100%,30% 100%,0 70%,0 30%);
+  /* Round, as the owner chose; the red and the word keep it recognisable. */
+  border-radius: 50%;
   box-shadow: 0 8px 24px rgba(0,0,0,.3);
   transition: transform .15s, background .15s;
 }
@@ -3789,7 +3798,9 @@ html.widget-mode .freeco-x { display: none !important; }
   padding: 8px; border-bottom: 1px solid var(--border);
 }
 .freeco-history-foot { border-bottom: none; border-top: 1px solid var(--border); }
-.freeco-history-list { overflow-y: auto; flex: 1; }
+/* min-height: 0 lets the list shrink inside the panel and scroll; without it
+   a flex child keeps its full height and the end of the list is cut off. */
+.freeco-history-list { overflow-y: auto; flex: 1; min-height: 0; }
 .freeco-history-item {
   display: flex; align-items: center; gap: 4px;
   padding: 2px 6px; border-bottom: 1px solid var(--border-subtle, transparent);

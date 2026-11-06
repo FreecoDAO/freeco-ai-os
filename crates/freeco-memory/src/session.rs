@@ -479,6 +479,61 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// An agent's most recent conversations, each with what it is about: its
+    /// label and the last thing the user asked in it.
+    ///
+    /// For the dispatcher, which has to know where work already lives. A
+    /// label alone is often missing on older conversations, and the last
+    /// request says what the thread is doing now.
+    pub fn recent_session_topics(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, messages, created_at, label FROM sessions WHERE agent_id = ?1 \
+                 ORDER BY created_at DESC LIMIT ?2",
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                |row| {
+                    let session_id: String = row.get(0)?;
+                    let blob: Vec<u8> = row.get(1)?;
+                    let created_at: String = row.get(2)?;
+                    let label: Option<String> = row.get(3)?;
+                    let messages = rmp_serde::from_slice::<Vec<Message>>(&blob).unwrap_or_default();
+                    let last_user = messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == freeco_types::message::Role::User)
+                        .map(|m| m.content.text_content())
+                        .find(|t| !t.trim().is_empty())
+                        .map(|t| t.chars().take(160).collect::<String>())
+                        .unwrap_or_default();
+                    Ok(serde_json::json!({
+                        "session_id": session_id,
+                        "message_count": messages.len(),
+                        "created_at": created_at,
+                        "label": label,
+                        "last_user": last_user,
+                    }))
+                },
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| FreecoError::Memory(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// Create a new session with an optional label.
     pub fn create_session_with_label(
         &self,

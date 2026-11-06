@@ -250,13 +250,19 @@ pub async fn build_router(
             "/api/agents/{id}/activate",
             axum::routing::post(routes::restart_agent),
         )
+        // Above the 2 MB default body limit, so a long paste reaches the
+        // handler, which keeps it in the agent's workspace.
         .route(
             "/api/agents/{id}/message",
-            axum::routing::post(routes::send_message),
+            axum::routing::post(routes::send_message).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_MESSAGE_BYTES + 1024 * 1024,
+            )),
         )
         .route(
             "/api/agents/{id}/message/stream",
-            axum::routing::post(routes::send_message_stream),
+            axum::routing::post(routes::send_message_stream).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/agents/{id}/session",
@@ -294,6 +300,16 @@ pub async fn build_router(
         .route(
             "/api/sessions/route",
             axum::routing::post(routes::route_session),
+        )
+        .route(
+            "/api/dispatch",
+            axum::routing::post(crate::dispatch::dispatch),
+        )
+        .route(
+            "/api/transcribe",
+            axum::routing::post(routes::transcribe_only).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_UPLOAD_SIZE + 1024 * 1024),
+            ),
         )
         .route(
             "/api/agents/{id}/model",
@@ -337,7 +353,11 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/upload",
-            axum::routing::post(routes::upload_file),
+            // Above the 2 MB default, which refused most documents and
+            // videos (from the dashboard and from WhatsApp) with a 413.
+            axum::routing::post(routes::upload_file).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_UPLOAD_SIZE + 1024 * 1024,
+            )),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         // Upload serving
@@ -411,6 +431,7 @@ pub async fn build_router(
             "/api/schedules/{id}/delivery-log",
             axum::routing::get(routes::schedule_delivery_log),
         )
+        .route("/api/runs/history", axum::routing::get(routes::run_history))
         // Workflow endpoints
         .route(
             "/api/workflows",
@@ -648,6 +669,18 @@ pub async fn build_router(
             axum::routing::get(crate::org_routes::list_teams).post(crate::org_routes::create_team),
         )
         .route(
+            "/api/org/teams/{id}/members",
+            axum::routing::put(crate::org_routes::set_team_member),
+        )
+        .route(
+            "/api/org/teams/{id}/members/{agent_id}",
+            axum::routing::delete(crate::org_routes::remove_team_member),
+        )
+        .route(
+            "/api/org/changes",
+            axum::routing::get(crate::org_routes::changes),
+        )
+        .route(
             "/api/org/projects/{id}/sessions",
             axum::routing::get(crate::org_routes::project_sessions),
         )
@@ -720,7 +753,11 @@ pub async fn build_router(
         // Secrets typed into a chat: found before sending, kept in the vault.
         .route(
             "/api/gateway/scan",
-            axum::routing::post(crate::secret_guard::scan),
+            // A long paste is scanned too, or a key inside it is not offered
+            // to the vault.
+            axum::routing::post(crate::secret_guard::scan).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/vault/secrets",
@@ -1369,8 +1406,14 @@ fn start_backup_scheduler(
             }
             // The archive above covers ~/.freeco-ai only. Service data lives in
             // container volumes, which it never reached -- so it is saved here,
-            // on the same schedule and with the same retention.
-            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+            // on the same schedule. Its retention is lower: one run can be
+            // gigabytes, where an archive is megabytes.
+            match crate::service_backup::export_service_data(
+                &backups_dir,
+                crate::service_backup::RETENTION_RUNS,
+            )
+            .await
+            {
                 Ok(r) => info!(
                     directory = %r.directory,
                     saved = r.saved.len(),

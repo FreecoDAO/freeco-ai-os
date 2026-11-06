@@ -78,6 +78,20 @@ pub trait KernelHandle: Send + Sync {
         Err("Agent activation not available".to_string())
     }
 
+    /// Run `task` on a worker copy of `caller_id` and return its reply; the
+    /// worker sleeps afterwards.
+    async fn delegate_to_worker(&self, caller_id: &str, task: &str) -> Result<String, String> {
+        let _ = (caller_id, task);
+        Err("Delegation not available".to_string())
+    }
+
+    /// Put an agent to sleep: no background loop, no scheduled work, no
+    /// tokens, until a message or `activate_agent` wakes it.
+    fn sleep_agent(&self, agent_id: &str) -> Result<String, String> {
+        let _ = agent_id;
+        Err("Agent sleep not available".to_string())
+    }
+
     /// Store a value in shared memory (cross-agent accessible).
     /// The data gateway, when one is configured.
     ///

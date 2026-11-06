@@ -141,8 +141,32 @@ function schedulerPage() {
       this.trigLoading = false;
     },
 
+    // Every recorded unattended run (schedules, triggers, background ticks),
+    // from the server's run log. The page used to build this from each job's
+    // last run and each trigger's counter: one line per job at most, nothing
+    // for background loops, and never a failure.
     async loadHistory() {
       this.historyLoading = true;
+      try {
+        var data = await FreecoAPI.get('/api/runs/history');
+        var runs = (data && data.runs) || [];
+        if (runs.length) {
+          this.history = runs.map(function (r) {
+            return {
+              timestamp: r.timestamp,
+              name: (r.agent_name ? r.agent_name + ' — ' : '') + (r.name || r.source),
+              type: r.source === 'background' ? 'background' : (r.source === 'trigger' ? 'trigger' : 'schedule'),
+              status: r.status,
+              error: r.error || '',
+              duration_ms: r.duration_ms || 0,
+              tokens: r.tokens || 0,
+              run_count: 0
+            };
+          });
+          this.historyLoading = false;
+          return;
+        }
+      } catch (e) { /* older daemon: fall back to the summary below */ }
       try {
         var historyItems = [];
         var jobs = this.jobs || [];

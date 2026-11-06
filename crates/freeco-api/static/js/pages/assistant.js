@@ -64,7 +64,7 @@ function freecoAssistant() {
     // be caught and stopped instead of running to completion in silence
     steps: [],             // { text, kind: 'phase'|'tool'|'note' }
     showSteps: false,     // opens while the agent works, collapses when it is done
-    _wsAgentId: null,
+    _sock: null,
     awaitingConfirm: false,  // voice transcript is in the box, waiting for review
     queued: [],              // messages typed while a reply was still streaming
     approvals: [],           // permission requests, answered inline in this chat
@@ -90,6 +90,15 @@ function freecoAssistant() {
 
     init: function() {
       var self = this;
+      // The unsent draft survives closing the popup, changing page or a
+      // reload; it was lost with the component.
+      try { if (!this.input) this.input = localStorage.getItem('freeco-draft:popup') || ''; } catch (e) { /* no storage */ }
+      this.$watch('input', function(val) {
+        try {
+          if (val && val.trim()) localStorage.setItem('freeco-draft:popup', val);
+          else localStorage.removeItem('freeco-draft:popup');
+        } catch (e) { /* no storage */ }
+      });
       // The working log follows the work: open while the agent is running, so
       // the current step is visible, and collapsed once it is done, so a
       // finished task leaves the conversation rather than its tool output on
@@ -338,6 +347,35 @@ function freecoAssistant() {
         }
       } catch (e) { this.models = []; }
       return this.models;
+    },
+
+    modelPanel: false,
+    modelQuery: '',
+
+    async openModelPanel() {
+      this.modelQuery = '';
+      this.modelPanel = true;
+      if (!this.models.length) await this.loadModels();
+      this.$nextTick(function () { var el = document.getElementById('freeco-model-search'); if (el) el.focus(); });
+    },
+
+    // Every word of the query must appear in the name, id or provider.
+    filteredModels() {
+      var words = (this.modelQuery || '').toLowerCase().split(/\s+/).filter(Boolean);
+      var list = this.models;
+      if (words.length) {
+        list = list.filter(function (m) {
+          var hay = ((m.label || '') + ' ' + m.id + ' ' + (m.provider || '')).toLowerCase();
+          return words.every(function (w) { return hay.indexOf(w) !== -1; });
+        });
+      }
+      return list.slice(0, 80);
+    },
+
+    currentModelLabel() {
+      var id = this.currentModel;
+      var m = this.models.find(function (x) { return x.id === id; });
+      return m ? (m.label || m.id) : (id || 'choose a model');
     },
 
     toggleModels: function () {
@@ -736,17 +774,11 @@ function freecoAssistant() {
       // `sending === false` and a second Enter ran the whole path again. Every
       // extra press sent another copy of the message to the agent, and the
       // pause that invited those presses was the router call itself.
-      if (this.sending || this._starting) {
-        this.queued.push({ text: text, atts: atts });
-        this.messages.push({
-          id: ++mId, role: 'system', ts: Date.now(),
-          html: 'Queued: ' + this._escape(text) + ' <span class="text-dim">(sends when the current task finishes — or press Stop)</span>'
-        });
-        this.input = '';
-        this.attachments = [];
-        this._scroll();
-        return;
-      }
+      //
+      // No queue any more: every message is dispatched and runs on its own,
+      // in parallel with whatever is already running. Only the moment between
+      // Enter and the bubble appearing is guarded, against a double press.
+      if (this._starting) return;
       this._starting = true;
       if (!this.agent) { this._resolveAgent(); }
       if (!this.agent) {
@@ -786,58 +818,180 @@ function freecoAssistant() {
       // Keyed on the transcript, not on sessionId: that is only set when a past
       // conversation is opened from history, so it is null through all normal
       // chatting and a check on it would never fire.
-      var verdict = null;
-      var candidates = [];
-      // Only when a new topic is plausible: the router is a model call that
-      // took 3-11 s, and asking it before every message made each one hang.
-      // A short message, or one within three minutes of the last, is a
-      // follow-up and goes straight through.
-      var lastTs = 0;
-      for (var li = this.messages.length - 1; li >= 0; li--) {
-        if (this.messages[li].ts) { lastTs = this.messages[li].ts; break; }
-      }
-      var maybeNewTopic = this.messages.length && text.trim().length >= 25 &&
-        (!lastTs || Date.now() - lastTs > 3 * 60 * 1000);
-      if (maybeNewTopic) {
-        try {
-          var recent = this.messages.slice(-6).map(function (m) {
-            return (m.role === 'user' ? 'User: ' : 'Assistant: ') + (m.raw || this._strip(m.html || ''));
-          }.bind(this)).join('\n').slice(-2000);
-          // Both questions at once: is this a new task, and does a conversation
-          // about it already exist somewhere. They are independent, and asking
-          // them in sequence doubles the pause before anything happens.
-          // Capped at three seconds: past that, it is sent here.
-          var answers = await Promise.race([
-            Promise.all([
-              FreecoAPI.post('/api/sessions/route', { message: text, context: recent }).catch(function () { return null; }),
-              FreecoAPI.get('/api/sessions/search?limit=3&q=' + encodeURIComponent(text)).catch(function () { return null; })
-            ]),
-            new Promise(function (resolve) { setTimeout(function () { resolve([null, null]); }, 3000); })
-          ]);
-          verdict = answers[0];
-          candidates = ((answers[1] && answers[1].results) || []).filter(function (c) {
-            // A thread this same agent already owns is "here", not elsewhere.
-            return !this.agent || c.agent_id !== this.agent.id;
-          }.bind(this));
-        } catch (e) { /* stay in this session */ }
-      }
+      this._starting = false;
+      // The CEO's dispatcher decides where this belongs: here, an existing
+      // conversation with whichever agent holds that work, or a new task with
+      // the right agent. It used to ask only "new topic or not", and only
+      // for long messages, then deliver to the agent's current conversation
+      // -- whichever chat had been used last -- so new tasks piled into it.
+      //
+      // On a timeout or any failure, it stays here.
+      var recent = this.messages.slice(-7, -1).map(function (m) {
+        return (m.role === 'user' ? 'User: ' : 'Assistant: ') + (m.raw || this._strip(m.html || ''));
+      }.bind(this)).join('\n').slice(-2000);
+      var decision = null;
+      try {
+        decision = await Promise.race([
+          // Routed by the CEO itself, among the CEO's own conversations, with
+          // the CEO's model -- which can take several seconds, so the cap is
+          // twelve rather than four, past which it simply stays here.
+          FreecoAPI.post('/api/dispatch', {
+            message: text, context: recent, current_session_id: this.sessionId || '',
+            agent_id: (this.agent && this.agent.id) || ''
+          }).catch(function () { return null; }),
+          new Promise(function (resolve) { setTimeout(function () { resolve(null); }, 12000); })
+        ]);
+      } catch (e) { decision = null; }
+      if (!decision || !decision.action) decision = { action: 'here' };
 
-      // Where the work already lives is the user's decision, not a guess made
-      // on their behalf. Ask only when there is a real alternative: an existing
-      // conversation on the subject, or a task unrelated to this thread. A
-      // plain follow-up goes where it already was, with no interruption.
-      if (candidates.length || (verdict && verdict.new_session)) {
-        this._proposeDestination(sentMsg, text, atts, verdict, candidates);
-        this._starting = false;
+      // Creating a project, company, team or hand is tedious to undo, so
+      // that one is asked rather than done.
+      if (decision.action === 'propose') {
+        this._proposeDestination(sentMsg, text, atts,
+          { title: decision.title, new_session: true, reason: decision.reason }, []);
         return;
       }
+      this._deliver(decision, text, atts, sentMsg);
+    },
 
-      // Starting a new session clears the thread, which would take the message
-      // with it: put it back so the user always sees what they just sent.
-      if (this.messages.indexOf(sentMsg) === -1) {
-        this.messages.push(sentMsg);
+    // ---- Delivery: one per message, each on its own connection ----
+    //
+    // A message is delivered where the dispatcher (or the user) chose, on a
+    // socket of its own, and its reply streams into a bubble of its own. Any
+    // number run at once; nothing waits for anything else.
+    _deliveries: 0,
+
+    _deliver: function (decision, text, atts, sentMsg) {
+      var self = this;
+      var a = decision.action;
+      var agentId = decision.agent_id || (this.agent && this.agent.id);
+      if (!agentId) return;
+      var agentName = decision.agent_name || (this.agent && this.agent.name) || 'agent';
+      var mine = this.agent && agentId === this.agent.id;
+      if (sentMsg) sentMsg.pending = false;
+
+      var payload = { type: 'message', content: text || '(see attached)', parallel: true };
+      if (atts && atts.length) payload.attachments = atts.map(function (x) { return x.name; });
+      if (a === 'session' && decision.session_id) {
+        payload.session_id = decision.session_id;
+      } else if (a === 'new_task') {
+        payload.new_session = true;
+        payload.title = decision.title || text.split('\n')[0].slice(0, 60);
+      } else if (a === 'here' && mine) {
+        // The popup keeps a conversation of its own. Without one yet it
+        // starts one, rather than writing into whichever chat the agent's
+        // own page has open.
+        if (this.sessionId) payload.session_id = this.sessionId;
+        else { payload.new_session = true; payload.title = decision.title || ''; }
       }
-      await this._deliverHere(text, atts);
+
+      // Say where it went, unless it simply continued here.
+      if (a !== 'here' || !mine) {
+        var where = a === 'session' ? ('the “' + (decision.title || 'existing') + '” conversation')
+                  : a === 'new_task' ? ('a new conversation “' + (payload.title || 'new task') + '”')
+                  : 'its current conversation';
+        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
+          html: '→ <strong>' + this._escape(agentName) + '</strong>, ' + this._escape(where) +
+                (decision.reason ? ' <span class="text-dim">— ' + this._escape(decision.reason) + '</span>' : '') +
+                ' <a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-open-agent\',{detail:' +
+                JSON.stringify(agentId).replace(/"/g, '&quot;') + '}));return false;">Open that chat</a>' });
+      }
+      // New work also goes on the task board, where it can be found later.
+      if (a === 'new_task') {
+        FreecoAPI.post('/api/agents/' + agentId + '/tasks',
+          { title: payload.title, description: text }).catch(function () {});
+      }
+
+      var d = { agentId: agentId, agentName: agentName, mine: mine, raw: '', done: false,
+                bubble: { id: ++mId, role: 'freeco', ts: Date.now(), html: '<span class="freeco-typing">• • •</span>', thinking: true } };
+      this.messages.push(d.bubble);
+      this._live = (this._live || []).filter(function (x) { return !x.done; });
+      this._live.push(d);
+      this._deliveries++;
+      this.sending = true;
+      this._scroll();
+
+      if (!FreecoAPI.agentSocket) { this._deliverByPost(d, payload); return; }
+      d.sock = FreecoAPI.agentSocket(agentId, {
+        onMessage: function (ev) { self._onDeliveryEvent(d, ev); },
+        onClose: function () { if (!d.done) self._finishDelivery(d, '', 'The connection closed before a reply.'); }
+      });
+      if (!d.sock.send(payload)) { d.sock.close(); this._deliverByPost(d, payload); }
+    },
+
+    // Without a socket: the blocking request, same destination.
+    _deliverByPost: async function (d, payload) {
+      try {
+        if (payload.session_id) {
+          await FreecoAPI.post('/api/agents/' + d.agentId + '/sessions/' + payload.session_id + '/switch', {});
+        }
+        var body = { message: payload.content };
+        if (payload.attachments) body.attachments = payload.attachments;
+        var res = await FreecoAPI.post('/api/agents/' + d.agentId + '/message', body);
+        this._finishDelivery(d, (res && res.response) || '(no reply)');
+      } catch (e) {
+        this._finishDelivery(d, '', e.message || 'request failed');
+      }
+    },
+
+    _onDeliveryEvent: function (d, ev) {
+      var t = ev && ev.type;
+      if (t === 'session') {
+        // The popup's own conversation now exists: follow-ups go there.
+        if (d.mine && ev.session_id) this.sessionId = ev.session_id;
+        return;
+      }
+      if (t === 'delegated') {
+        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
+          html: this._escape(d.agentName) + ' is busy, so <strong>' + this._escape(ev.agent_name || 'a worker') +
+                '</strong> took this in parallel; it sleeps again when done.' });
+        this._scroll();
+        return;
+      }
+      if (t === 'phase') {
+        if (ev.phase && ev.phase !== 'done') this._step(ev.phase + (ev.detail ? ': ' + ev.detail : ''), 'phase');
+        return;
+      }
+      if (t === 'tool_start') { this._step('running ' + (ev.tool || 'tool'), 'tool'); return; }
+      if (t === 'tool_end' || t === 'tool_result') {
+        if (ev.tool) this._step('finished ' + ev.tool + (ev.is_error ? ' (failed)' : ''), 'tool');
+        return;
+      }
+      if (t === 'text_delta') {
+        d.raw += (ev.text || ev.delta || '');
+        d.bubble.thinking = false;
+        d.bubble.html = this._md(d.raw);
+        this.messages = this.messages.slice();
+        this._scroll();
+        return;
+      }
+      if (t === 'response' || t === 'message' || t === 'silent_complete') {
+        this._finishDelivery(d, ev.content || ev.response || d.raw);
+        return;
+      }
+      if (t === 'error') {
+        this._finishDelivery(d, '', ev.content || ev.message || ev.error || 'unknown error');
+      }
+    },
+
+    _finishDelivery: function (d, reply, error) {
+      if (d.done) return;
+      d.done = true;
+      if (d.sock) { try { d.sock.close(); } catch (e) { /* already closed */ } }
+      d.bubble.thinking = false;
+      if (error) {
+        d.bubble.role = 'system';
+        d.bubble.html = 'Something went wrong: ' + this._escape(error);
+      } else {
+        var full = reply || d.raw || '(no reply)';
+        d.bubble.html = this._md(full);
+        if (this.voiceOut) this.speak(full);
+      }
+      this.messages = this.messages.slice();
+      this._deliveries = Math.max(0, this._deliveries - 1);
+      this.sending = this._deliveries > 0;
+      if (!this.sending) this.steps = [];
+      this._scroll();
     },
 
     // Carry an action out of this window: drag it, or copy it.
@@ -922,37 +1076,31 @@ function freecoAssistant() {
         msg: sentMsg,
         title: (verdict && verdict.title) || '',
         newTask: !!(verdict && verdict.new_session),
+        reason: (verdict && verdict.reason) || '',
         candidates: candidates.slice(0, 3)
       };
       this._scroll();
     },
 
     // Deliver where it already was.
-    routeHere: async function () {
+    routeHere: function () {
       var r = this.pendingRoute;
       if (!r) return;
       this.pendingRoute = null;
       if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
-      this.sending = true;
-      await this._deliverHere(r.text, r.atts);
+      this._deliver({ action: 'here' }, r.text, r.atts, r.msg);
     },
 
-    // A new task: on the task board for this agent, worked on in a fresh
-    // session named for it -- the same thing "New task" means in the main chat.
-    routeNewTask: async function () {
+    // A new task: on the task board, worked on in a new conversation on the
+    // server named for it. This used to clear the popup and then write into
+    // the agent's current conversation, so the "new" task joined an old one.
+    routeNewTask: function () {
       var r = this.pendingRoute;
       if (!r) return;
       this.pendingRoute = null;
-      if (this.agent && this.agent.id) {
-        var title = r.title || r.text.split('\n')[0].slice(0, 80);
-        try {
-          await FreecoAPI.post('/api/agents/' + this.agent.id + '/tasks', { title: title, description: r.text });
-        } catch (e) { /* the conversation still starts; the board is a bonus */ }
-      }
-      try { await this.startNewSession(r.title || ''); } catch (e) { /* stay put */ }
       if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
-      this.sending = true;
-      await this._deliverHere(r.text, r.atts);
+      this._deliver({ action: 'new_task', title: r.title || r.text.split('\n')[0].slice(0, 60) },
+        r.text, r.atts, r.msg);
     },
 
     // Put the message back in the box rather than losing what was typed.
@@ -974,8 +1122,12 @@ function freecoAssistant() {
     // tedious to undo and nothing here should guess at one.
     routeNewProject: function () { this._routeNewContainer('project'); },
     routeNewCompany: function () { this._routeNewContainer('company'); },
+    routeNewTeam: function () { this._routeNewContainer('team'); },
+    routeNewHand: function () { this._routeNewContainer('hand'); },
 
-    _routeNewContainer: async function (kind) {
+    // Asked of the CEO in a new conversation of its own, which it then works
+    // in: it holds the tools for each of these and checks what exists first.
+    _routeNewContainer: function (kind) {
       var r = this.pendingRoute;
       if (!r) return;
       var suggested = r.title || '';
@@ -985,129 +1137,24 @@ function freecoAssistant() {
       if (!name) return;
       this.pendingRoute = null;
       if (this.messages.indexOf(r.msg) === -1) this.messages.push(r.msg);
-      this.sending = true;
-      var instruction =
-        'Create a ' + kind + ' named "' + name + '" using your ' + kind +
-        '_create tool, then carry out the request below inside it. Tell me the ' +
-        kind + ' id you created.\n\n' + r.text;
-      await this._deliverHere(instruction, r.atts);
+      var instruction = kind === 'hand'
+        ? 'Set up a new hand (an automation) named "' + name + '" with your hand tools -- ' +
+          'check the available hands first and reuse one if it fits -- then carry out the ' +
+          'request below with it. Tell me what you activated.\n\n' + r.text
+        : 'Create a ' + kind + ' named "' + name + '" with the right tool (check first that ' +
+          'it does not exist already), then carry out the request below inside it. Tell me the ' +
+          kind + ' id.\n\n' + r.text;
+      this._deliver({ action: 'new_task', title: name }, instruction, r.atts, r.msg);
     },
 
     // Deliver into another agent's conversation, and leave a way to follow it.
-    routeToThread: async function (c) {
+    routeToThread: function (c) {
       var r = this.pendingRoute;
       if (!r) return;
       this.pendingRoute = null;
-      var self = this;
-      var where = this._escape((c.label || 'conversation') + ' — ' + (c.agent_name || 'agent'));
-      var thinking = { id: ++mId, role: 'system', ts: Date.now(), thinking: true,
-                       html: 'Sending to ' + where + ' <span class="freeco-typing">• • •</span>' };
-      this.messages.push(thinking);
-      this._scroll();
-      try {
-        var payload = { message: r.text || '(see attached)' };
-        if (r.atts && r.atts.length) payload.attachments = r.atts.map(function (a) { return a.name; });
-        var res = await FreecoAPI.post('/api/agents/' + c.agent_id + '/message', payload);
-        this.messages = this.messages.filter(function (m) { return m !== thinking; });
-        if (r.msg) r.msg.pending = false;
-        var reply = (res && res.response) ? String(res.response) : '';
-        this.messages.push({
-          id: ++mId, role: 'system', ts: Date.now(),
-          html: 'Sent to <strong>' + where + '</strong>. ' +
-                '<a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-open-agent\',{detail:' +
-                JSON.stringify(c.agent_id) + '}));return false;">Open that chat</a>'
-        });
-        if (reply) {
-          this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(reply) });
-          if (this.voiceOut) this.speak(reply);
-        }
-      } catch (e) {
-        this.messages = this.messages.filter(function (m) { return m !== thinking; });
-        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
-          html: 'Could not send to ' + where + ': ' + self._escape(e.message || 'request failed') });
-      }
-      this._scroll();
-      this.$nextTick(function () { var el = document.getElementById('freeco-input'); if (el) el.focus(); });
-    },
-
-    // Send to the agent this popup is talking to, and render the reply.
-    //
-    // Split out of `send` so choosing a destination and delivering a message
-    // are separate steps: the proposal buttons deliver exactly the way an
-    // uninterrupted message does, rather than repeating the logic.
-    _deliverHere: async function(text, atts) {
-      this.sending = true;
-      this._starting = false;
-      this.awaitingConfirm = false;
-      this.steps = [];
-      var thinking = { id: ++mId, role: 'freeco', ts: Date.now(), html: '<span class="freeco-typing">• • •</span>', thinking: true };
-      this.messages.push(thinking);
-      this._scroll();
-
-      // Prefer the WebSocket: it streams text as it is generated and reports
-      // every tool the agent runs, so the user can watch the work and stop it.
-      // The blocking POST below stays as a fallback for when WS is unavailable.
-      if (this._openStream(text, atts)) return;
-
-      try {
-        var payload = { message: text || '(see attached)' };
-        if (atts.length) payload.attachments = atts.map(function(a) { return a.name; });
-        var res = await FreecoAPI.post('/api/agents/' + this.agent.id + '/message', payload);
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        var reply = res.response || '(no reply)';
-        this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(reply) });
-        if (this.voiceOut) this.speak(reply);
-        this._applySessionTitle();
-      } catch (e) {
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        var msg = (e.message || 'request failed').toLowerCase();
-        var friendly;
-        // The most common cause on a fresh install: the default model points at
-        // a local Ollama model that is not installed yet, or no cloud key is set.
-        if (msg.indexOf('server error') !== -1 || msg.indexOf('connection') !== -1 ||
-            msg.indexOf('model') !== -1 || msg.indexOf('11434') !== -1 || msg.indexOf('ollama') !== -1) {
-          friendly = 'I couldn’t reach a language model. Two common causes: if you just changed the model, <strong>restart FreEco.ai</strong> — it reads the config at startup. Otherwise open <a href="#" onclick="window.dispatchEvent(new CustomEvent(\'freeco-navigate\',{detail:\'settings\'}));return false;">Settings → Providers</a> and either <strong>Set up free local AI</strong> (downloads Gemma 4 and runs it on this device) or add a cloud API key.';
-        } else {
-          friendly = 'Something went wrong: ' + this._escape(e.message || 'request failed');
-        }
-        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(), html: friendly });
-      }
-      this.sending = false;
-      this._scroll();
-      var self = this;
-      this.$nextTick(function() { var el = document.getElementById('freeco-input'); if (el) el.focus(); });
-    },
-
-    // ---- Live streaming: watch the work, and stop it ----
-    // Opens (or reuses) the agent WebSocket and sends the message over it.
-    // Returns true when streaming took over, false to use the blocking POST.
-    _openStream: function(text, atts) {
-      if (!this.agent || !FreecoAPI.wsConnect) return false;
-      var self = this;
-      var payload = { type: 'message', content: text || '(see attached)' };
-      if (atts && atts.length) payload.attachments = atts.map(function(a) { return a.name; });
-
-      var send = function() {
-        try { return FreecoAPI.wsSend(payload); } catch (e) { return false; }
-      };
-
-      // Already connected to this agent — just send.
-      if (this._wsAgentId === this.agent.id && FreecoAPI.isWsConnected && FreecoAPI.isWsConnected()) {
-        return send();
-      }
-
-      try {
-        FreecoAPI.wsConnect(this.agent.id, {
-          onMessage: function(ev) { self._onStreamEvent(ev); },
-          onOpen: function() { send(); },
-          onClose: function() { self._wsAgentId = null; }
-        });
-        this._wsAgentId = this.agent.id;
-        return true;
-      } catch (e) {
-        this._wsAgentId = null;
-        return false;
-      }
+      this._deliver({ action: c.session_id ? 'session' : 'agent', agent_id: c.agent_id,
+                      agent_name: c.agent_name, session_id: c.session_id, title: c.label },
+                    r.text, r.atts, r.msg);
     },
 
     _step: function(text, kind) {
@@ -1117,73 +1164,6 @@ function freecoAssistant() {
         var el = document.getElementById('freeco-steps');
         if (el) el.scrollTop = el.scrollHeight;
       });
-    },
-
-    _onStreamEvent: function(ev) {
-      var self = this;
-      var t = ev && ev.type;
-      if (t === 'phase') {
-        if (ev.phase && ev.phase !== 'done') this._step(ev.phase + (ev.detail ? ': ' + ev.detail : ''), 'phase');
-        return;
-      }
-      if (t === 'tool_start') { this._step('running ' + (ev.tool || 'tool'), 'tool'); return; }
-      if (t === 'tool_end' || t === 'tool_result') {
-        if (ev.tool) this._step('finished ' + ev.tool + (ev.is_error ? ' (failed)' : ''), 'tool');
-        return;
-      }
-      if (t === 'text_delta') {
-        // Stream into the pending bubble so words appear as they are produced.
-        var last = this.messages[this.messages.length - 1];
-        if (!last || !last.streaming) {
-          this.messages = this.messages.filter(function(m) { return !m.thinking; });
-          last = { id: ++mId, role: 'freeco', ts: Date.now(), html: '', streaming: true, raw: '' };
-          this.messages.push(last);
-        }
-        last.raw = (last.raw || '') + (ev.text || ev.delta || '');
-        last.html = this._md(last.raw);
-        this._scroll();
-        return;
-      }
-      if (t === 'response' || t === 'message' || t === 'silent_complete') {
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        var full = ev.content || ev.response || '';
-        var last2 = this.messages[this.messages.length - 1];
-        if (last2 && last2.streaming) {
-          last2.streaming = false;
-          if (full) { last2.raw = full; last2.html = this._md(full); }
-          full = last2.raw || full;
-        } else if (full) {
-          this.messages.push({ id: ++mId, role: 'freeco', ts: Date.now(), html: this._md(full) });
-        }
-        this.sending = false;
-        this.steps = [];
-        if (this.voiceOut && full) this.speak(full);
-        // The streaming path is the one that normally runs -- send() returns
-        // early when the socket opens -- so naming a new session has to happen
-        // here too, not only in the POST fallback.
-        this._applySessionTitle();
-        this._scroll();
-        this._drainQueue();
-        return;
-      }
-      if (t === 'error') {
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(),
-          html: 'Something went wrong: ' + self._escape(ev.message || ev.error || 'unknown') });
-        this.sending = false;
-        this.steps = [];
-        this._scroll();
-      }
-    },
-
-    // Send the next message the user typed while the agent was busy.
-    _drainQueue: function() {
-      if (!this.queued.length || this.sending) return;
-      var next = this.queued.shift();
-      var self = this;
-      this.input = next.text;
-      this.attachments = next.atts || [];
-      this.$nextTick(function() { self.send(); });
     },
 
     // ---- Permission requests, answered right here ----
@@ -1228,15 +1208,21 @@ function freecoAssistant() {
     },
 
     // Stop a run in progress — the whole point of showing the steps.
+    // Every delivery still running is stopped, on whichever agent it went to.
     stopRun: async function() {
-      if (!this.agent) return;
-      try {
-        await FreecoAPI.post('/api/agents/' + this.agent.id + '/stop', {});
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(), html: 'Stopped.' });
-      } catch (e) {
-        FreecoToast.error('Could not stop: ' + (e.message || 'error'));
-      }
+      var live = (this._live || []).filter(function (d) { return !d.done; });
+      var agents = {};
+      live.forEach(function (d) { agents[d.agentId] = true; });
+      if (this.agent) agents[this.agent.id] = true;
+      var failed = false;
+      await Promise.all(Object.keys(agents).map(function (id) {
+        return FreecoAPI.post('/api/agents/' + id + '/stop', {}).catch(function () { failed = true; });
+      }));
+      var self = this;
+      live.forEach(function (d) { self._finishDelivery(d, '', 'Stopped.'); });
+      if (failed) FreecoToast.error('Could not stop every agent.');
+      this._live = [];
+      this._deliveries = 0;
       this.sending = false;
       this.steps = [];
       this._scroll();
@@ -1402,6 +1388,9 @@ function freecoAssistant() {
         this.recording = true;
         this.recordingTime = 0;
         this._timer = setInterval(function() { self.recordingTime++; }, 1000);
+        this._dictationBase = (this.input || '').trim();
+        this._liveBusy = false;
+        this._liveTimer = setInterval(function() { self._liveTranscribe(); }, 2000);
       } catch (e) {
         if (typeof FreecoToast !== 'undefined') FreecoToast.error('Microphone access denied');
       }
@@ -1421,33 +1410,48 @@ function freecoAssistant() {
       this.recording = false;
       if (this._timer) { clearInterval(this._timer); this._timer = null; }
     },
+    // The words in some audio, from local speech-to-text. Nothing is stored.
+    _transcribeBlob: async function(blob) {
+      var headers = { 'Content-Type': (blob.type || 'audio/webm').split(';')[0] };
+      var token = FreecoAPI.getToken && FreecoAPI.getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      var res = await fetch('/api/transcribe', { method: 'POST', headers: headers, body: blob });
+      var data = {};
+      try { data = await res.json(); } catch (e) { /* not JSON */ }
+      if (!res.ok) throw new Error(data.error || ('transcription failed (' + res.status + ')'));
+      return (data.text || '').trim();
+    },
+
+    // Type the words into the box while the user is still speaking.
+    _liveTranscribe: async function() {
+      if (!this.recording || this._liveBusy || !this._chunks.length) return;
+      this._liveBusy = true;
+      try {
+        var said = await this._transcribeBlob(new Blob(this._chunks, { type: this._chunks[0].type || 'audio/webm' }));
+        if (this.recording && said) this.input = (this._dictationBase ? this._dictationBase + ' ' : '') + said;
+      } catch (e) { /* the final pass reports a real failure */ }
+      this._liveBusy = false;
+    },
+
     _voiceDone: async function() {
+      if (this._liveTimer) { clearInterval(this._liveTimer); this._liveTimer = null; }
       if (!this._chunks.length || !this.agent) return;
       var blob = new Blob(this._chunks, { type: this._chunks[0].type || 'audio/webm' });
       this._chunks = [];
       if (blob.size < 100) return;
-      var self = this;
-      this.messages.push({ id: ++mId, role: 'system', ts: Date.now(), html: '<span class="freeco-typing">transcribing…</span>', thinking: true });
-      this._scroll();
-      try {
-        var ext = blob.type.indexOf('webm') !== -1 ? 'webm' : blob.type.indexOf('ogg') !== -1 ? 'ogg' : 'mp3';
-        var file = new File([blob], 'voice_' + Date.now() + '.' + ext, { type: blob.type });
-        var up = await FreecoAPI.upload(this.agent.id, file);
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        var said = (up.transcription && up.transcription.trim()) ? up.transcription.trim() : '';
-        if (said) {
-          this.input = said;
-          this.send();
-        } else {
-          this.messages.push({
-            id: ++mId, role: 'system', ts: Date.now(),
-            html: this._escape(up.transcription_error || 'Could not transcribe that audio. Check your speech-to-text setup in Settings, or type instead.')
-          });
-          this._scroll();
-        }
-      } catch (e) {
-        this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        this.messages.push({ id: ++mId, role: 'system', ts: Date.now(), html: 'Voice upload failed: ' + self._escape(e.message || 'unknown') });
+      var said = '';
+      var failure = '';
+      try { said = await this._transcribeBlob(blob); } catch (e) { failure = e.message || ''; }
+      if (said) {
+        // Only the words, sent as if typed. No audio file is attached.
+        this.input = (this._dictationBase ? this._dictationBase + ' ' : '') + said;
+        this._dictationBase = '';
+        this.send();
+      } else {
+        this.messages.push({
+          id: ++mId, role: 'system', ts: Date.now(),
+          html: this._escape(failure || 'Could not transcribe that audio. Check your speech-to-text setup in Settings, or type instead.')
+        });
         this._scroll();
       }
     },

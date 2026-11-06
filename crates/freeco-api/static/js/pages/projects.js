@@ -44,6 +44,10 @@ function projectsPage() {
         this.companies = (results[1] && results[1].companies) || [];
         this.overview = (results[2] && results[2].projects) || [];
         this.teams = (results[3] && results[3].teams) || [];
+        try {
+          var ch = await FreecoAPI.get('/api/org/changes');
+          this.changes = (ch && ch.changes) || [];
+        } catch (e2) { this.changes = []; }
       } catch (e) {
         // Say what failed. A silently empty page reads as "you have no
         // projects", which is a different and more alarming message.
@@ -63,6 +67,35 @@ function projectsPage() {
     // the groups doing the work, and who is in them.
     teamsFor(projectId) {
       return this.teams.filter(function (t) { return t.project_id === projectId; });
+    },
+
+    changes: [],
+
+    agentName(id) {
+      var a = ((Alpine.store('app') && Alpine.store('app').agents) || []).find(function (x) { return x.id === id; });
+      return a ? a.name : id.slice(0, 8) + '… (no longer exists)';
+    },
+
+    // Add an agent to a team, or change its role ('supervisor' appoints it;
+    // the previous supervisor becomes a member).
+    async setMember(team, agentId, role) {
+      try {
+        await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(team.id) + '/members',
+          { agent_id: agentId, role: role });
+        await this.load();
+      } catch (e) {
+        FreecoToast.error('Could not update the team: ' + e.message);
+      }
+    },
+
+    async removeMember(team, agentId) {
+      if (!window.confirm('Take ' + this.agentName(agentId) + ' out of ' + team.name + '?')) return;
+      try {
+        await FreecoAPI.del('/api/org/teams/' + encodeURIComponent(team.id) + '/members/' + encodeURIComponent(agentId));
+        await this.load();
+      } catch (e) {
+        FreecoToast.error('Could not update the team: ' + e.message);
+      }
     },
 
     companyName(id) {

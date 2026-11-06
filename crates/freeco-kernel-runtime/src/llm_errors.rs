@@ -223,6 +223,11 @@ const TIMEOUT_PATTERNS: &[&str] = &[
     "connection refused",
     "network error",
     "fetch failed",
+    // reqwest's wording when the connection itself fails (network down for a
+    // moment, DNS gone): it was unclassified, so neither retried nor handed
+    // to a fallback model.
+    "error sending request",
+    "dns error",
 ];
 
 // ---------------------------------------------------------------------------

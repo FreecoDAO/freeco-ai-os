@@ -38,6 +38,7 @@ pub mod channel_bridge;
 pub mod chat_tools;
 pub mod crm;
 pub mod csrf;
+pub mod dispatch;
 pub mod local_ai;
 pub mod mcp_http;
 pub mod middleware;

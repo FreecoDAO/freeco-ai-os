@@ -48,6 +48,10 @@ pub struct MessageRequest {
     /// Sender display name.
     #[serde(default)]
     pub sender_name: Option<String>,
+    /// Where the message came from, set by channel gateways
+    /// (`{"channel": "whatsapp", "sender": ..., ...}`).
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response from sending a message.

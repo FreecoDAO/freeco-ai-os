@@ -10,6 +10,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Agents keep the conversation, the way Claude Code does. History was cut at
+  the last 20 messages, and each tool call is two, so one tool-heavy answer
+  pushed the request it answered out of view ("build it and test" got "this
+  is the start of our conversation"); compaction fired at 30 messages and kept
+  only the last 10. Now the whole conversation is sent; compaction waits until
+  it nears 80% of the model's real context window and keeps the last requests
+  whole; and after compaction the model gets the summary plus what followed,
+  instead of the whole stored history again (before, compaction saved
+  nothing). `/compact` always compacts.
+- Messages no longer vanish. Streaming runs took no per-agent lock, so the
+  popup and the main chat talking to one agent ran two loops on the same
+  conversation and the later save erased the other's messages, for the user
+  and the agent alike.
+- A message goes to the agent and chat it was typed in. The popup and the
+  main chat shared one connection, so whichever opened last received every
+  reply, and a message typed in one went to the other's agent. Every popup
+  message now has its own connection.
+- Messages can be sent into a named conversation (`session_id` on the
+  WebSocket); before, they went to whichever conversation any window had
+  opened last.
+
+### Added
+
+- The assistant popup is the CEO's dispatcher (`POST /api/dispatch`). Every
+  message is placed: continued here, sent into the existing conversation
+  where that work lives (with its agent), or started as a new task with the
+  right agent -- or, for a new project, company, team or hand, offered as a
+  choice. The popup says where each message went, with a link to that chat.
+- No queue in the popup: messages run in parallel. When the target agent is
+  busy, a worker copy of it takes the task in a conversation of its own and
+  goes to sleep when done.
+- Agents can be put to sleep (`agent_sleep`): no background loop, no
+  scheduled work, no tokens, until a message or `agent_activate` wakes them.
+  A sleeping agent survives restarts.
+- `agent_delegate`: the CEO hands an independent part of a task to a
+  specialist or to a worker copy of itself, several side by side; workers
+  sleep when done.
+- Dictation types as you speak: the recording is transcribed every two
+  seconds by local speech-to-text (`POST /api/transcribe`, which keeps
+  nothing) and the words appear in the box.
+
+### Fixed (continued)
+
+- The audit chain no longer forks or loses entries: each entry is chained
+  from the database's last row in one transaction (two processes on one
+  database each extended their own copy), and a failed write is retried and
+  logged instead of ignored. "Verify Chain" lists each break with its date
+  and where the intact run begins, instead of a bare "BROKEN".
+- A reply from a backup model says so in the chat, with the reason ("Claude
+  Code is not signed in"); with Claude Code signed out every reply came from
+  the backup while reading as Claude.
+- Agents answer every question in a message, in order, and use the
+  conversation above when told "as above".
+- A project created by an agent keeps its company: the description and the
+  company were passed the wrong way round.
+- The chat's session list and conversation menu scroll when long; their end
+  was out of reach.
+
+### Fixed (2026-10-25)
+
+- The popup is the CEO: it routes only among the CEO's own conversations or
+  starts a new one with the CEO (the CEO delegates further), and decides with
+  the CEO's model. It used to send requests to whichever agent its router
+  picked.
+- The popup's model list is searchable and lists Claude Code; Claude Code
+  models were marked as not supporting tools and filtered out.
+- Claude Code models by version (Opus 5.5, Fable 5.1, Sonnet 5.5, Haiku 4.5)
+  and effort (low … max), passed to the CLI as `--model` and `--effort`.
+- The VM stayed up only while a command ran: `/etc/wsl.conf` had been set to
+  boot with systemd, so `podman machine start` never saw the VM running and
+  nothing kept it alive. Restored Podman's own boot; documented in the
+  runbook.
+- WhatsApp gateway: Node 22 in the image (Baileys needs Node 20+), Baileys
+  pinned to 6.7.24, and a half-finished `npm install` is redone instead of
+  left broken.
+- The emergency Stop button is round.
+- Claude Code reaches Anthropic over a VPN: Node's 250 ms race to IPv6 (which
+  the VM cannot route) made every call time out, sign-in included; the CLI
+  and the WhatsApp gateway now connect over IPv4 first.
+
+### Fixed (2026-10-27)
+
+- Uploads over 2 MB work: the upload and transcribe routes kept the web
+  framework's 2 MB default, so most documents and videos were refused with a
+  413 before FreEco's own (10 MB, now 16 MB) limit applied.
+- A message just sent no longer vanishes when you switch to another chat and
+  back. The request is stored as its turn starts, not only when it ends; a
+  chat left mid-turn shows "Still working on this…" and fills in the answer
+  when it lands.
+- Switching chats no longer carries one chat's busy state and queued messages
+  into the next: the next chat's messages were held back, and a queued
+  message was later sent to whichever chat was open. Queued messages now go
+  to their own agent. A reply over the HTTP fallback is no longer drawn into
+  the chat that happens to be open.
+- Claude Code takes its sign-in token in Settings → Providers. Saving a key
+  for a provider without a key variable wrote a nameless line into
+  `secrets.env`; it is now refused, except for Claude Code's token.
+- The boot probe no longer logs Claude Code as offline: it tried to reach
+  `podman:freeco-claude` as a web address. Only HTTP endpoints are probed.
+
+### Added (2026-10-27)
+
+- WhatsApp voice notes are transcribed (local Speaches, nothing stored) and
+  images, videos and documents reach the agent as files in its workspace;
+  the gateway passed only placeholders such as "[Voice note received]".
+
+- Prompt-injection guard: web pages, search results, files, browser pages,
+  MCP results and messages relayed from chat channels are checked for
+  injection wording; when found, the agent is told to treat the content as
+  data and not follow instructions in it. Marks, does not block.
+
+### Added (continued)
+
+- Teams on the Projects page show members by name and their supervisor; the
+  owner adds members, appoints a supervisor or removes one there. Every change
+  to the organisation, by the owner or an agent, is listed under "Recent
+  changes" and returned to the CEO with `org_overview`.
+- Security review of hires: an agent hired by an agent is checked first; host
+  shell or host tools, the right to hire further agents, or instructions that
+  read like an attempt to subvert it hold the hire for the owner, with the
+  findings logged. Hiring starts from the vetted template catalogue.
+- Agents' working rules rewritten as recipes: how to find an owner, delegate,
+  set up a structure, supervise a team (one supervisor per team, waking and
+  sleeping its agents) and hire.
+- The daemon runs as a Podman container (`deploy/daemon`): restarts itself,
+  independent of any app or window, on the same VM as its services. Data
+  moves with `migrate-from-windows.ps1`; the Windows home stays as fallback.
+
+- An unsent draft is kept per agent (and in the popup) across switching
+  chats, changing page and reloading; it lived only in the chat component and
+  vanished with it.
+- Run History lists every unattended run -- scheduled jobs, triggers and
+  agents' background ticks -- with outcome, duration and tokens
+  (`GET /api/runs/history`). It was assembled in the browser from each job's
+  last run and each trigger's counter: one line per job at most, nothing for
+  background loops, never a failure.
+
+- Long pastes are accepted: up to 16 MB (about 2.5 million words), was 64 KB.
+  Above 32 KB the text is saved in the agent's workspace (`pasted/…md`) and
+  the model gets its start, its end and the file name, then reads the rest
+  in parts -- the way Claude Code handles a long paste -- so one paste does
+  not overflow the context or ride along with every later message.
+
+- A connection failure ("error sending request") is retried once after two
+  seconds and then handed to the fallback models; it was unclassified and
+  ended the turn.
+- Claude Code's failures say what the CLI said ("Not logged in", with the
+  container sign-in command) instead of "exited with code 1: no stderr".
+- A fallback model added in `agent.toml` takes effect at the next start; the
+  setting was not compared, so the edit was ignored.
+- A connection closed after 30 idle minutes reconnects silently instead of
+  showing "Connection closed due to inactivity" as an error.
+- Dictation in the main chat sends only the words, shown in the chat and
+  queued like typing. It also attached the recording, so agents treated
+  each dictated message as an audio file to open.
+- The hourly token limit explains itself: how much was used, when it resets,
+  and where to raise it. It read "Token quota exceeded. Try /compact", which
+  points at a fix that does not lift it.
+- Claude Code's start-up error no longer says to `npm install` it on the
+  computer. It names the container setting (`[provider_urls] claude-code =
+  "podman:freeco-claude"`) or the container to check.
+- A page an agent builds (a map, a report) opens from the chat's files and
+  artifacts panels with Open, sandboxed away from the dashboard, and agents
+  are told to link files rather than only name them.
 - A reached limit hands over to the fallback chain. Rate limits and used-up
   allowances (a Claude subscription's 5-hour limit, a provider's quota) never
   fell back, so the agent stopped until the limit reset even with GLM and

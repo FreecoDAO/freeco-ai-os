@@ -102,9 +102,116 @@ pub async fn create_company(
         .org()
         .create_company(body.name.trim(), body.description.as_deref())
     {
-        Ok(c) => (StatusCode::OK, Json(serde_json::json!(c))),
+        Ok(c) => {
+            state
+                .kernel
+                .record_org_change("owner", format!("created company \"{}\"", body.name.trim()));
+            (StatusCode::OK, Json(serde_json::json!(c)))
+        }
         Err(e) => fail(e),
     }
+}
+
+#[derive(Deserialize)]
+pub struct SetMember {
+    pub agent_id: String,
+    /// `supervisor`, `member`, or a free description of the role.
+    pub role: Option<String>,
+}
+
+/// PUT /api/org/teams/{id}/members — add an agent to a team, or change its
+/// role there (`supervisor` makes it the team's supervisor; a team has one).
+pub async fn set_team_member(
+    State(state): State<Arc<AppState>>,
+    Path(team_id): Path<String>,
+    Json(body): Json<SetMember>,
+) -> impl IntoResponse {
+    let Some(agent) = body
+        .agent_id
+        .parse()
+        .ok()
+        .and_then(|id| state.kernel.registry.get(id))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No such agent." })),
+        );
+    };
+    let org = state.kernel.memory.org();
+    let role = body
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    // One supervisor per team: appointing one makes the previous a member.
+    if role == Some("supervisor") {
+        if let Ok(teams) = org.list_teams(true) {
+            let current: Vec<String> = teams
+                .iter()
+                .filter(|t| t["id"].as_str() == Some(team_id.as_str()))
+                .flat_map(|t| t["members"].as_array().cloned().unwrap_or_default())
+                .filter(|m| m["role"].as_str() == Some("supervisor"))
+                .filter_map(|m| m["agent_id"].as_str().map(str::to_string))
+                .filter(|id| id != &body.agent_id)
+                .collect();
+            for id in current {
+                let _ = org.add_team_member(&team_id, &id, Some("member"));
+            }
+        }
+    }
+    match org.add_team_member(&team_id, &body.agent_id, role) {
+        Ok(()) => {
+            state.kernel.record_org_change(
+                "owner",
+                format!(
+                    "set {} in team {} as {}",
+                    agent.name,
+                    team_id,
+                    role.unwrap_or("member")
+                ),
+            );
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// DELETE /api/org/teams/{id}/members/{agent_id} — take an agent out of a team.
+pub async fn remove_team_member(
+    State(state): State<Arc<AppState>>,
+    Path((team_id, agent_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    match state
+        .kernel
+        .memory
+        .org()
+        .remove_team_member(&team_id, &agent_id)
+    {
+        Ok(removed) => {
+            if removed {
+                let name = agent_id
+                    .parse()
+                    .ok()
+                    .and_then(|id| state.kernel.registry.get(id))
+                    .map(|e| e.name.clone())
+                    .unwrap_or(agent_id.clone());
+                state
+                    .kernel
+                    .record_org_change("owner", format!("removed {name} from team {team_id}"));
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "removed": removed })),
+            )
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// GET /api/org/changes — the organisation change log, newest first:
+/// structure created, members set, hires made or held for the owner.
+pub async fn changes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "changes": state.kernel.org_changes(100) }))
 }
 
 pub async fn list_projects(
@@ -163,10 +270,15 @@ pub async fn create_project(
             body.company_id.as_deref(),
             body.description.as_deref(),
         ) {
-            Ok(p) => (
-                StatusCode::OK,
-                Json(serde_json::json!({ "project": p, "reused": false })),
-            ),
+            Ok(p) => {
+                state
+                    .kernel
+                    .record_org_change("owner", format!("created project \"{name}\""));
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "project": p, "reused": false })),
+                )
+            }
             Err(e) => fail(e),
         },
         Err(e) => fail(e),
@@ -189,7 +301,12 @@ pub async fn create_team(
         .org()
         .create_team(body.name.trim(), body.project_id.as_deref())
     {
-        Ok(t) => (StatusCode::OK, Json(serde_json::json!(t))),
+        Ok(t) => {
+            state
+                .kernel
+                .record_org_change("owner", format!("created team \"{}\"", body.name.trim()));
+            (StatusCode::OK, Json(serde_json::json!(t)))
+        }
         Err(e) => fail(e),
     }
 }

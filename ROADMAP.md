@@ -100,14 +100,47 @@ recorded as such.
 The current state of every feature, with how to check it, is in
 [`docs/feature-register.md`](docs/feature-register.md) (2026-09-30).
 
+### 2026-10-15 — the popup as CEO dispatcher, context, parallel work
+
+Built on `fix/approvals-explain-themselves-and-chat-routing` (v0.9.8 PR):
+
+- ✅ Popup dispatcher (`POST /api/dispatch`): here / existing conversation /
+  new task with the right agent / propose project, company, team, hand.
+- ✅ Delivery into a named conversation; no more "last chat used".
+- ✅ Parallel popup messages, each on its own connection; busy agent → worker
+  copy that sleeps after.
+- ✅ `agent_sleep`, auto-wake on message, `agent_delegate` for the CEO.
+- ✅ Whole conversation sent; compaction at 80% of the real window, keeping
+  whole requests; the model reads summary + what followed.
+- ✅ Per-agent lock on streaming runs (messages were erased by a parallel save).
+- ✅ Live dictation via local Speaches (`POST /api/transcribe`).
+
+Next:
+
+- ⬜ **Routing through OmniRoute for cost and speed.** The dispatcher and
+  compaction run on the default model (Nemotron Ultra); point them at a fast,
+  cheap tier through OmniRoute, and give agents a model tier per kind of work.
+  Measure with `/api/usage/breakdown` before and after.
+- ⬜ **Claude Code sign-in.** The container is wired
+  (`[provider_urls] claude-code = "podman:freeco-claude"`); the owner runs
+  `podman exec -it freeco-claude claude setup-token` and pastes the token.
+- ⬜ **Faster replies.** Each Claude Code turn spawns the CLI through
+  `podman exec` (seconds before the first token); keep one CLI process per
+  agent alive, or use the API directly when a key exists.
+- ⬜ **The dispatcher learns from corrections**: when the owner moves a
+  message elsewhere, remember it for similar messages.
+- ⬜ **Workers in the main chat**: show a busy agent's parallel workers and
+  their conversations on the agent's page.
+
 ### Found 2026-09-30 — open
 
-- ⬜ **Idle agents burn tokens.** Continuous-mode hands tick hourly with no work
+- 🟡 **Idle agents burn tokens.** Continuous-mode hands tick hourly with no work
   and resend their whole history: ~15 M of 27.8 M input tokens since
-  2026-09-15. Next build: the tick loop honours pause, and projects, tasks,
-  schedules and CRM tasks wake agents instead of a timer; the CEO governs who
-  sleeps.
-- ⬜ **`pause_hand` is dead wiring** — the flag is set and nothing reads it.
+  2026-09-15. Done: pause stops a hand's loop and survives restarts; agents
+  can sleep and wake on a message; the CEO has `agent_sleep`. Still open:
+  projects, tasks, schedules and CRM tasks wake agents instead of a timer.
+- ✅ **`pause_hand` is dead wiring** — fixed: pausing stops the loop and is
+  restored paused after a restart.
 - ⬜ **The SQLite log grows unbounded while the daemon runs.** An open read keeps
   the WAL from being checkpointed (106 MB beside a 24 MB database). Backups
   now checkpoint first; the holder is not found.

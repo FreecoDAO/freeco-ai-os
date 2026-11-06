@@ -144,6 +144,19 @@ impl LlmDriver for FallbackDriver {
             } else {
                 model_name.clone()
             };
+            // Say when a backup takes over, and why. The switch was silent:
+            // with Claude Code signed out, every reply came from the backup
+            // while the chat still read as Claude, and the difference in
+            // quality looked like Claude being inconsistent.
+            if i > 0 {
+                let why = trail.last().cloned().unwrap_or_default();
+                let _ = tx
+                    .send(StreamEvent::PhaseChange {
+                        phase: "fallback".to_string(),
+                        detail: Some(format!("{attempted} answered instead -- {why}")),
+                    })
+                    .await;
+            }
             match driver.stream(req, tx.clone()).await {
                 Ok(response) => return Ok(response),
                 Err(e @ LlmError::RateLimited { .. }) | Err(e @ LlmError::Overloaded { .. }) => {

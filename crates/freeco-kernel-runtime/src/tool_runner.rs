@@ -384,6 +384,7 @@ pub async fn execute_tool(
 
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
+        "agent_delegate" => tool_agent_delegate(input, kernel, caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
         // Setup tools. These change configuration rather than reading it, so
         // they are gated by the capability system like any other write.
@@ -394,6 +395,7 @@ pub async fn execute_tool(
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
         "agent_activate" => tool_agent_activate(input, kernel),
+        "agent_sleep" => tool_agent_sleep(input, kernel),
 
         // Shared memory tools
         "memory_store" => tool_memory_store(input, kernel, caller_agent_id),
@@ -751,7 +753,13 @@ pub async fn execute_tool(
     match result {
         Ok(content) => ToolResult {
             tool_use_id: tool_use_id.to_string(),
-            content,
+            // Web pages, files and other outside content are checked for
+            // injection wording before the model reads them.
+            content: if crate::injection_guard::reads_outside_content(tool_name) {
+                crate::injection_guard::mark(content, tool_name)
+            } else {
+                content
+            },
             is_error: false,
         },
         Err(err) => ToolResult {
@@ -1130,6 +1138,50 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                           and process events. Use this when agent_list shows an agent in a \
                           Suspended, Crashed, or Created state and you want to delegate work \
                           to it via agent_send. Terminated agents cannot be revived."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The target agent's UUID or human-readable name"
+                    }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_delegate".to_string(),
+            description: "Hand one part of a larger task to someone else and get the result \
+                          back. Name an `agent` to give it to a specialist; leave it out to give \
+                          it to a worker copy of yourself (same model, tools and workspace) that \
+                          sleeps when done. Plan first, then delegate independent parts -- \
+                          several calls in one reply run side by side -- and keep for yourself \
+                          the parts that need the whole picture. Each task must be self-contained: \
+                          the worker does not see this conversation."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The complete, self-contained instruction for this part"
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "A specialist's name or UUID; omit for a copy of yourself"
+                    }
+                },
+                "required": ["task"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_sleep".to_string(),
+            description: "Put an agent to sleep when its work is done: its background loop \
+                          and scheduled work stop and it uses no tokens. A message to it, or \
+                          agent_activate, wakes it again. Use this for helpers and clones you \
+                          started once their part is finished, and for agents the owner does \
+                          not need running."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -2266,6 +2318,45 @@ fn require_kernel(
     })
 }
 
+/// Hand part of a task to a specialist, or to a worker copy of yourself.
+///
+/// Without `agent`, the part goes to a copy of the caller -- same model,
+/// tools and workspace -- which works while the caller carries on, and is
+/// put to sleep when done so it costs nothing afterwards. Several calls in one
+/// reply run the parts side by side.
+async fn tool_agent_delegate(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let task = input["task"]
+        .as_str()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or("Missing 'task' parameter")?;
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= MAX_AGENT_CALL_DEPTH {
+        return Err(format!(
+            "Delegation depth exceeded (max {MAX_AGENT_CALL_DEPTH}). Do this part yourself."
+        ));
+    }
+    let target = input["agent"]
+        .as_str()
+        .map(str::trim)
+        .filter(|a| !a.is_empty());
+    AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(current_depth + 1), async {
+            match target {
+                Some(agent) => kh.send_to_agent(agent, task).await,
+                None => {
+                    let caller = caller_id.ok_or("No caller to copy")?;
+                    kh.delegate_to_worker(caller, task).await
+                }
+            }
+        })
+        .await
+}
+
 async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
@@ -2418,6 +2509,21 @@ fn tool_agent_activate(
     let name = kh.activate_agent(agent_id)?;
     Ok(format!(
         "Agent '{name}' activated. It is now Running and ready to receive messages."
+    ))
+}
+
+fn tool_agent_sleep(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent_id = input["agent_id"]
+        .as_str()
+        .ok_or("Missing 'agent_id' parameter")?;
+    let name = kh.sleep_agent(agent_id)?;
+    Ok(format!(
+        "Agent '{name}' is asleep: no background work and no tokens until a message or \
+         agent_activate wakes it."
     ))
 }
 

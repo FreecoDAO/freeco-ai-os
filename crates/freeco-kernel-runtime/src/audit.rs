@@ -78,6 +78,184 @@ fn compute_entry_hash(
     hex::encode(hasher.finalize())
 }
 
+/// One place where the chain does not hold.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChainBreak {
+    /// The entry at which the break is seen.
+    pub seq: u64,
+    pub timestamp: String,
+    /// `fork` (does not chain from the entry before it), `missing` (entries
+    /// before it are absent) or `altered` (its content does not match its
+    /// hash).
+    pub kind: String,
+}
+
+/// The result of checking the whole chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainReport {
+    pub entries: usize,
+    pub breaks: Vec<ChainBreak>,
+    /// First entry of the unbroken run that reaches the end.
+    pub intact_since_seq: Option<u64>,
+    pub intact_since: Option<String>,
+}
+
+fn parse_action(s: &str) -> AuditAction {
+    match s {
+        "ToolInvoke" => AuditAction::ToolInvoke,
+        "CapabilityCheck" => AuditAction::CapabilityCheck,
+        "AgentSpawn" => AuditAction::AgentSpawn,
+        "AgentKill" => AuditAction::AgentKill,
+        "AgentMessage" => AuditAction::AgentMessage,
+        "MemoryAccess" => AuditAction::MemoryAccess,
+        "FileAccess" => AuditAction::FileAccess,
+        "NetworkAccess" => AuditAction::NetworkAccess,
+        "ShellExec" => AuditAction::ShellExec,
+        "AuthAttempt" => AuditAction::AuthAttempt,
+        "WireConnect" => AuditAction::WireConnect,
+        "ConfigChange" => AuditAction::ConfigChange,
+        _ => AuditAction::ToolInvoke,
+    }
+}
+
+fn load_entries(conn: &Connection) -> rusqlite::Result<Vec<AuditEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash \
+         FROM audit_entries ORDER BY seq ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let action: String = row.get(3)?;
+        Ok(AuditEntry {
+            seq: row.get::<_, i64>(0)? as u64,
+            timestamp: row.get(1)?,
+            agent_id: row.get(2)?,
+            action: parse_action(&action),
+            detail: row.get(4)?,
+            outcome: row.get(5)?,
+            prev_hash: row.get(6)?,
+            hash: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Append one entry chained from the database's last row, in a transaction.
+fn append_in_db(
+    conn: &Connection,
+    timestamp: &str,
+    agent_id: &str,
+    action: &AuditAction,
+    detail: &str,
+    outcome: &str,
+) -> rusqlite::Result<AuditEntry> {
+    // A savepoint nests inside a transaction another part of this process may
+    // hold on the shared connection; a write that loses a race with another
+    // process fails here and is retried by the caller.
+    conn.execute_batch("SAVEPOINT audit_append")?;
+    let result = (|| {
+        let last: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT seq, hash FROM audit_entries ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let (seq, prev_hash) = match last {
+            Some((s, h)) => (s as u64 + 1, h),
+            None => (0, "0".repeat(64)),
+        };
+        let hash = compute_entry_hash(
+            seq, timestamp, agent_id, action, detail, outcome, &prev_hash,
+        );
+        conn.execute(
+            "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                seq as i64,
+                timestamp,
+                agent_id,
+                action.to_string(),
+                detail,
+                outcome,
+                &prev_hash,
+                &hash,
+            ],
+        )?;
+        Ok(AuditEntry {
+            seq,
+            timestamp: timestamp.to_string(),
+            agent_id: agent_id.to_string(),
+            action: action.clone(),
+            detail: detail.to_string(),
+            outcome: outcome.to_string(),
+            prev_hash,
+            hash,
+        })
+    })();
+    match result {
+        Ok(e) => {
+            conn.execute_batch("RELEASE audit_append")?;
+            Ok(e)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO audit_append; RELEASE audit_append");
+            Err(e)
+        }
+    }
+}
+
+/// Walk the chain and list every break.
+fn chain_report(entries: &[AuditEntry]) -> ChainReport {
+    let mut breaks = Vec::new();
+    let mut prev: Option<&AuditEntry> = None;
+    for e in entries {
+        let expected_prev = prev
+            .map(|p| p.hash.clone())
+            .unwrap_or_else(|| "0".repeat(64));
+        let expected_seq = prev.map(|p| p.seq + 1).unwrap_or(0);
+        let kind = if e.seq != expected_seq {
+            Some("missing")
+        } else if e.prev_hash != expected_prev {
+            Some("fork")
+        } else {
+            None
+        };
+        let recomputed = compute_entry_hash(
+            e.seq,
+            &e.timestamp,
+            &e.agent_id,
+            &e.action,
+            &e.detail,
+            &e.outcome,
+            &e.prev_hash,
+        );
+        let kind = if recomputed != e.hash {
+            Some("altered")
+        } else {
+            kind
+        };
+        if let Some(k) = kind {
+            breaks.push(ChainBreak {
+                seq: e.seq,
+                timestamp: e.timestamp.clone(),
+                kind: k.to_string(),
+            });
+        }
+        prev = Some(e);
+    }
+    let start = match breaks.last() {
+        Some(b) if b.kind == "altered" => entries.iter().find(|e| e.seq > b.seq),
+        Some(b) => entries.iter().find(|e| e.seq == b.seq),
+        None => entries.first(),
+    };
+    ChainReport {
+        entries: entries.len(),
+        breaks,
+        intact_since_seq: start.map(|e| e.seq),
+        intact_since: start.map(|e| e.timestamp.clone()),
+    }
+}
+
 /// An append-only, tamper-evident audit log using a Merkle hash chain.
 ///
 /// Thread-safe — all access is serialised through internal mutexes.
@@ -162,10 +340,16 @@ impl AuditLog {
 
         // Verify chain integrity on load
         if count > 0 {
-            if let Err(e) = log.verify_integrity() {
-                tracing::error!("Audit trail integrity check FAILED on boot: {e}");
-            } else {
+            let report = log.verify_report();
+            if report.breaks.is_empty() {
                 tracing::info!("Audit trail loaded: {count} entries, chain integrity OK");
+            } else {
+                tracing::error!(
+                    breaks = ?report.breaks,
+                    intact_since = ?report.intact_since,
+                    "Audit trail loaded: {count} entries, {} break(s) in the chain",
+                    report.breaks.len()
+                );
             }
         }
 
@@ -192,7 +376,39 @@ impl AuditLog {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut tip = self.tip.lock().unwrap_or_else(|e| e.into_inner());
 
-        let seq = entries.len() as u64;
+        // With a database, the database decides where the entry goes: its
+        // last row gives the sequence number and the hash to chain from,
+        // read and written in one transaction.
+        //
+        // The chain used to continue from this process's own copy in memory
+        // and the write's result was ignored. Two processes on one database
+        // (the daemon and a CLI command) then each extended their own copy --
+        // a fork the chain can never pass again -- and a write lost to a busy
+        // database or a power cut left a hole. Both happened, and every
+        // verification since reported the chain broken.
+        if let Some(ref db) = self.db {
+            for attempt in 0..3u32 {
+                let written = db.lock().ok().and_then(|conn| {
+                    append_in_db(&conn, &timestamp, &agent_id, &action, &detail, &outcome).ok()
+                });
+                if let Some(entry) = written {
+                    let hash = entry.hash.clone();
+                    entries.push(entry);
+                    *tip = hash.clone();
+                    return hash;
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+            }
+            tracing::error!(
+                action = %action,
+                detail = %detail,
+                "Audit entry could not be written to the database after 3 attempts"
+            );
+        }
+
+        let seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
         let prev_hash = tip.clone();
 
         let hash = compute_entry_hash(
@@ -210,28 +426,38 @@ impl AuditLog {
             hash: hash.clone(),
         };
 
-        // Persist to database if available
-        if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
-                let _ = conn.execute(
-                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![
-                        entry.seq as i64,
-                        &entry.timestamp,
-                        &entry.agent_id,
-                        entry.action.to_string(),
-                        &entry.detail,
-                        &entry.outcome,
-                        &entry.prev_hash,
-                        &entry.hash,
-                    ],
-                );
-            }
-        }
-
         entries.push(entry);
         *tip = hash.clone();
         hash
+    }
+
+    /// Every break in the chain, and where the unbroken run to the end
+    /// starts. Read from the database when there is one, since that -- not
+    /// this process's memory -- is the record.
+    ///
+    /// A plain "broken" said nothing useful: one bad link in July made every
+    /// check since read BROKEN, with no way to tell whether anything recent
+    /// was touched. Each break is listed with its date, and the run after
+    /// the last one is reported as intact.
+    pub fn verify_report(&self) -> ChainReport {
+        let entries = match &self.db {
+            Some(db) => db
+                .lock()
+                .ok()
+                .and_then(|conn| load_entries(&conn).ok())
+                .unwrap_or_else(|| {
+                    self.entries
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                }),
+            None => self
+                .entries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        };
+        chain_report(&entries)
     }
 
     /// Walks the entire chain and recomputes every hash to detect tampering.
@@ -355,6 +581,86 @@ mod tests {
         let result = log.verify_integrity();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hash mismatch at seq 1"));
+    }
+
+    fn db_with_audit_table() -> Arc<Mutex<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (seq INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, \
+             agent_id TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, \
+             outcome TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL)",
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    /// Two logs on one database -- the daemon and a CLI command -- used to
+    /// fork the chain. Chained from the database's last row, they extend
+    /// one chain.
+    #[test]
+    fn two_writers_on_one_database_keep_one_chain() {
+        let db = db_with_audit_table();
+        let daemon = AuditLog::with_db(db.clone());
+        let cli = AuditLog::with_db(db.clone());
+        daemon.record("a", AuditAction::ToolInvoke, "one", "ok");
+        cli.record("b", AuditAction::ConfigChange, "two", "ok");
+        daemon.record("a", AuditAction::ToolInvoke, "three", "ok");
+        let report = daemon.verify_report();
+        assert_eq!(report.entries, 3);
+        assert!(report.breaks.is_empty(), "{:?}", report.breaks);
+        assert_eq!(report.intact_since_seq, Some(0));
+    }
+
+    /// A fork and a lost entry are each reported with where they are, and
+    /// the run after the last one counts as intact.
+    #[test]
+    fn breaks_are_listed_and_the_intact_run_is_named() {
+        let log = AuditLog::new();
+        for i in 0..6 {
+            log.record("a", AuditAction::ToolInvoke, format!("e{i}"), "ok");
+        }
+        let mut entries = log.entries.lock().unwrap().clone();
+        // seq 2 chains from something else: a fork.
+        entries[2].prev_hash = "f".repeat(64);
+        entries[2].hash = compute_entry_hash(
+            2,
+            &entries[2].timestamp,
+            "a",
+            &AuditAction::ToolInvoke,
+            "e2",
+            "ok",
+            &entries[2].prev_hash,
+        );
+        entries[3].prev_hash = entries[2].hash.clone();
+        entries[3].hash = compute_entry_hash(
+            3,
+            &entries[3].timestamp,
+            "a",
+            &AuditAction::ToolInvoke,
+            "e3",
+            "ok",
+            &entries[3].prev_hash,
+        );
+        entries[4].prev_hash = entries[3].hash.clone();
+        entries[4].hash = compute_entry_hash(
+            4,
+            &entries[4].timestamp,
+            "a",
+            &AuditAction::ToolInvoke,
+            "e4",
+            "ok",
+            &entries[4].prev_hash,
+        );
+        // seq 4 is lost: 5 follows 3.
+        entries.remove(4);
+        let report = chain_report(&entries);
+        let kinds: Vec<(u64, &str)> = report
+            .breaks
+            .iter()
+            .map(|b| (b.seq, b.kind.as_str()))
+            .collect();
+        assert_eq!(kinds, vec![(2, "fork"), (5, "missing")]);
+        assert_eq!(report.intact_since_seq, Some(5));
     }
 
     #[test]

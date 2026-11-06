@@ -646,6 +646,19 @@
           </template>
         </div>
 
+        <!-- What changed in the organisation, by the owner or by agents:
+             structure created, members set, hires made or held. -->
+        <div class="card" style="margin-top:18px;padding:10px 14px" x-show="changes.length">
+          <div class="font-bold" style="font-size:13px;margin-bottom:6px">Recent changes</div>
+          <template x-for="(c, i) in changes.slice(0, 12)" :key="i">
+            <div class="text-xs" style="display:flex;gap:8px;padding:2px 0">
+              <span class="text-dim" style="white-space:nowrap" x-text="when(c.timestamp)"></span>
+              <strong x-text="c.actor"></strong>
+              <span x-text="c.change" :style="c.change.indexOf('held for the owner') !== -1 ? 'color:var(--warning, #c90)' : ''"></span>
+            </div>
+          </template>
+        </div>
+
         <!-- A project's own history: what this whole structure is for. -->
         <div x-show="selected" style="margin-top:26px">
           <h2 style="font-size:1.1rem;margin-bottom:10px">
@@ -671,9 +684,31 @@
                   </div>
                   <p class="text-xs text-dim" style="margin:3px 0 0;word-break:break-all"
                      x-text="'memory scope: team:' + t.id"></p>
-                  <p class="text-xs text-dim" style="margin:2px 0 0"
-                     x-show="t.members && t.members.length"
-                     x-text="t.members.map(function(m){return m.role ? m.agent_id + ' (' + m.role + ')' : m.agent_id;}).join(', ')"></p>
+                  <!-- Members by name, with the supervisor marked, editable by
+                       the owner here and by the CEO through its tools; every
+                       change is logged for both. -->
+                  <template x-for="m in (t.members || [])" :key="m.agent_id">
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px">
+                      <span x-text="agentName(m.agent_id)"></span>
+                      <span class="badge" x-show="m.role === 'supervisor'" style="font-size:10px">supervisor</span>
+                      <span class="text-dim" x-show="m.role && m.role !== 'supervisor' && m.role !== 'member'" x-text="m.role"></span>
+                      <span style="flex:1"></span>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" x-show="m.role !== 'supervisor'"
+                              @click="setMember(t, m.agent_id, 'supervisor')" title="Make this agent the team's supervisor">supervise</button>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px"
+                              @click="removeMember(t, m.agent_id)" title="Take out of the team">✕</button>
+                    </div>
+                  </template>
+                  <div style="display:flex;gap:4px;margin-top:6px">
+                    <select class="form-input" style="font-size:11px;padding:2px 4px;flex:1" x-model="t._pick">
+                      <option value="">Add an agent…</option>
+                      <template x-for="a in ($store.app.agents || [])" :key="a.id">
+                        <option :value="a.id" x-text="a.name"></option>
+                      </template>
+                    </select>
+                    <button class="btn btn-ghost btn-sm" style="font-size:11px" :disabled="!t._pick"
+                            @click="setMember(t, t._pick, 'member'); t._pick = ''">Add</button>
+                  </div>
                 </div>
               </template>
             </div>
@@ -838,6 +873,7 @@
                         <div class="chat-side-bar">
                           <button class="btn btn-ghost btn-sm" @click="fileView = null">← Back</button>
                           <span class="text-xs truncate" style="flex:1" x-text="fileView.path"></span>
+                          <a class="btn btn-ghost btn-sm" x-show="isPage(fileView.path)" :href="fileOpenUrl(fileView.path)" target="_blank" rel="noopener">Open</a>
                           <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(fileView.path)">Download</a>
                         </div>
                         <pre class="chat-side-pre" x-show="fileView.content !== null" x-text="fileView.content"></pre>
@@ -871,6 +907,7 @@
                       <div class="chat-side-row">
                         <span class="truncate" style="flex:1;cursor:pointer" @click="panelTab = 'files'; openFile(a.path)" x-text="a.path"></span>
                         <span class="text-xs text-dim" x-text="fmtBytes(a.size)"></span>
+                        <a class="btn btn-ghost btn-sm" x-show="isPage(a.path)" :href="fileOpenUrl(a.path)" target="_blank" rel="noopener" title="Open">Open</a>
                         <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(a.path)" title="Download">⭳</a>
                       </div>
                     </template>
@@ -2805,20 +2842,21 @@
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
                 <div class="font-bold" style="font-size:13px;margin-bottom:4px">Run History</div>
                 <div class="text-sm text-dim" style="line-height:1.6">
-                  Recent executions of scheduled jobs and event trigger fires. History is aggregated from schedule run counts and trigger fire counts.
+                  Everything that ran without you asking: scheduled jobs, event triggers and agents' background ticks — each run with its outcome, how long it took and the tokens it used.
                 </div>
               </div>
               <div class="table-wrap" x-show="history.length">
                 <table>
-                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Total Runs</th></tr></thead>
+                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Took</th><th>Tokens</th></tr></thead>
                   <tbody>
                     <template x-for="(h, idx) in history" :key="idx">
                       <tr>
                         <td class="text-xs" style="white-space:nowrap" x-text="formatTime(h.timestamp)"></td>
                         <td class="font-bold" x-text="h.name"></td>
-                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="h.type === 'schedule' ? 'Cron Job' : 'Trigger'"></span></td>
-                        <td><span class="badge badge-success" x-text="h.status"></span></td>
-                        <td x-text="h.run_count"></td>
+                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="h.type === 'schedule' ? 'Cron Job' : (h.type === 'background' ? 'Background' : 'Trigger')"></span></td>
+                        <td><span class="badge" :class="h.status === 'failed' ? 'badge-error' : 'badge-success'" :title="h.error || ''" x-text="h.status"></span></td>
+                        <td class="text-xs" x-text="h.duration_ms ? (h.duration_ms / 1000).toFixed(1) + ' s' : (h.run_count ? h.run_count + ' runs' : '')"></td>
+                        <td class="text-xs" x-text="h.tokens ? h.tokens.toLocaleString() : ''"></td>
                       </tr>
                     </template>
                   </tbody>
@@ -2826,7 +2864,7 @@
               </div>
               <div class="empty-state" x-show="!history.length">
                 <h4>No run history yet</h4>
-                <p class="hint">Run history will appear here after scheduled jobs or triggers execute.</p>
+                <p class="hint">Nothing has run on its own yet. Scheduled jobs, triggers and agents' background ticks appear here as they run.</p>
               </div>
             </div>
           </div>
@@ -4643,6 +4681,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       <button class="btn btn-primary btn-sm" @click="saveProviderKey(p)">Save</button>
                     </div>
                   </template>
+                  <!-- Claude Code signs in with a token rather than an API key -->
+                  <template x-if="p.id === 'claude-code'">
+                    <div>
+                      <div class="key-input-group">
+                        <input type="password" placeholder="Paste the sk-ant-oat… token" x-model="providerKeyInputs[p.id]">
+                        <button class="btn btn-primary btn-sm" @click="saveProviderKey(p)">Save</button>
+                      </div>
+                      <div class="text-xs text-dim mt-2">Get it with <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">podman exec -it freeco-claude claude setup-token</code>; it is kept in the vault and used at once.</div>
+                    </div>
+                  </template>
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
                     <div class="text-xs text-dim mt-2">Or set <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px" x-text="p.api_key_env"></code> in your environment and restart</div>
                   </template>
@@ -6018,7 +6066,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           </div>
           <div class="flex gap-2 items-center" x-show="tab === 'audit'">
             <button class="btn btn-ghost btn-sm" @click="verifyChain()">Verify Chain</button>
-            <span class="badge" :class="chainValid === true ? 'badge-running' : chainValid === false ? 'badge-crashed' : ''" x-text="chainValid === true ? 'VALID' : chainValid === false ? 'BROKEN' : ''" x-show="chainValid !== null"></span>
+            <span class="badge" :class="chainValid === true ? 'badge-running' : chainValid === false ? 'badge-crashed' : ''" :title="chainDetail" x-text="chainValid === true ? 'VALID' : chainValid === false ? 'BROKEN' : ''" x-show="chainValid !== null"></span>
+            <span class="text-xs text-dim" x-show="chainValid === false && chainDetail" x-text="chainDetail"></span>
           </div>
         </div>
         <div class="tabs">
@@ -7115,6 +7164,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
          style="margin:0 10px 8px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev, var(--bg))">
       <div class="text-xs text-dim" style="margin-bottom:8px">
         Where should this go?
+        <span x-show="pendingRoute && pendingRoute.reason" x-text="pendingRoute ? ' ' + pendingRoute.reason : ''"></span>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px">
         <template x-for="c in (pendingRoute ? pendingRoute.candidates : [])" :key="c.agent_id">
@@ -7133,6 +7183,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
         </button>
         <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewCompany()">
           <span>🏢 New company…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewTeam()">
+          <span>👥 New team…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewHand()">
+          <span>✋ New hand (automation)…</span>
         </button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm" style="flex:1" @click="routeHere()">Continue here</button>
@@ -7182,14 +7238,32 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
          The list was already being fetched into `models` and never rendered,
          so the only way to switch the assistant's model was to leave the chat
          and find it on another page. -->
-    <div class="freeco-model-row">
-      <select class="freeco-model-select" x-model="currentModel" @change="setModel($event.target.value)"
-              :title="'Model answering in this chat: ' + (currentModel || 'default')" aria-label="Model">
-        <template x-for="m in models" :key="m.id">
-          <option :value="m.id" x-text="m.label || m.id" :selected="m.id === currentModel"></option>
-        </template>
-      </select>
+    <!-- A searchable list, like the main chat's switcher: the plain dropdown
+         held hundreds of bare names and could not be searched. The model is
+         the CEO's -- the popup is the CEO -- so changing it here changes the
+         CEO's model everywhere. -->
+    <div class="freeco-model-row" style="position:relative">
+      <button class="freeco-model-select" style="text-align:left;cursor:pointer" @click="openModelPanel()"
+              :title="'CEO model: ' + (currentModel || 'default')" aria-label="Model">
+        <span x-text="currentModelLabel()"></span> ▾
+      </button>
       <span class="freeco-model-note" x-show="modelNote" x-cloak x-text="modelNote"></span>
+      <div x-show="modelPanel" x-cloak @click.outside="modelPanel = false"
+           style="position:absolute;bottom:100%;left:0;right:0;z-index:50;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.25);max-height:320px;display:flex;flex-direction:column">
+        <input id="freeco-model-search" class="form-input" style="margin:6px;font-size:12px" x-model="modelQuery"
+               placeholder="Search models — name, provider, version…" @keydown.escape="modelPanel = false"
+               @keydown.enter.prevent="filteredModels()[0] && (chooseModel(filteredModels()[0]), modelPanel = false)">
+        <div style="overflow-y:auto;min-height:0;flex:1">
+          <template x-for="m in filteredModels()" :key="m.provider + m.id">
+            <div class="freeco-model-option" style="padding:5px 10px;font-size:12px;cursor:pointer"
+                 :style="m.id === currentModel ? 'font-weight:bold;color:var(--accent)' : ''"
+                 @click="chooseModel(m); modelPanel = false" x-text="m.label || m.id"></div>
+          </template>
+          <div class="text-xs text-dim" style="padding:8px 10px" x-show="!filteredModels().length">
+            No model matches. Models whose provider has no key are not listed.
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Resize handles: bottom-right corner and the left edge -->

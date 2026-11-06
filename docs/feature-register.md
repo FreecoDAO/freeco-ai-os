@@ -35,7 +35,12 @@ FreEco tool, write "cannot check from inside" and move on.
 | Feature | Status | Who | How to check |
 |---|---|---|---|
 | The CEO assistant is first in every agent list | ✅ 2026-09-29 | Owner | Open Chat and Agents: the CEO is at the top. |
-| Popup routes a message: this chat, a new task, an existing thread, a new project or company — asks first | 🟨 | Owner | Write a request in the popup; a card offers where to send it; choosing one delivers it there. |
+| **Popup is the CEO's dispatcher** (new): every message goes here, into the existing conversation where that work lives (any agent), or a new task with the right agent; project / company / team / hand are offered as a choice | 🟨 | Owner | Ask something new in the popup: a line says "→ agent, a new conversation …" with "Open that chat"; the chat exists on that agent's page with the message in it. A follow-up ("go on") stays here. |
+| Popup messages run in parallel, no queue; a busy agent hands the task to a worker copy that sleeps after (new) | 🟨 | Owner | Send two unrelated requests quickly: both get replies; the second may say "… worker 1 took this in parallel". |
+| Messages land in the conversation they were sent to, never "the last chat used" (new) | 🟨 | Owner | Open chat A on the agent page and chat B in the popup; messages in each stay in each. |
+| Agents keep the whole conversation; compaction only near the model's context window (new) | 🟨 | CEO | A long tool-heavy task followed by "now test it": the agent knows what "it" is. |
+| Dictation types into the box while speaking, sends only the words (new) | 🟨 | Owner | Hold the mic and speak: words appear every ~2 s; on release the text is sent, no audio file attached. |
+| Agent sleep / wake: `agent_sleep`, wake on message; CEO delegates with `agent_delegate` (new) | 🟨 | CEO | Ask the CEO to put the shopping agent to sleep: Agents shows it Suspended; a message to it wakes it. |
 | Popup keeps unanswered messages across a model change or page reload | 🟨 | Owner | Send while the model is slow, reload: the message is still there, marked pending. |
 | Pressing Enter twice sends once | 🟨 | Owner | Press Enter twice quickly: one message. |
 | Action chips (Ask, Translate, Shell) can be copied, dragged or opened as a link | 🟨 | Owner | Drag a chip into another app; copy it; open the link. |

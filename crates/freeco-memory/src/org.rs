@@ -298,6 +298,18 @@ impl OrgStore {
         Ok(())
     }
 
+    /// Take an agent out of a team. Returns whether it was a member.
+    pub fn remove_team_member(&self, team_id: &str, agent_id: &str) -> FreecoResult<bool> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let n = conn
+            .execute(
+                "DELETE FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+                rusqlite::params![team_id, agent_id],
+            )
+            .map_err(mem_err)?;
+        Ok(n > 0)
+    }
+
     // ---- Scoping -------------------------------------------------------
 
     /// Attach a session to a project and optionally a team.
