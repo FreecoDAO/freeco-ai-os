@@ -6947,13 +6947,29 @@ impl FreecoKernel {
         Self::build_skill_summary_from(&registry, skill_allowlist)
     }
 
+    /// Most characters the skill lines of the "Available Skills" block may add
+    /// to an agent's system prompt. Every enabled skill costs one line, and an
+    /// agent without a `skills` allowlist sees every installed skill, so a large
+    /// install (hundreds of SKILL.md skills) would otherwise add tens of
+    /// thousands of tokens to every LLM call. The bundled skills take about
+    /// 6,000 characters, so today's installs stay well inside this.
+    const SKILL_SUMMARY_MAX_CHARS: usize = 12_000;
+
+    /// Longest skill description kept on one summary line.
+    const SKILL_SUMMARY_DESC_MAX_CHARS: usize = 200;
+
     /// Build a compact skill summary using the provided registry (which may
     /// include workspace skill overrides).
+    ///
+    /// Lines are ordered so the most-used skills survive the size cap: skills
+    /// that provide tools first, then bundled skills, then the rest, each by
+    /// name. Skills past the cap are counted, and the agent is pointed at
+    /// `skill_list` to find them.
     fn build_skill_summary_from(
         registry: &freeco_skills::registry::SkillRegistry,
         skill_allowlist: &[String],
     ) -> String {
-        let skills: Vec<_> = registry
+        let mut skills: Vec<_> = registry
             .list()
             .into_iter()
             .filter(|s| {
@@ -6965,10 +6981,33 @@ impl FreecoKernel {
         if skills.is_empty() {
             return String::new();
         }
+        let rank = |s: &freeco_skills::InstalledSkill| {
+            if !s.manifest.tools.provided.is_empty() {
+                0
+            } else if matches!(s.manifest.source, Some(freeco_skills::SkillSource::Bundled)) {
+                1
+            } else {
+                2
+            }
+        };
+        skills.sort_by(|a, b| {
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.manifest.skill.name.cmp(&b.manifest.skill.name))
+        });
         let mut summary = format!("\n\n--- Available Skills ({}) ---\n", skills.len());
+        let mut used_chars = 0;
+        let mut shown = 0;
         for skill in &skills {
             let name = &skill.manifest.skill.name;
-            let desc = &skill.manifest.skill.description;
+            let full_desc = &skill.manifest.skill.description;
+            let desc = match full_desc
+                .char_indices()
+                .nth(Self::SKILL_SUMMARY_DESC_MAX_CHARS)
+            {
+                Some((cut, _)) => format!("{}...", &full_desc[..cut]),
+                None => full_desc.clone(),
+            };
             let tools: Vec<_> = skill
                 .manifest
                 .tools
@@ -6976,11 +7015,25 @@ impl FreecoKernel {
                 .iter()
                 .map(|t| t.name.as_str())
                 .collect();
-            if tools.is_empty() {
-                summary.push_str(&format!("- {name}: {desc}\n"));
+            let line = if tools.is_empty() {
+                format!("- {name}: {desc}\n")
             } else {
-                summary.push_str(&format!("- {name}: {desc} [tools: {}]\n", tools.join(", ")));
+                format!("- {name}: {desc} [tools: {}]\n", tools.join(", "))
+            };
+            let line_chars = line.chars().count();
+            if used_chars + line_chars > Self::SKILL_SUMMARY_MAX_CHARS {
+                break;
             }
+            used_chars += line_chars;
+            shown += 1;
+            summary.push_str(&line);
+        }
+        if shown < skills.len() {
+            summary.push_str(&format!(
+                "- ...and {} more installed skills not listed here. \
+                 Call skill_list with a query to find them.\n",
+                skills.len() - shown
+            ));
         }
         // Issue #1038: skill directories (e.g. ~/.freeco-ai/skills/) live OUTSIDE
         // the workspace sandbox. Tell the agent to use the dedicated skill_*
@@ -10612,5 +10665,109 @@ system_prompt = "You are a test agent."
         let contents = std::fs::read_to_string(user_workspace.path().join("pre-existing.txt"))
             .expect("read pre-existing");
         assert_eq!(contents, "hello", "must not overwrite user files");
+    }
+
+    /// Write `count` prompt-only SKILL.md skills named `{prefix}-NNN`, each
+    /// with a `desc_chars`-long description, and load them into a registry.
+    fn registry_with_skills(
+        dir: &std::path::Path,
+        prefix: &str,
+        count: usize,
+        desc_chars: usize,
+    ) -> freeco_skills::registry::SkillRegistry {
+        for i in 0..count {
+            let name = format!("{prefix}-{i:03}");
+            let skill_dir = dir.join(&name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            let desc = "d".repeat(desc_chars);
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n---\n# {name}\n\nBody."),
+            )
+            .unwrap();
+        }
+        let mut registry = freeco_skills::registry::SkillRegistry::new(dir.to_path_buf());
+        registry.load_all().unwrap();
+        assert_eq!(registry.count(), count);
+        registry
+    }
+
+    /// Lines of the summary that describe one skill.
+    fn skill_lines(summary: &str) -> Vec<&str> {
+        summary
+            .lines()
+            .filter(|l| l.starts_with("- ") && !l.starts_with("- ...and "))
+            .collect()
+    }
+
+    #[test]
+    fn skill_summary_lists_every_skill_when_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_skills(dir.path(), "small", 3, 40);
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &[]);
+
+        assert!(summary.contains("--- Available Skills (3) ---"));
+        let lines = skill_lines(&summary);
+        assert_eq!(lines.len(), 3);
+        // Stable, name-ordered output.
+        assert!(lines[0].starts_with("- small-000:"));
+        assert!(lines[2].starts_with("- small-002:"));
+        assert!(!summary.contains("more installed skills"));
+        assert!(summary.contains("skill_describe"));
+    }
+
+    #[test]
+    fn skill_summary_is_capped_for_large_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        // About the shape of a 300-skill pack: 400-character descriptions.
+        let registry = registry_with_skills(dir.path(), "pack", 300, 400);
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &[]);
+
+        assert!(summary.contains("--- Available Skills (300) ---"));
+        let lines = skill_lines(&summary);
+        let listed_chars: usize = lines.iter().map(|l| l.chars().count() + 1).sum();
+        assert!(listed_chars <= FreecoKernel::SKILL_SUMMARY_MAX_CHARS);
+        assert!(lines.len() < 300);
+
+        // Long descriptions are shortened.
+        let kept = "d".repeat(FreecoKernel::SKILL_SUMMARY_DESC_MAX_CHARS);
+        assert!(lines[0].ends_with(&format!("{kept}...")));
+
+        // The rest are counted and the agent is pointed at skill_list.
+        let more = format!("- ...and {} more installed skills", 300 - lines.len());
+        assert!(summary.contains(&more), "missing {more:?}");
+        assert!(summary.contains("Call skill_list with a query"));
+    }
+
+    #[test]
+    fn skill_summary_keeps_bundled_skills_ahead_of_a_large_install() {
+        let dir = tempfile::tempdir().unwrap();
+        // Names sort before every bundled skill, so only the ranking keeps
+        // the bundled ones in view.
+        let mut registry = registry_with_skills(dir.path(), "aaa", 300, 400);
+        let bundled = registry.load_bundled();
+        assert!(bundled > 0);
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &[]);
+
+        let lines = skill_lines(&summary);
+        for (name, _) in freeco_skills::bundled::bundled_skills() {
+            assert!(
+                lines.iter().any(|l| l.starts_with(&format!("- {name}:"))),
+                "bundled skill {name} dropped from the summary"
+            );
+        }
+        assert!(summary.contains("more installed skills"));
+    }
+
+    #[test]
+    fn skill_summary_respects_the_agent_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_skills(dir.path(), "pick", 300, 400);
+        let allow = vec!["pick-007".to_string(), "pick-123".to_string()];
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &allow);
+
+        assert!(summary.contains("--- Available Skills (2) ---"));
+        assert_eq!(skill_lines(&summary).len(), 2);
+        assert!(!summary.contains("more installed skills"));
     }
 }
