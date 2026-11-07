@@ -30,37 +30,39 @@
 .btn-success { background: var(--success); color: #000; box-shadow: var(--shadow-xs); }
 .btn-success:hover { background: var(--success-dim); box-shadow: var(--shadow-sm); transform: translateY(-1px); }
 .btn-danger { background: var(--error); color: #fff; box-shadow: var(--shadow-xs); }
+/* At night --error is lifted for readable red text, so dark ink goes on it */
+[data-theme="dark"] .btn-danger { color: #0B0F0D; }
 .btn-danger:hover { background: var(--error-dim); box-shadow: var(--shadow-sm); transform: translateY(-1px); }
 .btn-ghost {
-  background: transparent;
-  color: var(--text-dim);
+  background: var(--surface);
+  color: var(--text);
   border: 1px solid var(--border);
 }
-.btn-ghost:hover { background: var(--surface2); color: var(--text); border-color: var(--border-light); transform: translateY(-1px); }
+.btn-ghost:hover { background: var(--surface2); color: var(--text); border-color: var(--border-light); }
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 .btn-block { width: 100%; }
 
-/* Cards */
+/* Cards: solid surfaces. Day cards float on a soft shadow with no border;
+   night cards drop the shadow for a 1px border (--card-border). */
 .card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius-lg);
-  padding: 16px;
-  transition: border-color var(--transition-fast), transform 0.2s var(--ease-spring), box-shadow var(--transition-fast);
+  padding: 18px;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   position: relative;
-  box-shadow: var(--shadow-xs), var(--shadow-inset);
+  box-shadow: var(--card-shadow);
 }
 
 .card:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md), var(--shadow-inset);
+  border-color: var(--card-border-hover);
+  box-shadow: var(--card-shadow-hover);
 }
 .card:focus-within {
   border-color: var(--accent);
-  box-shadow: var(--shadow-md), var(--shadow-inset);
+  box-shadow: var(--card-shadow-hover);
 }
-.card-header { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
+.card-header { font-size: 15px; font-weight: 700; margin-bottom: 8px; color: var(--text); }
 .card-meta { font-size: 12px; color: var(--text-dim); }
 
 .card-grid {
@@ -141,6 +143,16 @@
 .badge-muted { background: rgba(148,163,184,0.12); color: var(--text-dim); }
 .badge-info { background: rgba(59,130,246,0.12); color: var(--info); }
 .badge-dim { background: rgba(148,163,184,0.08); color: var(--text-dim); font-size: 0.65rem; padding: 2px 6px; }
+/* Swiss red count badge: approvals waiting. One of the few places red appears. */
+.badge-swiss {
+  background: var(--swiss);
+  color: var(--on-swiss);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  min-width: 22px;
+  justify-content: center;
+  letter-spacing: 0;
+}
 .text-danger { color: var(--error); }
 
 /* Tables */
@@ -197,7 +209,7 @@ tr:hover td { background: var(--surface2); }
 .form-input, .form-select, .form-textarea {
   width: 100%;
   padding: 9px 12px;
-  background: var(--bg);
+  background: var(--bg-input);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -235,7 +247,7 @@ tr:hover td { background: var(--surface2); }
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(8,7,6,0.8);
+  background: rgba(8,12,10,0.55);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -246,7 +258,7 @@ tr:hover td { background: var(--surface2); }
 
 .modal {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius-xl);
   padding: 24px;
   max-width: 600px;
@@ -1064,7 +1076,7 @@ mark.search-highlight {
 
 /* Sidebar footer */
 .sidebar-footer {
-  padding: 8px 0;
+  padding: 8px 0 10px;
   border-top: 1px solid var(--border);
 }
 
@@ -1137,15 +1149,18 @@ mark.search-highlight {
   animation: spin 0.8s linear infinite;
 }
 
-/* Toggle switch */
+/* Toggle switch: native-style pill */
 .toggle {
   position: relative;
-  width: 36px;
-  height: 20px;
-  background: var(--border);
-  border-radius: 10px;
+  width: 40px;
+  height: 24px;
+  background: var(--toggle-off);
+  border: none;
+  padding: 0;
+  border-radius: 12px;
   cursor: pointer;
   transition: background 0.2s;
+  flex-shrink: 0;
 }
 
 .toggle.active { background: var(--accent); }
@@ -1155,10 +1170,11 @@ mark.search-highlight {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   background: #fff;
   border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
   transition: transform 0.2s;
 }
 
@@ -1218,7 +1234,7 @@ mark.search-highlight {
 }
 
 .tab:hover { color: var(--text); }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab.active { color: var(--accent-ink); border-bottom-color: var(--accent); font-weight: 600; }
 
 /* Stats row */
 .stats-row {
@@ -1228,59 +1244,62 @@ mark.search-highlight {
   flex-wrap: wrap;
 }
 
+/* KPI cards: ink numbers in Geist Mono, a quiet grey label. Colour on a
+   number is kept for meaning (red = waiting for you, green = all good). */
 .stat-card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1px solid var(--card-border);
   border-radius: var(--radius-lg);
-  padding: 16px 20px;
+  padding: 16px 18px;
   min-width: 140px;
   flex: 1;
-  box-shadow: var(--shadow-xs);
-  transition: transform 0.2s var(--ease-spring), box-shadow var(--transition-fast), border-color var(--transition-fast);
+  box-shadow: var(--card-shadow);
+  transition: box-shadow var(--transition-fast), border-color var(--transition-fast);
 }
 
 .stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-  border-color: var(--border-light);
+  box-shadow: var(--card-shadow-hover);
 }
 
 .stat-value {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--accent);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--text);
   font-family: var(--font-mono);
   letter-spacing: -0.02em;
 }
+.stat-value.stat-waiting { color: var(--swiss-ink); }
+.stat-value.stat-good { color: var(--accent-ink); }
 
 .stat-label {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   margin-top: 4px;
   font-weight: 500;
 }
 
-/* Theme switcher — 3-mode pill (Light / System / Dark) */
+/* Theme switcher: segmented control (Day / System / Night) */
 .theme-switcher {
   display: inline-flex;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  overflow: hidden;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--fill);
 }
 .theme-opt {
   cursor: pointer;
+  min-width: 32px;
   padding: 4px 8px;
   font-size: 14px;
   background: none;
   border: none;
-  color: var(--text-muted);
-  transition: all 0.2s;
+  border-radius: 9px;
+  color: var(--text-dim);
+  transition: background-color 0.2s, color 0.2s;
   line-height: 1;
 }
-.theme-opt:hover { color: var(--text-primary); background: var(--bg-hover); }
-.theme-opt.active { color: var(--accent); background: var(--accent-glow); }
+.theme-opt:hover { color: var(--text); }
+.theme-opt.active { color: var(--text); background: var(--seg-on); box-shadow: 0 1px 3px rgba(0,0,0,0.10); }
 
 /* Utility */
 .flex { display: flex; }
@@ -1562,29 +1581,19 @@ mark.search-highlight {
 /* Overview dashboard — premium stat cards */
 .stats-row-lg { gap: 16px; }
 .stat-card-lg {
-  padding: 24px 28px;
+  padding: 18px 20px;
   min-width: 140px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  transition: transform 0.3s var(--ease-spring), box-shadow var(--transition-fast);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--card-shadow);
+  transition: box-shadow var(--transition-fast);
   position: relative;
   overflow: hidden;
 }
-.stat-card-lg::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0;
-  width: 100%; height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-light));
-  opacity: 0;
-  transition: opacity var(--transition-fast);
-}
-.stat-card-lg:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
-.stat-card-lg:hover::after { opacity: 1; }
-.stat-card-lg .stat-value { font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
-.stat-card-lg .stat-label { font-size: 11px; margin-top: 2px; font-weight: 500; }
+.stat-card-lg:hover { box-shadow: var(--card-shadow-hover); }
+.stat-card-lg .stat-value { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; }
+.stat-card-lg .stat-label { font-size: 13px; margin-top: 4px; font-weight: 500; }
 
 .overview-grid {
   display: grid;
@@ -3599,15 +3608,15 @@ html.widget-mode .freeco-x { display: none !important; }
 .sidebar-logo-mascot { transition: transform .2s var(--ease-spring, ease); }
 .sidebar-logo-mascot:hover { transform: rotate(-8deg) scale(1.08); }
 .sidebar-tagline {
-  font-size: 10px; font-weight: 600; letter-spacing: .2px;
-  color: var(--accent-light, var(--text-dim)); line-height: 1.2; margin: 1px 0 2px;
+  font-size: 11px; font-weight: 500; letter-spacing: 0;
+  color: var(--text-dim); line-height: 1.25; margin: 1px 0 2px;
 }
 .sidebar.collapsed .sidebar-tagline { display: none; }
 
 /* Obvious sidebar collapse control (stays visible when collapsed) */
 .sidebar-collapse-btn {
-  background: var(--surface2); border: 1px solid var(--border); color: var(--text-secondary);
-  width: 26px; height: 26px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  background: var(--fill); border: none; color: var(--text-secondary);
+  width: 28px; height: 28px; border-radius: 8px; cursor: pointer; font-size: 14px;
   line-height: 1; flex-shrink: 0; margin-left: auto; transition: background .15s;
 }
 .sidebar-collapse-btn:hover { background: var(--accent-subtle); color: var(--accent); }

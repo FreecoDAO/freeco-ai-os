@@ -11,11 +11,31 @@
   overflow: hidden;
 }
 
-/* Sidebar */
+/* Alpine backdrop (sky, ridges, lake) behind the whole app. Drawn by the
+   inline SVG at the top of index_body.html; its colours come from the theme
+   tokens, so day and night each get their own sky. z-index -1 keeps it under
+   every page without changing how modals stack. */
+.app-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 560px;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* Sidebar: a floating glass panel, the one place glass is used */
 .sidebar {
   width: var(--sidebar-width);
-  background: var(--bg-primary);
-  border-right: 1px solid var(--border);
+  margin: 12px 0 12px 12px;
+  border-radius: var(--radius-panel);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 1px 0 var(--glass-hi) inset, var(--glass-shadow);
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -34,9 +54,10 @@
 .sidebar.collapsed .nav-item { justify-content: center; padding: 12px 0; }
 
 .sidebar-header {
-  padding: 16px;
-  border-bottom: 1px solid var(--border);
+  padding: 16px 14px 10px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
   min-height: 60px;
@@ -61,11 +82,22 @@
 }
 
 .sidebar-header h1 {
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 3px;
-  font-family: var(--font-mono);
+  color: var(--text);
+  letter-spacing: -0.2px;
+  font-family: var(--font-sans);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Swiss cross: a white cross on a red square, never a red cross on white
+   (that is the Red Cross emblem). Hide this one class to drop it. */
+.swiss-mark {
+  width: 14px;
+  height: 14px;
+  flex: none;
 }
 
 .sidebar-header .version {
@@ -76,13 +108,15 @@
 }
 
 .sidebar-status {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--success);
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+  margin: 0 10px 4px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--fill);
 }
 
 .sidebar-status.offline { color: var(--error); }
@@ -121,10 +155,8 @@
 
 .nav-section-title {
   font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
   color: var(--text-muted);
-  padding: 12px 12px 6px 3px;
+  padding: 12px 10px 4px;
   font-weight: 600;
 }
 
@@ -134,30 +166,35 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 12px;
-  border-radius: var(--radius-md);
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  font-size: 13px;
-  color: var(--text-dim);
-  transition: all var(--transition-fast);
+  font-size: 14px;
+  color: var(--text);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
   text-decoration: none;
   border: 1px solid transparent;
   white-space: nowrap;
   font-weight: 500;
 }
 
+.nav-item .nav-icon { color: var(--text-dim); }
+
 .nav-item:hover {
-  background: var(--surface2);
+  background: var(--fill);
   color: var(--text);
-  transform: translateX(2px);
 }
 
 .nav-item.active {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
   font-weight: 600;
-  box-shadow: var(--shadow-sm), 0 2px 8px rgba(11, 61, 46, 0.2);
 }
+.nav-item.active .nav-icon { color: var(--accent-ink); }
+
+/* Count badges (approvals) sit at the right edge of the row */
+.nav-item .badge { margin-left: auto; }
 
 .nav-icon {
   width: 18px;
@@ -169,11 +206,11 @@
 }
 
 .nav-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 2;
+  stroke-width: 1.9;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -198,7 +235,7 @@
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  background: var(--bg);
+  background: transparent; /* lets the Alpine backdrop show */
 }
 
 /* Page wrapper divs (rendered by x-if) must fill the column
@@ -212,26 +249,38 @@
 }
 
 .page-header {
-  padding: 14px 24px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-primary);
+  padding: 20px 28px 10px;
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   align-items: center;
   justify-content: space-between;
   min-height: var(--header-height);
 }
 
 .page-header h2 {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.4px;
+}
+
+/* A short Swiss red rule before each page title, as in the design */
+.page-header h2::before {
+  content: '';
+  display: inline-block;
+  width: 20px;
+  height: 3px;
+  margin-right: 12px;
+  vertical-align: middle;
+  background: var(--swiss);
 }
 
 .page-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px;
+  padding: 12px 28px 28px;
 }
 
 /* Mobile overlay */
@@ -272,6 +321,9 @@
     left: -300px;
     top: 0;
     bottom: 0;
+    margin: 0;
+    border-radius: 0 var(--radius-panel) var(--radius-panel) 0;
+    background: var(--glass-solid); /* over the dimmed page, glass reads as grey */
     transition: left var(--transition-normal);
   }
   .sidebar.mobile-open {
@@ -301,6 +353,7 @@
     flex-wrap: wrap;
   }
   .page-header h2 {
+    font-size: 20px;
     line-height: 44px;
   }
   .page-body { padding: 12px; }
