@@ -6775,6 +6775,32 @@ impl FreecoKernel {
             }
         };
 
+        // Step 1b: when the capped skill summary leaves skills out, it tells the
+        // agent to call `skill_list` to find them. Grant that read-only tool even
+        // to an agent whose declared tools or profile would leave it out, or the
+        // hidden skills could not be found at all. The other skill_* tools stay
+        // under the agent's own tool list.
+        if !all_tools.iter().any(|t| t.name == "skill_list") {
+            let overflows = match skill_snapshot {
+                Some(snapshot) => Self::skill_summary_overflows(snapshot, &skill_allowlist),
+                None => {
+                    let registry = self
+                        .skill_registry
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    Self::skill_summary_overflows(&registry, &skill_allowlist)
+                }
+            };
+            if overflows {
+                if let Some(def) = builtin_tool_definitions()
+                    .into_iter()
+                    .find(|t| t.name == "skill_list")
+                {
+                    all_tools.push(def);
+                }
+            }
+        }
+
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
         // then by declared tools).
         // When a workspace-aware snapshot is provided, use it so that workspace
@@ -6958,17 +6984,17 @@ impl FreecoKernel {
     /// Longest skill description kept on one summary line.
     const SKILL_SUMMARY_DESC_MAX_CHARS: usize = 200;
 
-    /// Build a compact skill summary using the provided registry (which may
-    /// include workspace skill overrides).
+    /// The summary lines that fit under [`Self::SKILL_SUMMARY_MAX_CHARS`], and
+    /// how many enabled skills the agent sees in total.
     ///
-    /// Lines are ordered so the most-used skills survive the size cap: skills
-    /// that provide tools first, then bundled skills, then the rest, each by
-    /// name. Skills past the cap are counted, and the agent is pointed at
-    /// `skill_list` to find them.
-    fn build_skill_summary_from(
+    /// Lines are ordered so the most-used skills survive the cap: bundled
+    /// skills first, then skills that provide tools, then the rest, each by
+    /// name. Bundled skills take about half the cap, so no install can push
+    /// them out.
+    fn skill_summary_lines(
         registry: &freeco_skills::registry::SkillRegistry,
         skill_allowlist: &[String],
-    ) -> String {
+    ) -> (Vec<String>, usize) {
         let mut skills: Vec<_> = registry
             .list()
             .into_iter()
@@ -6978,13 +7004,10 @@ impl FreecoKernel {
                         || skill_allowlist.contains(&s.manifest.skill.name))
             })
             .collect();
-        if skills.is_empty() {
-            return String::new();
-        }
         let rank = |s: &freeco_skills::InstalledSkill| {
-            if !s.manifest.tools.provided.is_empty() {
+            if matches!(s.manifest.source, Some(freeco_skills::SkillSource::Bundled)) {
                 0
-            } else if matches!(s.manifest.source, Some(freeco_skills::SkillSource::Bundled)) {
+            } else if !s.manifest.tools.provided.is_empty() {
                 1
             } else {
                 2
@@ -6995,9 +7018,8 @@ impl FreecoKernel {
                 .cmp(&rank(b))
                 .then_with(|| a.manifest.skill.name.cmp(&b.manifest.skill.name))
         });
-        let mut summary = format!("\n\n--- Available Skills ({}) ---\n", skills.len());
+        let mut lines = Vec::new();
         let mut used_chars = 0;
-        let mut shown = 0;
         for skill in &skills {
             let name = &skill.manifest.skill.name;
             let full_desc = &skill.manifest.skill.description;
@@ -7025,14 +7047,44 @@ impl FreecoKernel {
                 break;
             }
             used_chars += line_chars;
-            shown += 1;
-            summary.push_str(&line);
+            lines.push(line);
         }
-        if shown < skills.len() {
+        (lines, skills.len())
+    }
+
+    /// Whether the capped skill summary leaves out some of the agent's skills,
+    /// so the agent needs `skill_list` to find them.
+    fn skill_summary_overflows(
+        registry: &freeco_skills::registry::SkillRegistry,
+        skill_allowlist: &[String],
+    ) -> bool {
+        let (lines, total) = Self::skill_summary_lines(registry, skill_allowlist);
+        lines.len() < total
+    }
+
+    /// Build a compact skill summary using the provided registry (which may
+    /// include workspace skill overrides).
+    ///
+    /// At most [`Self::SKILL_SUMMARY_MAX_CHARS`] of skill lines (see
+    /// [`Self::skill_summary_lines`]). Skills past the cap are counted, and the
+    /// agent is pointed at `skill_list` to find them.
+    fn build_skill_summary_from(
+        registry: &freeco_skills::registry::SkillRegistry,
+        skill_allowlist: &[String],
+    ) -> String {
+        let (lines, total) = Self::skill_summary_lines(registry, skill_allowlist);
+        if total == 0 {
+            return String::new();
+        }
+        let mut summary = format!("\n\n--- Available Skills ({total}) ---\n");
+        for line in &lines {
+            summary.push_str(line);
+        }
+        if lines.len() < total {
             summary.push_str(&format!(
                 "- ...and {} more installed skills not listed here. \
                  Call skill_list with a query to find them.\n",
-                skills.len() - shown
+                total - lines.len()
             ));
         }
         // Issue #1038: skill directories (e.g. ~/.freeco-ai/skills/) live OUTSIDE
@@ -10667,25 +10719,44 @@ system_prompt = "You are a test agent."
         assert_eq!(contents, "hello", "must not overwrite user files");
     }
 
-    /// Write `count` prompt-only SKILL.md skills named `{prefix}-NNN`, each
-    /// with a `desc_chars`-long description, and load them into a registry.
+    /// Write `count` SKILL.md skills named `{prefix}-NNN` into `dir`, each with
+    /// a `desc_chars`-long description. With `with_tool`, each also declares a
+    /// command, so it provides a tool.
+    fn write_skills(
+        dir: &std::path::Path,
+        prefix: &str,
+        count: usize,
+        desc_chars: usize,
+        with_tool: bool,
+    ) {
+        for i in 0..count {
+            let name = format!("{prefix}-{i:03}");
+            let skill_dir = dir.join(&name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            let desc = "d".repeat(desc_chars);
+            let meta = if with_tool {
+                format!(
+                    "metadata:\n  openclaw:\n    commands:\n      - name: run_{i:03}\n        description: Run it\n"
+                )
+            } else {
+                String::new()
+            };
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n{meta}---\n# {name}\n\nBody."),
+            )
+            .unwrap();
+        }
+    }
+
+    /// [`write_skills`] (prompt-only), loaded into a registry.
     fn registry_with_skills(
         dir: &std::path::Path,
         prefix: &str,
         count: usize,
         desc_chars: usize,
     ) -> freeco_skills::registry::SkillRegistry {
-        for i in 0..count {
-            let name = format!("{prefix}-{i:03}");
-            let skill_dir = dir.join(&name);
-            std::fs::create_dir_all(&skill_dir).unwrap();
-            let desc = "d".repeat(desc_chars);
-            std::fs::write(
-                skill_dir.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: {desc}\n---\n# {name}\n\nBody."),
-            )
-            .unwrap();
-        }
+        write_skills(dir, prefix, count, desc_chars, false);
         let mut registry = freeco_skills::registry::SkillRegistry::new(dir.to_path_buf());
         registry.load_all().unwrap();
         assert_eq!(registry.count(), count);
@@ -10757,6 +10828,109 @@ system_prompt = "You are a test agent."
             );
         }
         assert!(summary.contains("more installed skills"));
+    }
+
+    #[test]
+    fn skill_summary_keeps_bundled_skills_ahead_of_tool_providing_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        // A large install of third-party skills that all provide tools.
+        write_skills(dir.path(), "aaa", 300, 400, true);
+        let mut registry = freeco_skills::registry::SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        assert_eq!(registry.count(), 300);
+        assert!(!registry
+            .get("aaa-000")
+            .unwrap()
+            .manifest
+            .tools
+            .provided
+            .is_empty());
+        registry.load_bundled();
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &[]);
+
+        let lines = skill_lines(&summary);
+        for (name, _) in freeco_skills::bundled::bundled_skills() {
+            assert!(
+                lines.iter().any(|l| l.starts_with(&format!("- {name}:"))),
+                "bundled skill {name} pushed out by tool-providing skills"
+            );
+        }
+        // Tool-providing skills fill the rest of the cap, before prompt-only ones.
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("- aaa-000:") && l.contains("[tools: run_000]")));
+        assert!(summary.contains("more installed skills"));
+    }
+
+    /// Boot a kernel whose skills folder holds `extra` large prompt-only
+    /// skills, and register an agent that declares only `file_read`.
+    fn kernel_with_restricted_agent(
+        tmp: &std::path::Path,
+        extra: usize,
+    ) -> (FreecoKernel, AgentId) {
+        let home_dir = tmp.join("home");
+        std::fs::create_dir_all(home_dir.join("skills")).unwrap();
+        write_skills(&home_dir.join("skills"), "pack", extra, 400, false);
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+        let agent_id = AgentId::new();
+        let mut manifest = test_manifest("restricted", "declares one tool", vec![]);
+        manifest.capabilities.tools = vec!["file_read".to_string()];
+        kernel
+            .registry
+            .register(AgentEntry {
+                id: agent_id,
+                name: "restricted".to_string(),
+                manifest,
+                state: AgentState::Running,
+                mode: AgentMode::default(),
+                created_at: chrono::Utc::now(),
+                last_active: chrono::Utc::now(),
+                parent: None,
+                children: vec![],
+                session_id: SessionId::new(),
+                tags: vec![],
+                identity: Default::default(),
+                onboarding_completed: false,
+                onboarding_completed_at: None,
+            })
+            .unwrap();
+        (kernel, agent_id)
+    }
+
+    #[test]
+    fn restricted_agent_gets_skill_list_only_when_skills_are_hidden() {
+        // Small install: everything fits, the agent keeps exactly its own tools.
+        let tmp = tempfile::tempdir().unwrap();
+        let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), 0);
+        let names: Vec<String> = kernel
+            .available_tools(agent)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["file_read".to_string()]);
+        kernel.shutdown();
+
+        // Large install: the summary hides skills and points at skill_list, so
+        // the read-only skill_list is granted. Nothing else is.
+        let tmp = tempfile::tempdir().unwrap();
+        let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), 300);
+        let names: Vec<String> = kernel
+            .available_tools(agent)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(names.contains(&"file_read".to_string()));
+        assert!(names.contains(&"skill_list".to_string()), "got {names:?}");
+        assert!(!names.contains(&"skill_describe".to_string()));
+        assert!(!names.contains(&"skill_execute".to_string()));
+        assert!(!names.contains(&"shell_exec".to_string()));
+        assert_eq!(names.len(), 2, "got {names:?}");
+        kernel.shutdown();
     }
 
     #[test]

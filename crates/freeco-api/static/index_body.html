@@ -3110,7 +3110,7 @@
     <template x-if="page === 'skills'">
       <div x-data="skillsPage">
         <div class="page-header"><h2>Skills</h2></div>
-        <div class="page-body" x-init="loadSkills()">
+        <div class="page-body" x-init="loadSkills(); loadAgentsForSkills()">
           <div class="info-card">
             <h4>Skills &amp; Ecosystem</h4>
             <p>Skills extend your agents with new capabilities. FreEco.ai supports the <strong>OpenClaw/ClawHub</strong> ecosystem (3,000+ community skills) plus local skills.</p>
@@ -3140,8 +3140,23 @@
 
           <!-- TAB: Installed Skills -->
           <div x-show="tab === 'installed'">
-            <div class="card-grid" x-show="skills.length">
-              <template x-for="skill in skills" :key="skill.name">
+            <!-- Filter, and the agent whose skills the switches change -->
+            <div class="flex items-center gap-2 mb-4" style="flex-wrap:wrap" x-show="skills.length">
+              <input class="form-input" style="flex:1;min-width:180px" placeholder="Filter skills by name or description" x-model="skillFilter" aria-label="Filter skills">
+              <select class="form-select" style="width:auto" x-model="skillAgentId" @change="loadAgentSkills()" aria-label="Agent whose skills to switch on or off">
+                <option value="">Choose an agent to switch its skills on or off</option>
+                <template x-for="a in agentsList" :key="a.id">
+                  <option :value="a.id" x-text="a.name"></option>
+                </template>
+              </select>
+            </div>
+            <div class="flex items-center gap-2 mb-4" x-show="skillAgentId && (agentSkills || agentSkillsError)">
+              <span class="text-sm" x-show="agentSkills" x-text="agentSkillsSummary()"></span>
+              <span class="text-sm" style="color:var(--error)" x-show="agentSkillsError" x-text="agentSkillsError"></span>
+              <button class="btn btn-ghost btn-sm" x-show="agentSkills && agentSkills.mode === 'allowlist'" :disabled="agentSkillsSaving" @click="useAllSkills()">Use all skills</button>
+            </div>
+            <div class="card-grid" x-show="filteredSkills.length">
+              <template x-for="skill in filteredSkills" :key="skill.name">
                 <div class="card">
                   <div class="flex justify-between items-center mb-2">
                     <div class="flex items-center gap-2">
@@ -3149,7 +3164,13 @@
                       <span class="runtime-badge" :class="runtimeBadge(skill.runtime).cls" x-text="runtimeBadge(skill.runtime).text"></span>
                       <span class="badge" :class="sourceBadge(skill.source).cls" x-text="sourceBadge(skill.source).text" style="font-size:0.65rem"></span>
                     </div>
-                    <div class="toggle" :class="{ active: skill.enabled }" @click="skill.enabled = !skill.enabled"></div>
+                    <div class="toggle" x-show="agentSkills" role="switch" tabindex="0"
+                         :class="{ active: isSkillOnForAgent(skill.name) }"
+                         :aria-checked="isSkillOnForAgent(skill.name) ? 'true' : 'false'"
+                         :title="(isSkillOnForAgent(skill.name) ? 'On' : 'Off') + ' for this agent. Click to switch.'"
+                         @click="toggleSkillForAgent(skill.name)"
+                         @keydown.enter.prevent="toggleSkillForAgent(skill.name)"
+                         @keydown.space.prevent="toggleSkillForAgent(skill.name)"></div>
                   </div>
                   <div class="card-meta" x-text="skill.description"></div>
                   <div class="flex justify-between items-center mt-2">
@@ -3167,6 +3188,7 @@
                 </div>
               </template>
             </div>
+            <p class="text-sm text-dim" x-show="skills.length && !filteredSkills.length">No installed skill matches this filter.</p>
             <div class="empty-state" x-show="!skills.length">
               <div class="empty-state-icon">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>
