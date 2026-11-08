@@ -113,6 +113,9 @@ tokio::task_local! {
     static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
     /// Canvas max HTML size in bytes (set from kernel config at loop start).
     pub static CANVAS_MAX_BYTES: usize;
+    /// The tool call whose human approval the agent loop already obtained,
+    /// outside the tool deadline. Set only by [`run_approved`].
+    static APPROVED_TOOL_CALL: String;
 }
 
 /// Get the current inter-agent call depth from the task-local context.
@@ -121,38 +124,14 @@ pub fn current_agent_depth() -> u32 {
     AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0)
 }
 
-/// Execute a tool by name with the given input, returning a ToolResult.
-///
-/// The optional `kernel` handle enables inter-agent tools. If `None`,
-/// agent tools will return an error indicating the kernel is not available.
-///
-/// `allowed_tools` enforces capability-based security: if provided, only
-/// tools in the list may execute. This prevents an LLM from hallucinating
-/// tool names outside the agent's capability grants.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_tool(
+/// The checks that refuse a call outright, before anyone is asked to approve
+/// it: the tool is outside the agent's grants, or the agent is working for
+/// another agent and the tool is one no subagent may use.
+fn refuse_before_approval(
     tool_use_id: &str,
     tool_name: &str,
-    input: &serde_json::Value,
-    kernel: Option<&Arc<dyn KernelHandle>>,
     allowed_tools: Option<&[String]>,
-    caller_agent_id: Option<&str>,
-    skill_registry: Option<&SkillRegistry>,
-    mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
-    web_ctx: Option<&WebToolsContext>,
-    browser_ctx: Option<&crate::browser::BrowserManager>,
-    allowed_env_vars: Option<&[String]>,
-    workspace_root: Option<&Path>,
-    media_engine: Option<&crate::media_understanding::MediaEngine>,
-    exec_policy: Option<&freeco_types::config::ExecPolicy>,
-    tts_engine: Option<&crate::tts::TtsEngine>,
-    docker_config: Option<&freeco_types::config::DockerSandboxConfig>,
-    process_manager: Option<&crate::process_manager::ProcessManager>,
-) -> ToolResult {
-    // Normalize the tool name through compat mappings so LLM-hallucinated aliases
-    // (e.g. "fs-write" → "file_write") resolve to the canonical Freeco name.
-    let tool_name = normalize_tool_name(tool_name);
-
+) -> Option<ToolResult> {
     // Capability enforcement: reject tools not in the allowed list
     if let Some(allowed) = allowed_tools {
         // Both sides normalized: a manifest naming `docker_exec` grants the
@@ -163,16 +142,40 @@ pub async fn execute_tool(
             .any(|t| normalize_tool_name(t.as_str()) == tool_name)
         {
             warn!(tool_name, "Capability denied: tool not in allowed list");
-            return ToolResult {
+            return Some(ToolResult {
                 tool_use_id: tool_use_id.to_string(),
                 content: format!(
                     "Permission denied: agent does not have capability to use tool '{tool_name}'"
                 ),
                 is_error: true,
-            };
+            });
         }
     }
 
+    if current_agent_depth() > 0 && crate::tool_policy::SUBAGENT_DENY_ENFORCED.contains(&tool_name)
+    {
+        warn!(tool_name, "Refused: tool not available to subagents");
+        return Some(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!(
+                "Permission denied: '{tool_name}' cannot be used by an agent working for another agent. Tell the user; their own agent can do it."
+            ),
+            is_error: true,
+        });
+    }
+    None
+}
+
+/// Ask a human to approve this call when the tool needs it. Returns the
+/// result to give the model when the call must not run, or `None` to go on.
+async fn approval_gate(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+) -> Option<ToolResult> {
     // Approval gate: check if this tool requires human approval before execution.
     //
     // When exec_policy.mode = "full" (or allowlist with allowed_commands = ["*"]),
@@ -220,24 +223,125 @@ pub async fn execute_tool(
                 }
                 Ok(false) => {
                     warn!(tool_name, "Approval denied — blocking tool execution");
-                    return ToolResult {
+                    return Some(ToolResult {
                         tool_use_id: tool_use_id.to_string(),
                         content: format!(
                             "Execution denied: '{}' requires human approval and was denied or timed out. The operation was not performed.",
                             tool_name
                         ),
                         is_error: true,
-                    };
+                    });
                 }
                 Err(e) => {
                     warn!(tool_name, error = %e, "Approval system error");
-                    return ToolResult {
+                    return Some(ToolResult {
                         tool_use_id: tool_use_id.to_string(),
                         content: format!("Approval system error: {e}"),
                         is_error: true,
-                    };
+                    });
                 }
             }
+        }
+    }
+    None
+}
+
+/// Get any human approval this call needs now, before its deadline starts.
+///
+/// The agent loop wraps `execute_tool` in a deadline of a few minutes, while
+/// a person may take hours to answer an approval request. Asked inside that
+/// deadline, a slow "yes" arrived after the call was already cancelled. The
+/// loop calls this first, with no deadline, then runs `execute_tool` inside
+/// [`run_approved`] so it is not asked a second time.
+///
+/// Returns the result to give the model when the call must not run. Calls
+/// that will be refused anyway (see `refuse_before_approval`) return `None`
+/// without asking anyone, and `execute_tool` then refuses them.
+#[allow(clippy::too_many_arguments)]
+pub async fn approve_before_deadline(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    allowed_tools: Option<&[String]>,
+    caller_agent_id: Option<&str>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+) -> Option<ToolResult> {
+    let tool_name = normalize_tool_name(tool_name);
+    if refuse_before_approval(tool_use_id, tool_name, allowed_tools).is_some() {
+        return None;
+    }
+    approval_gate(
+        tool_use_id,
+        tool_name,
+        input,
+        kernel,
+        caller_agent_id,
+        exec_policy,
+    )
+    .await
+}
+
+/// Run an `execute_tool` future for `tool_use_id` as already approved by
+/// [`approve_before_deadline`]. Every agent loop sets this around each of its
+/// own calls, so a nested agent's calls are matched against its own ids.
+pub async fn run_approved<F: std::future::Future>(tool_use_id: &str, fut: F) -> F::Output {
+    APPROVED_TOOL_CALL.scope(tool_use_id.to_string(), fut).await
+}
+
+/// Execute a tool by name with the given input, returning a ToolResult.
+///
+/// The optional `kernel` handle enables inter-agent tools. If `None`,
+/// agent tools will return an error indicating the kernel is not available.
+///
+/// `allowed_tools` enforces capability-based security: if provided, only
+/// tools in the list may execute. This prevents an LLM from hallucinating
+/// tool names outside the agent's capability grants.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    allowed_tools: Option<&[String]>,
+    caller_agent_id: Option<&str>,
+    skill_registry: Option<&SkillRegistry>,
+    mcp_connections: Option<&tokio::sync::Mutex<Vec<mcp::McpConnection>>>,
+    web_ctx: Option<&WebToolsContext>,
+    browser_ctx: Option<&crate::browser::BrowserManager>,
+    allowed_env_vars: Option<&[String]>,
+    workspace_root: Option<&Path>,
+    media_engine: Option<&crate::media_understanding::MediaEngine>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+    tts_engine: Option<&crate::tts::TtsEngine>,
+    docker_config: Option<&freeco_types::config::DockerSandboxConfig>,
+    process_manager: Option<&crate::process_manager::ProcessManager>,
+) -> ToolResult {
+    // Normalize the tool name through compat mappings so LLM-hallucinated aliases
+    // (e.g. "fs-write" → "file_write") resolve to the canonical Freeco name.
+    let tool_name = normalize_tool_name(tool_name);
+
+    if let Some(refused) = refuse_before_approval(tool_use_id, tool_name, allowed_tools) {
+        return refused;
+    }
+
+    // The agent loop asks for approval before the tool deadline starts and
+    // marks the call as approved; anything else is asked here.
+    let approved = APPROVED_TOOL_CALL
+        .try_with(|id| id == tool_use_id)
+        .unwrap_or(false);
+    if !approved {
+        if let Some(refused) = approval_gate(
+            tool_use_id,
+            tool_name,
+            input,
+            kernel,
+            caller_agent_id,
+            exec_policy,
+        )
+        .await
+        {
+            return refused;
         }
     }
 
@@ -4829,6 +4933,161 @@ mod tests {
         assert!(result.is_error);
     }
 
+    /// `execute_tool` with only the arguments these tests vary.
+    async fn run_tool(
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        kernel: &Arc<dyn KernelHandle>,
+        allowed: Option<&[String]>,
+    ) -> ToolResult {
+        execute_tool(
+            id,
+            name,
+            input,
+            Some(kernel),
+            allowed,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn approval_asked_before_the_deadline_is_not_asked_again() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+
+        let refused = approve_before_deadline(
+            "call-1",
+            "skill_install_github",
+            &input,
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+        )
+        .await;
+        assert!(refused.is_none());
+        assert_eq!(fake.approvals_asked(), 1);
+
+        // The approved call runs without a second request.
+        let result = run_approved(
+            "call-1",
+            run_tool("call-1", "skill_install_github", &input, &kernel, None),
+        )
+        .await;
+        assert!(!result.content.contains("requires human approval"));
+        assert_eq!(fake.approvals_asked(), 1);
+
+        // Another call id, even inside that scope, is asked again.
+        run_approved(
+            "call-1",
+            run_tool("call-2", "skill_install_github", &input, &kernel, None),
+        )
+        .await;
+        assert_eq!(fake.approvals_asked(), 2);
+
+        // So is a call that never went through approve_before_deadline.
+        run_tool("call-3", "skill_install_github", &input, &kernel, None).await;
+        assert_eq!(fake.approvals_asked(), 3);
+    }
+
+    #[tokio::test]
+    async fn nobody_is_asked_about_a_call_that_will_be_refused() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+        let allowed = vec!["file_read".to_string()];
+
+        let refused = approve_before_deadline(
+            "call-1",
+            "skill_install_github",
+            &input,
+            Some(&kernel),
+            Some(&allowed),
+            Some("agent-1"),
+            None,
+        )
+        .await;
+        assert!(refused.is_none());
+        assert_eq!(fake.approvals_asked(), 0);
+        let result = run_approved(
+            "call-1",
+            run_tool(
+                "call-1",
+                "skill_install_github",
+                &input,
+                &kernel,
+                Some(&allowed),
+            ),
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("does not have capability"));
+    }
+
+    #[tokio::test]
+    async fn subagents_cannot_install_skills() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+
+        let result = AGENT_CALL_DEPTH
+            .scope(std::cell::Cell::new(1), async {
+                let pre = approve_before_deadline(
+                    "call-1",
+                    "skill_install_github",
+                    &input,
+                    Some(&kernel),
+                    None,
+                    Some("agent-1"),
+                    None,
+                )
+                .await;
+                assert!(pre.is_none());
+                run_approved(
+                    "call-1",
+                    run_tool("call-1", "skill_install_github", &input, &kernel, None),
+                )
+                .await
+            })
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("working for another agent"));
+        assert_eq!(
+            fake.approvals_asked(),
+            0,
+            "a refused call must not ask anyone"
+        );
+
+        // The read-only preview stays available to subagents.
+        let preview = AGENT_CALL_DEPTH
+            .scope(std::cell::Cell::new(1), async {
+                run_tool(
+                    "call-2",
+                    "skill_github_preview",
+                    &serde_json::json!({"source": "o/r"}),
+                    &kernel,
+                    None,
+                )
+                .await
+            })
+            .await;
+        assert!(!preview.content.contains("working for another agent"));
+    }
+
     #[tokio::test]
     async fn test_file_read_missing() {
         let bad_path = std::env::temp_dir()
@@ -5722,6 +5981,7 @@ mod tests {
         created: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         cancelled: std::sync::Mutex<Vec<String>>,
         jobs: std::sync::Mutex<Vec<serde_json::Value>>,
+        approval_requests: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeKernelHandle {
@@ -5730,7 +5990,13 @@ mod tests {
                 created: std::sync::Mutex::new(Vec::new()),
                 cancelled: std::sync::Mutex::new(Vec::new()),
                 jobs: std::sync::Mutex::new(Vec::new()),
+                approval_requests: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        fn approvals_asked(&self) -> usize {
+            self.approval_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
 
         fn with_job(self, job: serde_json::Value) -> Self {
@@ -5741,6 +6007,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::kernel_handle::KernelHandle for FakeKernelHandle {
+        // Counts approval requests and approves them all.
+        async fn request_approval(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _action_summary: &str,
+            _purpose: Option<&str>,
+        ) -> Result<bool, String> {
+            self.approval_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+
         // Test double. Records nothing and touches no real key store: a mock
         // that wrote to secrets.env would put a key on the developer's disk
         // every time the suite ran.

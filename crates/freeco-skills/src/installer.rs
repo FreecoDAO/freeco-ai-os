@@ -165,6 +165,24 @@ pub fn load_signature(skill_dir: &Path) -> Result<Option<SignedManifest>, SkillE
 /// skill fails any of those checks. On failure the caller is expected to
 /// remove `skill_dir` to keep the skills directory clean.
 pub fn enforce_require_signed(skill_dir: &Path, opts: &InstallOptions) -> Result<(), SkillError> {
+    // `package.json` is included because openclaw_compat treats it as a
+    // valid SKILL manifest source.
+    enforce_require_signed_for(
+        skill_dir,
+        opts,
+        &["skill.toml", "SKILL.md", "skill.md", "package.json"],
+    )
+}
+
+/// [`enforce_require_signed`], with the signature bound to `manifest_files`
+/// only. An installer that knows which file the skill's instructions come
+/// from passes just that file, so a signed copy of some other manifest
+/// shipped alongside cannot vouch for it.
+pub fn enforce_require_signed_for(
+    skill_dir: &Path,
+    opts: &InstallOptions,
+    manifest_files: &[&str],
+) -> Result<(), SkillError> {
     if !opts.require_signed {
         return Ok(());
     }
@@ -206,12 +224,9 @@ pub fn enforce_require_signed(skill_dir: &Path, opts: &InstallOptions) -> Result
     // Read every candidate manifest file in the installed dir and require
     // that at least one byte-matches envelope.manifest after BOM strip +
     // CRLF→LF normalization (applied symmetrically to both sides).
-    // `package.json` is included because openclaw_compat treats it as a
-    // valid SKILL manifest source.
-    const MANIFEST_CANDIDATES: &[&str] = &["skill.toml", "SKILL.md", "skill.md", "package.json"];
     let normalized_envelope = normalize_manifest_text(&envelope.manifest);
     let mut bound = false;
-    for name in MANIFEST_CANDIDATES {
+    for name in manifest_files {
         if !safe_regular_file_in(skill_dir, name)? {
             continue;
         }

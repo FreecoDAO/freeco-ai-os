@@ -6875,6 +6875,16 @@ impl FreecoKernel {
             all_tools.retain(|t| t.name != "shell_exec");
         }
 
+        // Step 6: An agent working inside another agent's call (agent_send)
+        // is not offered the tools subagents may never use. execute_tool
+        // refuses them too; this keeps them out of the model's choices.
+        if freeco_kernel_runtime::tool_runner::current_agent_depth() > 0 {
+            all_tools.retain(|t| {
+                !freeco_kernel_runtime::tool_policy::SUBAGENT_DENY_ENFORCED
+                    .contains(&t.name.as_str())
+            });
+        }
+
         all_tools
     }
 
@@ -9113,7 +9123,8 @@ fn describe_tool_consequences(tool_name: &str) -> String {
         "skill_install_github" => {
             "The skills' instructions are added to every agent that uses them, and their \
              scripts can run wherever an agent has shell access. Only the scanned commit is \
-             installed; uninstall from the Skills page."
+             installed. A new skill can be uninstalled from the Skills page; with overwrite, \
+             the skill it replaces is deleted and cannot be restored."
         }
         _ => return format!("Effects of {tool_name} are not described; treat as irreversible."),
     }
@@ -9170,11 +9181,14 @@ fn system_prompt_with_output_style(manifest: &freeco_types::agent::AgentManifest
 
 fn tool_is_reversible(tool_name: &str) -> Option<bool> {
     match tool_name {
-        "sandbox_exec" | "skill_install_github" => Some(true),
+        "sandbox_exec" => Some(true),
         "file_delete" | "git_push" | "email_send" | "channel_send" | "agent_kill" => Some(false),
         // Deliberately unknown rather than guessed. A shell command may do
         // anything, and claiming it is reversible would be a lie the user acts on.
         "shell_exec" => None,
+        // A new skill can be uninstalled, but with overwrite the skill it
+        // replaces is gone, and this answer cannot see which one it is.
+        "skill_install_github" => None,
         _ => None,
     }
 }

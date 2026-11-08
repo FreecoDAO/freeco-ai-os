@@ -469,9 +469,11 @@ function skillsPage() {
       this.githubInstalling = true;
       this.githubError = '';
       try {
-        // Send the previewed commit so the install matches what was scanned.
+        // Install exactly what was scanned: the preview's own repository,
+        // folder and commit, never the source box, which may have been
+        // edited since the preview.
         var data = await FreecoAPI.post('/api/skills/github/install', {
-          source: this.githubSource.trim(),
+          source: preview.repo + (preview.path ? '/' + preview.path : ''),
           commit: preview.commit,
           skills: this.githubSelected.slice(),
           overwrite: this.githubOverwrite
