@@ -404,32 +404,65 @@ code blocks — always call the tool instead.";
 /// included only when the agent holds the tools it names.
 pub fn build_operations_section(granted_tools: &[String]) -> String {
     let has = |name: &str| granted_tools.iter().any(|t| t == name);
-    let mut lines: Vec<&str> = Vec::new();
+    // Every clause names only tools the agent holds: the owner's blocklist can
+    // remove any one of them, and a prompt naming a missing tool sends the
+    // agent into a refusal.
+    let mut lines: Vec<String> = Vec::new();
     if has("container_list") {
-        lines.push(
+        let mut line = String::from(
             "- A service is down or slow: `container_list` shows every container, whatever \
-             started it; `container_logs` shows why it fails. Fix the cause; use \
-             `container_restart` only for a passing fault, then check the state it reports. \
-             Never manage containers with shell_exec or sandbox_exec: there is no podman there.",
+             started it",
         );
+        if has("container_logs") {
+            line.push_str("; `container_logs` shows why it fails");
+        }
+        line.push_str(". Fix the cause");
+        if has("container_restart") {
+            line.push_str(
+                "; use `container_restart` only for a passing fault, then check the state it \
+                 reports",
+            );
+        }
+        line.push_str(
+            ". Never manage containers with shell_exec or sandbox_exec: there is no podman there.",
+        );
+        lines.push(line);
     }
+    let skill_clauses: Vec<&str> = [
+        ("skill_list", "`skill_list` with a query finds one"),
+        (
+            "agent_skills_set",
+            "`agent_skills_set` switches skills on or off for any agent",
+        ),
+        (
+            "skill_reload",
+            "`skill_reload` picks up skill folders added on disk",
+        ),
+    ]
+    .iter()
+    .filter(|(tool, _)| has(tool))
+    .map(|(_, text)| *text)
+    .collect();
     if has("agent_skills_set") || has("skill_reload") {
-        lines.push(
-            "- Skills: `skill_list` with a query finds one; `agent_skills_set` switches skills on \
-             or off for any agent; `skill_reload` picks up skill folders added on disk.",
-        );
+        lines.push(format!("- Skills: {}.", skill_clauses.join("; ")));
     }
     if has("agent_describe") {
         lines.push(
             "- `agent_describe` shows what an agent can really do: its model, tools and skills. \
-             Call it on yourself before saying you cannot do something.",
+             Call it on yourself before saying you cannot do something."
+                .to_string(),
         );
     }
     if has("model_list") && has("agent_set_model") {
-        lines.push(
+        let mut line = String::from(
             "- Models: `model_list` shows what each agent can be switched to; `agent_set_model` \
-             switches it; `provider_list` shows which providers still need a key.",
+             switches it",
         );
+        if has("provider_list") {
+            line.push_str("; `provider_list` shows which providers still need a key");
+        }
+        line.push('.');
+        lines.push(line);
     }
     if lines.is_empty() {
         return String::new();
@@ -439,7 +472,7 @@ pub fn build_operations_section(granted_tools: &[String]) -> String {
          with your tools instead of asking the owner to type commands.\n",
     );
     for line in lines {
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
     }
     out.push_str(
@@ -1308,6 +1341,30 @@ mod tests {
         let mut ctx = basic_ctx();
         ctx.granted_tools = tools;
         assert!(build_system_prompt(&ctx).contains("## Running FreEco"));
+    }
+
+    #[test]
+    fn operations_section_never_names_a_tool_the_owner_removed() {
+        // The CEO set with restart, logs, skill_list and provider_list
+        // blocklisted: none of them may be recommended.
+        let removed = [
+            "container_restart",
+            "container_logs",
+            "skill_list",
+            "provider_list",
+        ];
+        let tools: Vec<String> = crate::tool_policy::CEO_MANAGEMENT_TOOLS
+            .iter()
+            .filter(|t| !removed.contains(t))
+            .map(|s| s.to_string())
+            .collect();
+        let section = build_operations_section(&tools);
+        for name in removed {
+            assert!(!section.contains(name), "{name} named: {section}");
+        }
+        assert!(section.contains("container_list"));
+        assert!(section.contains("agent_skills_set"));
+        assert!(section.contains("agent_set_model"));
     }
 
     #[test]

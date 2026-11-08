@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The CEO can run the installation. Whichever agent holds the CEO role (the
   one the dashboard opens as the main chat) now gets the tools for it, whatever
   its manifest lists: containers, agents, skills, models and providers. The
-  owner can still take any of them away with the agent's tool blocklist.
+  owner can still take any of them away with the agent's tool blocklist. Only
+  the owner gives the role: an agent spawning a child with the `ceo` tag is
+  refused.
 - Containers can be managed without a shell. `container_list` shows every
   container on the machine, whatever started it; `container_logs` reads why
   one fails; `container_start`, `container_stop` and `container_restart` act

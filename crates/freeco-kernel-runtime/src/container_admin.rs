@@ -40,6 +40,11 @@ const DEFAULT_LOG_LINES: u64 = 100;
 const MAX_LOG_LINES: u64 = 1000;
 /// The newest part of a log is kept when it is longer than this.
 const MAX_LOG_CHARS: usize = 20_000;
+/// Bytes kept from each log stream while it is read. A log line has no length
+/// limit, so `--tail` alone does not bound the size: the newest part is kept as
+/// it arrives, and a service writing huge lines cannot fill the daemon's memory
+/// while it is being diagnosed.
+const MAX_LOG_READ_BYTES: usize = 256 * 1024;
 
 /// Containers no agent may stop or restart. `freeco-daemon` is FreEco itself
 /// in the Podman deployment: stopping it ends the conversation that asked for
@@ -183,7 +188,9 @@ fn summary_from_value(v: &serde_json::Value) -> Option<ContainerSummary> {
         } else {
             name
         },
-        id: id.chars().take(12).collect(),
+        // The full id: matching a reference against a shortened one would let a
+        // mistyped full id resolve to a different container.
+        id: id.to_string(),
         image: text("Image"),
         state: text("State").to_lowercase(),
         status: text("Status"),
@@ -227,7 +234,7 @@ pub fn find_container<'a>(
     }
     let by_id: Vec<&ContainerSummary> = list
         .iter()
-        .filter(|c| !c.id.is_empty() && (c.id.starts_with(wanted) || wanted.starts_with(&c.id)))
+        .filter(|c| !c.id.is_empty() && c.id.starts_with(wanted))
         .collect();
     match by_id.as_slice() {
         [one] => Ok(one),
@@ -343,8 +350,86 @@ async fn run(
     }
 }
 
+/// Read a stream to its end, keeping only its newest `keep` bytes. Returns the
+/// bytes kept and whether older ones were dropped.
+async fn read_tail<R>(mut reader: R, keep: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    let mut dropped = false;
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        // Trim in batches, not on every chunk: memory stays under 2 * keep.
+        if buf.len() > 2 * keep {
+            buf.drain(..buf.len() - keep);
+            dropped = true;
+        }
+    }
+    if buf.len() > keep {
+        buf.drain(..buf.len() - keep);
+        dropped = true;
+    }
+    Ok((buf, dropped))
+}
+
+/// Like [`run`], but stdout and stderr are each read into a bounded tail, so
+/// the output's size cannot grow the daemon's memory without limit.
+async fn run_bounded(
+    runtime: &str,
+    args: &[&str],
+    timeout: Duration,
+    keep: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>, bool), String> {
+    let mut cmd = crate::quiet_command::quiet_async(runtime);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("could not run {runtime}: {e}"))?;
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(format!("could not read the output of {runtime}"));
+    };
+    // `async move` owns the child, so a timeout drops it and kill_on_drop
+    // ends the process.
+    let work = async move {
+        let (out, err, status) = tokio::join!(
+            read_tail(stdout, keep),
+            read_tail(stderr, keep),
+            child.wait()
+        );
+        Ok::<_, std::io::Error>((status?, out?, err?))
+    };
+    match tokio::time::timeout(timeout, work).await {
+        Ok(Ok((status, (out, out_cut), (err, err_cut)))) => {
+            Ok((status, out, err, out_cut || err_cut))
+        }
+        Ok(Err(e)) => Err(format!("could not read the output of {runtime}: {e}")),
+        Err(_) => Err(format!(
+            "{runtime} {} did not finish within {} seconds",
+            args.first().copied().unwrap_or_default(),
+            timeout.as_secs()
+        )),
+    }
+}
+
 async fn list_containers(runtime: &str) -> Result<Vec<ContainerSummary>, String> {
-    let out = run(runtime, &["ps", "-a", "--format", "json"], READ_TIMEOUT).await?;
+    // `--no-trunc` so the ids are whole (Docker shortens them to 12 characters).
+    let out = run(
+        runtime,
+        &["ps", "-a", "--no-trunc", "--format", "json"],
+        READ_TIMEOUT,
+    )
+    .await?;
     if !out.status.success() {
         return Err(format!(
             "{runtime} ps failed: {}",
@@ -375,10 +460,16 @@ pub async fn tool_container_logs(input: &serde_json::Value) -> Result<String, St
         .clamp(1, MAX_LOG_LINES);
     let rt = runtime().await?;
     let tail = lines.to_string();
-    let out = run(rt, &["logs", "--tail", &tail, name], READ_TIMEOUT).await?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
+    let (status, stdout, stderr, dropped) = run_bounded(
+        rt,
+        &["logs", "--tail", &tail, name],
+        READ_TIMEOUT,
+        MAX_LOG_READ_BYTES,
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
+    if !status.success() {
         // Most often a wrong name: say which names exist instead of passing
         // on the runtime's "no such container".
         if let Ok(list) = list_containers(rt).await {
@@ -395,7 +486,7 @@ pub async fn tool_container_logs(input: &serde_json::Value) -> Result<String, St
         (false, false) => format!("[stdout]\n{stdout}\n[stderr]\n{stderr}"),
     };
     let (body, cut) = tail_chars(&body, MAX_LOG_CHARS);
-    Ok(if cut {
+    Ok(if cut || dropped {
         format!("Last lines of {name} (older lines cut to fit):\n{body}")
     } else {
         format!("Last {lines} lines of {name}:\n{body}")
@@ -469,7 +560,13 @@ pub async fn tool_container_action(
             c.status
         ),
         Some(c) => format!("{name} {}: now {} ({}).", action.past(), c.state, c.status),
-        None => format!("{name} {}.", action.past()),
+        // Not a success report: the container may have crashed and been
+        // removed (`--rm`), or the runtime did not answer.
+        None => format!(
+            "{rt} {} {name} returned, but its state could not be read afterwards: it may \
+             have exited and been removed. Check with container_list before saying it works.",
+            action.verb()
+        ),
     })
 }
 
@@ -492,7 +589,7 @@ mod tests {
         // Sorted by name.
         assert_eq!(list[0].name, "freeco-daemon");
         assert_eq!(list[1].name, "freeco-speaches");
-        assert_eq!(list[1].id, "4f1c2b3a9d8e");
+        assert_eq!(list[1].id, "4f1c2b3a9d8e7f6a5b4c3d2e1f0a9b8c");
         assert_eq!(list[1].state, "exited");
         assert_eq!(list[1].ports, "127.0.0.1:8000->8000/tcp");
         assert_eq!(list[2].ports, "0.0.0.0:3200->3000/tcp");
@@ -554,11 +651,15 @@ mod tests {
             find_container(&list, "4f1c2b").unwrap().name,
             "freeco-speaches"
         );
-        // Full 64-char style ids still match the short id kept.
         assert_eq!(
-            find_container(&list, "4f1c2b3a9d8e7f6a5b4c").unwrap().name,
+            find_container(&list, "4f1c2b3a9d8e7f6a5b4c3d2e1f0a9b8c")
+                .unwrap()
+                .name,
             "freeco-speaches"
         );
+        // A full id that is wrong after its first 12 characters names no
+        // container, so it must not resolve to the one sharing that prefix.
+        assert!(find_container(&list, "4f1c2b3a9d8e0000000000000000ffff").is_err());
         let err = find_container(&list, "crm").unwrap_err();
         assert!(err.contains("freeco-speaches"), "lists real names: {err}");
     }
@@ -634,6 +735,21 @@ mod tests {
         let (short, cut) = tail_chars("one\ntwo\n", 100);
         assert!(!cut);
         assert_eq!(short, "one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn a_huge_log_is_read_into_a_bounded_tail() {
+        // 5 MB with no line breaks, as a service dumping one huge line writes.
+        let log = vec![b'x'; 5 * 1024 * 1024];
+        let mut with_end = log.clone();
+        with_end.extend_from_slice(b"\nlast line\n");
+        let (kept, dropped) = read_tail(with_end.as_slice(), 1024).await.unwrap();
+        assert!(dropped);
+        assert_eq!(kept.len(), 1024);
+        assert!(kept.ends_with(b"\nlast line\n"));
+        let (small, dropped) = read_tail(&b"short log\n"[..], 1024).await.unwrap();
+        assert!(!dropped);
+        assert_eq!(small, b"short log\n");
     }
 
     #[test]

@@ -451,4 +451,8 @@ pub struct ModelChoice {
     /// The provider has a key (or needs none) and has not reported the model
     /// as unavailable for that key.
     pub usable: bool,
+    /// The provider has a key or needs none. Kept apart from `usable` so a
+    /// model the provider does not serve is not reported as a missing key,
+    /// which would send the agent to replace a working key.
+    pub provider_has_key: bool,
 }

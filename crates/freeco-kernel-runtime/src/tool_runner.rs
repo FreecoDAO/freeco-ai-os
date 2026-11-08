@@ -1982,7 +1982,7 @@ them.".to_string(),
                 "properties": {
                     "provider": { "type": "string", "description": "Only this provider, e.g. anthropic, groq, nvidia" },
                     "query": { "type": "string", "description": "Text to match in the model id or name, e.g. opus or llama" },
-                    "include_unavailable": { "type": "boolean", "description": "Also list models whose provider has no key yet" }
+                    "include_unavailable": { "type": "boolean", "description": "Also list models that cannot be used now (provider has no key, or does not serve the model), with the reason" }
                 }
             }),
         },
@@ -2829,8 +2829,8 @@ fn tool_model_list(
         return Ok(if include_unavailable {
             "No model in the catalog matches.".to_string()
         } else {
-            "No usable model matches. Pass include_unavailable=true to see models whose \
-             provider still needs a key, and provider_list for which keys are missing."
+            "No usable model matches. Pass include_unavailable=true to see the ones that \
+             cannot be used now and why, and provider_list for which keys are missing."
                 .to_string()
         });
     }
@@ -2874,8 +2874,10 @@ fn tool_model_list(
             price,
             if m.usable {
                 ""
+            } else if !m.provider_has_key {
+                " | not usable: provider has no key"
             } else {
-                " | provider has no key"
+                " | not usable: the provider does not serve this model for its key"
             }
         ));
     }

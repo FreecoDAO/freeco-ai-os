@@ -6838,12 +6838,12 @@ impl FreecoKernel {
         }
 
         // Step 3.5: The CEO role brings the tools for running the installation
-        // (containers, agents, skills, models), whatever its manifest lists.
-        // Added before step 4, so the owner's tool blocklist still applies.
-        if !tools_unrestricted
-            && entry
-                .as_ref()
-                .is_some_and(|e| freeco_kernel_runtime::tool_policy::holds_ceo_role(&e.tags))
+        // (containers, agents, skills, models), whatever its manifest or tool
+        // profile lists. Added before step 4, so the owner's tool blocklist
+        // still applies; tools already present are not added twice.
+        if entry
+            .as_ref()
+            .is_some_and(|e| freeco_kernel_runtime::tool_policy::holds_ceo_role(&e.tags))
         {
             let browser_enabled = self.config.browser.enabled;
             for def in builtin_tool_definitions() {
@@ -7841,6 +7841,17 @@ impl KernelHandle for FreecoKernel {
 
         let manifest: AgentManifest =
             toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+        // This is the path agents spawn through. The CEO role brings the tools
+        // for running the installation whatever the manifest declares, so an
+        // agent able to spawn could otherwise give a child more than it holds.
+        // The owner gives the role, from the dashboard.
+        if freeco_kernel_runtime::tool_policy::holds_ceo_role(&manifest.tags) {
+            return Err(
+                "An agent cannot create a CEO: the CEO role is given by the owner, from the \
+                 dashboard. Remove \"ceo\" from the manifest's tags and spawn it again."
+                    .to_string(),
+            );
+        }
         let name = manifest.name.clone();
         let parent = parent_id.and_then(|pid| pid.parse::<AgentId>().ok());
         let id = self
@@ -8923,10 +8934,28 @@ impl KernelHandle for FreecoKernel {
             .get(id)
             .ok_or_else(|| format!("Agent not found: {agent}"))?;
         let m = &entry.manifest;
-        // The tools it really gets, after role grants and filters, not only
-        // the ones its manifest names: that is what it can actually do.
-        let mut tools: Vec<String> = self
-            .available_tools(id)
+        // The tools it really gets, resolved as a message to it resolves them
+        // (workspace skills included, then its mode's filter), not only the
+        // ones its manifest names: that is what it can actually do.
+        let skill_snapshot = {
+            let mut snapshot = self
+                .skill_registry
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot();
+            if let Some(ref workspace) = m.workspace {
+                let ws_skills = workspace.join("skills");
+                if ws_skills.exists() {
+                    if let Err(e) = snapshot.load_workspace_skills(&ws_skills) {
+                        warn!(agent_id = %id, "Failed to load workspace skills: {e}");
+                    }
+                }
+            }
+            snapshot
+        };
+        let mut tools: Vec<String> = entry
+            .mode
+            .filter_tools(self.available_tools_with_registry(id, Some(&skill_snapshot)))
             .into_iter()
             .map(|t| t.name)
             .collect();
@@ -8936,6 +8965,7 @@ impl KernelHandle for FreecoKernel {
             "id": entry.id.to_string(),
             "name": entry.name,
             "state": format!("{:?}", entry.state),
+            "mode": format!("{:?}", entry.mode),
             "description": m.description,
             "module": m.module,
             "tags": entry.tags,
@@ -9026,20 +9056,24 @@ impl KernelHandle for FreecoKernel {
         catalog
             .list_models()
             .iter()
-            .map(|m| freeco_kernel_runtime::kernel_handle::ModelChoice {
-                id: m.id.clone(),
-                display_name: m.display_name.clone(),
-                provider: m.provider.clone(),
-                tier: m.tier.to_string(),
-                context_window: m.context_window,
-                max_output_tokens: m.max_output_tokens,
-                supports_tools: m.supports_tools,
-                input_cost_per_m: m.input_cost_per_m,
-                output_cost_per_m: m.output_cost_per_m,
-                // A provider never probed counts as serving the model, as
-                // the dashboard's model list treats it.
-                usable: ready.contains(&m.provider.to_lowercase())
-                    && catalog.is_served(&m.provider, &m.id) != Some(false),
+            .map(|m| {
+                let provider_has_key = ready.contains(&m.provider.to_lowercase());
+                freeco_kernel_runtime::kernel_handle::ModelChoice {
+                    id: m.id.clone(),
+                    display_name: m.display_name.clone(),
+                    provider: m.provider.clone(),
+                    tier: m.tier.to_string(),
+                    context_window: m.context_window,
+                    max_output_tokens: m.max_output_tokens,
+                    supports_tools: m.supports_tools,
+                    input_cost_per_m: m.input_cost_per_m,
+                    output_cost_per_m: m.output_cost_per_m,
+                    // A provider never probed counts as serving the model, as
+                    // the dashboard's model list treats it.
+                    usable: provider_has_key
+                        && catalog.is_served(&m.provider, &m.id) != Some(false),
+                    provider_has_key,
+                }
             })
             .collect()
     }
@@ -10121,6 +10155,40 @@ mod tests {
         assert!(!tools.iter().any(|t| t == "container_stop"));
         assert_eq!(described["skills"], "all installed skills");
         assert!(kernel.describe_agent("nobody").is_err());
+
+        // A CEO with no tool list and a narrow profile still gets the tools.
+        let profiled = register_agent_with_tools(&kernel, "profiled-ceo", &[], &["ceo"]);
+        {
+            let mut entry = kernel.registry.get(profiled).unwrap();
+            entry.manifest.profile = Some(ToolProfile::Minimal);
+            kernel.registry.remove(profiled).unwrap();
+            kernel.registry.register(entry).unwrap();
+        }
+        let profiled_tools = names(profiled);
+        assert!(
+            profiled_tools.iter().any(|t| t == "file_read"),
+            "keeps its profile"
+        );
+        assert!(profiled_tools.iter().any(|t| t == "container_list"));
+        assert!(!profiled_tools.iter().any(|t| t == "shell_exec"));
+
+        // agent_describe applies the agent's mode, as a message to it would.
+        kernel.registry.set_mode(ceo, AgentMode::Assist).unwrap();
+        let described = kernel.describe_agent("concierge-ceo").unwrap();
+        let tools = described["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t == "web_fetch"));
+        assert!(!tools.iter().any(|t| t == "container_list"), "{tools:?}");
+        assert_eq!(described["mode"], "Assist");
+
+        // An agent cannot give a child the CEO role through a spawn.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let refused = rt.block_on(KernelHandle::spawn_agent(
+            &kernel,
+            "name = \"self-made-ceo\"\nmodule = \"builtin:chat\"\ntags = [\"ceo\"]\n",
+            Some(&helper.to_string()),
+        ));
+        assert!(refused.unwrap_err().contains("given by the owner"));
+        assert!(kernel.registry.find_by_name("self-made-ceo").is_none());
 
         kernel.shutdown();
     }
