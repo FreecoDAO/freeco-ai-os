@@ -2088,27 +2088,40 @@ impl FreecoKernel {
         Some(brief)
     }
 
-    /// Refuse a conversation that does not exist or belongs to another agent.
+    /// The conversation a message addressed to `session_id` runs in.
     ///
-    /// A session id arrives from a browser or a tool call; running agent A's
-    /// turn in agent B's conversation would hand B's history to A's model.
-    pub fn check_conversation_owner(
+    /// A session id arrives from a browser or a tool call. One that belongs to
+    /// another agent is refused: running agent A's turn in agent B's
+    /// conversation would hand B's history to A's model. One that no longer
+    /// exists -- the chat was reset or deleted in another window -- falls back
+    /// to the agent's current conversation, which is where the sender's next
+    /// message would go anyway; refusing it would drop what they typed.
+    pub fn resolve_conversation(
         &self,
         agent_id: AgentId,
         session_id: SessionId,
-    ) -> KernelResult<()> {
+    ) -> KernelResult<SessionId> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        if session_id == entry.session_id {
+            return Ok(session_id);
+        }
         match self
             .memory
             .get_session(session_id)
             .map_err(KernelError::Freeco)?
         {
-            Some(session) if session.agent_id == agent_id => Ok(()),
+            Some(session) if session.agent_id == agent_id => Ok(session_id),
             Some(_) => Err(KernelError::Freeco(FreecoError::Internal(
                 "That conversation belongs to a different agent".to_string(),
             ))),
-            None => Err(KernelError::Freeco(FreecoError::Internal(
-                "Conversation not found".to_string(),
-            ))),
+            None => {
+                info!(agent_id = %agent_id, session_id = %session_id.0,
+                      "Addressed conversation is gone; using the current one");
+                Ok(entry.session_id)
+            }
         }
     }
 
@@ -2129,10 +2142,7 @@ impl FreecoKernel {
             .get(agent_id)
             .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
         let session_id = match pinned_session {
-            Some(sid) => {
-                self.check_conversation_owner(agent_id, sid)?;
-                sid
-            }
+            Some(sid) => self.resolve_conversation(agent_id, sid)?,
             None => entry.session_id,
         };
 
@@ -2314,7 +2324,7 @@ impl FreecoKernel {
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.check_conversation_owner(agent_id, session_id)?;
+        let session_id = self.resolve_conversation(agent_id, session_id)?;
         self.send_message_streaming_pinned(
             agent_id,
             Some(session_id),

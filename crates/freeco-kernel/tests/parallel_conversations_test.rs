@@ -484,3 +484,35 @@ async fn asking_back_up_the_chain_is_refused_not_deadlocked() {
     assert!(reply.contains("PING GOT"), "{reply}");
     assert!(reply.contains("already busy"), "{reply}");
 }
+
+/// A chat names its conversation. Another agent's is refused; one reset or
+/// deleted in another window falls back to the current one, so what the user
+/// typed is still answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_addressed_conversation_is_checked_before_use() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("addressed");
+    let mine = spawn(&kernel, "echo", &url, &[]);
+    let theirs = spawn(&kernel, "other", &url, &[]);
+    let their_session = kernel.registry.get(theirs).unwrap().session_id;
+
+    let refused = kernel
+        .send_message_in_session(mine, their_session, "not yours", None, None)
+        .await;
+    assert!(refused.is_err(), "another agent's conversation is refused");
+    assert!(user_texts(&kernel, their_session).is_empty());
+
+    let gone = kernel
+        .memory
+        .create_session_with_label(mine, Some("short-lived"))
+        .unwrap()
+        .id;
+    kernel.memory.delete_session(gone).unwrap();
+    kernel
+        .send_message_in_session(mine, gone, "after a reset", None, None)
+        .await
+        .expect("a vanished conversation falls back to the current one");
+    let current = kernel.registry.get(mine).unwrap().session_id;
+    assert_eq!(user_texts(&kernel, current), vec!["after a reset"]);
+}

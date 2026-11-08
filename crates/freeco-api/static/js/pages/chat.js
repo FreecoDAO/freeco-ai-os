@@ -789,6 +789,7 @@ function chatPage() {
           if (self.currentAgent) {
             FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function() {
               self.messages = [];
+              self.sessionId = null; // the reset made a new conversation
               FreecoToast.success('Session reset');
             }).catch(function(e) { FreecoToast.error('Reset failed: ' + e.message); });
           }

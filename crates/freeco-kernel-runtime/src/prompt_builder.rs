@@ -621,7 +621,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
     }
     out.push_str(
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
-         Delegate tasks to specialized agents when appropriate.",
+         Delegate tasks to specialized agents when appropriate: `agent_delegate` hands several \
+         independent tasks to them at once and they work in parallel.",
     );
     out
 }

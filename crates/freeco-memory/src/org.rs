@@ -570,10 +570,16 @@ mod tests {
         );
         assert_eq!(s.session_scope("missing").unwrap(), None);
 
-        let renamed = s.update_project(&p.id, None, Some("new brief")).unwrap().unwrap();
+        let renamed = s
+            .update_project(&p.id, None, Some("new brief"))
+            .unwrap()
+            .unwrap();
         assert_eq!(renamed.name, "Launch", "an absent name is left alone");
         assert_eq!(renamed.description.as_deref(), Some("new brief"));
-        assert!(s.update_project("missing", Some("x"), None).unwrap().is_none());
+        assert!(s
+            .update_project("missing", Some("x"), None)
+            .unwrap()
+            .is_none());
     }
 
     /// Archive and trash are different states, and neither destroys anything.
