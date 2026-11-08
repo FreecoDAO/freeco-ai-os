@@ -6837,6 +6837,26 @@ impl FreecoKernel {
             }
         }
 
+        // Step 3.5: The CEO role brings the tools for running the installation
+        // (containers, agents, skills, models), whatever its manifest lists.
+        // Added before step 4, so the owner's tool blocklist still applies.
+        if !tools_unrestricted
+            && entry
+                .as_ref()
+                .is_some_and(|e| freeco_kernel_runtime::tool_policy::holds_ceo_role(&e.tags))
+        {
+            let browser_enabled = self.config.browser.enabled;
+            for def in builtin_tool_definitions() {
+                if freeco_kernel_runtime::tool_policy::CEO_MANAGEMENT_TOOLS
+                    .contains(&def.name.as_str())
+                    && (browser_enabled || !def.name.starts_with("browser_"))
+                    && !all_tools.iter().any(|t| t.name == def.name)
+                {
+                    all_tools.push(def);
+                }
+            }
+        }
+
         // Step 4: Apply per-agent tool_allowlist/tool_blocklist overrides.
         // These are separate from capabilities.tools and act as additional filters.
         let (tool_allowlist, tool_blocklist) = entry
@@ -8895,6 +8915,149 @@ impl KernelHandle for FreecoKernel {
         // Delegate to the normal spawn path (use trait method via KernelHandle::)
         KernelHandle::spawn_agent(self, manifest_toml, parent_id).await
     }
+
+    fn describe_agent(&self, agent: &str) -> Result<serde_json::Value, String> {
+        let id = resolve_agent_ref(self, agent)?;
+        let entry = self
+            .registry
+            .get(id)
+            .ok_or_else(|| format!("Agent not found: {agent}"))?;
+        let m = &entry.manifest;
+        // The tools it really gets, after role grants and filters, not only
+        // the ones its manifest names: that is what it can actually do.
+        let mut tools: Vec<String> = self
+            .available_tools(id)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        tools.sort();
+        tools.dedup();
+        Ok(serde_json::json!({
+            "id": entry.id.to_string(),
+            "name": entry.name,
+            "state": format!("{:?}", entry.state),
+            "description": m.description,
+            "module": m.module,
+            "tags": entry.tags,
+            "ceo_role": freeco_kernel_runtime::tool_policy::holds_ceo_role(&entry.tags),
+            "model": {
+                "provider": m.model.provider,
+                "model": m.model.model,
+                "max_output_tokens": m.model.max_tokens,
+                "temperature": m.model.temperature,
+            },
+            "max_llm_tokens_per_hour": m.resources.max_llm_tokens_per_hour,
+            "tools": tools,
+            "tools_declared": if m.capabilities.tools.is_empty() {
+                serde_json::json!("all")
+            } else {
+                serde_json::json!(m.capabilities.tools)
+            },
+            "tool_allowlist": m.tool_allowlist,
+            "tool_blocklist": m.tool_blocklist,
+            "skills": if m.skills.is_empty() {
+                serde_json::json!("all installed skills")
+            } else {
+                serde_json::json!(m.skills)
+            },
+            "mcp_servers": if m.mcp_servers.is_empty() {
+                serde_json::json!("all connected servers")
+            } else {
+                serde_json::json!(m.mcp_servers)
+            },
+        }))
+    }
+
+    fn agent_skills(&self, agent: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let id = resolve_agent_ref(self, agent)?;
+        let entry = self
+            .registry
+            .get(id)
+            .ok_or_else(|| format!("Agent not found: {agent}"))?;
+        let mut installed = self
+            .skill_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .skill_names();
+        installed.sort();
+        Ok((entry.manifest.skills.clone(), installed))
+    }
+
+    fn set_agent_skills_by_ref(&self, agent: &str, skills: Vec<String>) -> Result<(), String> {
+        let id = resolve_agent_ref(self, agent)?;
+        // The same path as the dashboard's PUT /api/agents/{id}/skills, so a
+        // change made by the CEO and one made by hand are stored alike.
+        self.set_agent_skills(id, skills).map_err(|e| e.to_string())
+    }
+
+    fn reload_skills_now(&self) -> Result<usize, String> {
+        if self
+            .skill_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_frozen()
+        {
+            return Err(
+                "Skills are frozen in Stable mode, so they cannot be reloaded while FreEco \
+                 runs. Restart FreEco to pick up changed skills."
+                    .to_string(),
+            );
+        }
+        self.reload_skills();
+        Ok(self
+            .skill_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .count())
+    }
+
+    fn list_model_choices(&self) -> Vec<freeco_kernel_runtime::kernel_handle::ModelChoice> {
+        use freeco_types::model_catalog::AuthStatus;
+        let catalog = match self.model_catalog.read() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let ready: std::collections::HashSet<String> = catalog
+            .list_providers()
+            .iter()
+            .filter(|p| p.auth_status != AuthStatus::Missing)
+            .map(|p| p.id.to_lowercase())
+            .collect();
+        catalog
+            .list_models()
+            .iter()
+            .map(|m| freeco_kernel_runtime::kernel_handle::ModelChoice {
+                id: m.id.clone(),
+                display_name: m.display_name.clone(),
+                provider: m.provider.clone(),
+                tier: m.tier.to_string(),
+                context_window: m.context_window,
+                max_output_tokens: m.max_output_tokens,
+                supports_tools: m.supports_tools,
+                input_cost_per_m: m.input_cost_per_m,
+                output_cost_per_m: m.output_cost_per_m,
+                // A provider never probed counts as serving the model, as
+                // the dashboard's model list treats it.
+                usable: ready.contains(&m.provider.to_lowercase())
+                    && catalog.is_served(&m.provider, &m.id) != Some(false),
+            })
+            .collect()
+    }
+}
+
+/// An agent named by UUID or by name, as the agent tools accept it.
+fn resolve_agent_ref(kernel: &FreecoKernel, agent: &str) -> Result<AgentId, String> {
+    let agent = agent.trim();
+    match agent.parse::<AgentId>() {
+        Ok(id) => Ok(id),
+        Err(_) => kernel
+            .registry
+            .find_by_name(agent)
+            .map(|e| e.id)
+            .ok_or_else(|| {
+                format!("Agent not found: {agent}. agent_list shows every agent's name and id.")
+            }),
+    }
 }
 
 // --- OFP Wire Protocol integration ---
@@ -8979,6 +9142,10 @@ impl freeco_wire::peer::PeerHandle for FreecoKernel {
 /// everything or deny everything.
 fn describe_tool_intent(tool_name: &str) -> String {
     match tool_name {
+        "container_start" => "start a stopped container on this machine",
+        "container_stop" => "stop a running container on this machine",
+        "container_restart" => "restart a container on this machine",
+        "agent_skills_set" => "change which skills an agent uses",
         "shell_exec" => "run a command directly on your machine, outside the sandbox",
         "sandbox_exec" => "run a command inside the isolated Linux sandbox",
         "file_write" | "file_edit" => "change a file on disk",
@@ -8999,6 +9166,19 @@ fn describe_tool_intent(tool_name: &str) -> String {
 /// tells the user what they are risking; "calls fs::write" does not.
 fn describe_tool_consequences(tool_name: &str) -> String {
     match tool_name {
+        "container_start" => "The container starts and whatever it serves becomes available.",
+        "container_stop" => {
+            "Whatever the container serves is unavailable until it is started again. Its \
+             data is kept."
+        }
+        "container_restart" => {
+            "The container stops for a moment and starts again; requests in flight are \
+             dropped. Its data is kept."
+        }
+        "agent_skills_set" => {
+            "The agent's skill list is replaced from its next message; it can be changed back \
+             on the Skills page."
+        }
         "shell_exec" => {
             "The command runs with your account's privileges and can touch anything you can. \
              Nothing confines it."
@@ -9083,6 +9263,9 @@ fn tool_is_reversible(tool_name: &str) -> Option<bool> {
         // Deliberately unknown rather than guessed. A shell command may do
         // anything, and claiming it is reversible would be a lie the user acts on.
         "shell_exec" => None,
+        "container_start" | "container_stop" | "container_restart" | "agent_skills_set" => {
+            Some(true)
+        }
         _ => None,
     }
 }
@@ -9843,6 +10026,146 @@ mod tests {
         };
         kernel.registry.register(entry).unwrap();
         agent_id
+    }
+
+    /// Register an agent that declares exactly `tools`, carrying `tags`.
+    fn register_agent_with_tools(
+        kernel: &FreecoKernel,
+        name: &str,
+        tools: &[&str],
+        tags: &[&str],
+    ) -> AgentId {
+        let agent_id = AgentId::new();
+        let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+        let mut manifest = test_manifest(name, "role test", tags.clone());
+        manifest.capabilities.tools = tools.iter().map(|t| t.to_string()).collect();
+        let entry = AgentEntry {
+            id: agent_id,
+            name: name.to_string(),
+            manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: chrono::Utc::now(),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: SessionId::new(),
+            tags,
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+        };
+        kernel.registry.register(entry).unwrap();
+        agent_id
+    }
+
+    #[test]
+    fn the_ceo_role_brings_the_management_tools() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-ceo-role");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+
+        // The concierge as shipped: a short tool list for its own job.
+        let ceo = register_agent_with_tools(
+            &kernel,
+            "concierge-ceo",
+            &["memory_store", "web_fetch"],
+            &["concierge", "ceo"],
+        );
+        let helper =
+            register_agent_with_tools(&kernel, "helper", &["memory_store", "web_fetch"], &[]);
+
+        let names = |id| -> Vec<String> {
+            kernel
+                .available_tools(id)
+                .into_iter()
+                .map(|t| t.name)
+                .collect()
+        };
+        let ceo_tools = names(ceo);
+        for tool in freeco_kernel_runtime::tool_policy::CEO_MANAGEMENT_TOOLS {
+            assert!(ceo_tools.iter().any(|t| t == tool), "CEO lacks {tool}");
+        }
+        assert!(ceo_tools.iter().any(|t| t == "web_fetch"), "keeps its own");
+        assert!(!ceo_tools.iter().any(|t| t == "agent_kill"));
+        assert!(!ceo_tools.iter().any(|t| t == "shell_exec"));
+        let mut unique = ceo_tools.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ceo_tools.len(), "no tool listed twice");
+
+        // Without the role nothing is added.
+        let helper_tools = names(helper);
+        assert_eq!(helper_tools.len(), 2, "{helper_tools:?}");
+
+        // The owner's blocklist still wins over the role.
+        kernel
+            .set_agent_tool_filters(ceo, None, Some(vec!["container_stop".to_string()]))
+            .unwrap();
+        assert!(!names(ceo).iter().any(|t| t == "container_stop"));
+        assert!(names(ceo).iter().any(|t| t == "container_restart"));
+
+        // agent_describe reports what the agent really holds, by name.
+        let described = kernel.describe_agent("concierge-ceo").unwrap();
+        assert_eq!(described["ceo_role"], true);
+        let tools = described["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t == "container_list"));
+        assert!(!tools.iter().any(|t| t == "container_stop"));
+        assert_eq!(described["skills"], "all installed skills");
+        assert!(kernel.describe_agent("nobody").is_err());
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn agent_skills_are_switched_through_the_dashboard_path() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-agent-skills");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+        let agent = register_test_agent(&kernel, "skilled");
+
+        let (assigned, installed) = kernel.agent_skills("skilled").unwrap();
+        assert!(assigned.is_empty(), "no list means every skill");
+        assert!(installed.len() >= 2, "bundled skills are installed");
+        let mut sorted = installed.clone();
+        sorted.sort();
+        assert_eq!(sorted, installed, "names come sorted");
+
+        let pick = vec![installed[0].clone(), installed[1].clone()];
+        kernel
+            .set_agent_skills_by_ref(&agent.to_string(), pick.clone())
+            .unwrap();
+        assert_eq!(kernel.agent_skills("skilled").unwrap().0, pick);
+        assert_eq!(kernel.registry.get(agent).unwrap().manifest.skills, pick);
+
+        // Unknown names are refused by the same validation the API uses.
+        assert!(kernel
+            .set_agent_skills_by_ref("skilled", vec!["no-such-skill".into()])
+            .is_err());
+
+        let count = kernel.reload_skills_now().unwrap();
+        assert_eq!(count, installed.len());
+
+        let models = kernel.list_model_choices();
+        assert!(!models.is_empty(), "the catalog lists models");
+
+        kernel.shutdown();
     }
 
     #[test]

@@ -685,6 +685,36 @@ pub async fn execute_tool(
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, workspace_root).await,
 
+        // Running the installation: containers, per-agent skills, agent
+        // details and the model catalog. The CEO role holds these.
+        "container_list" => crate::container_admin::tool_container_list(input).await,
+        "container_logs" => crate::container_admin::tool_container_logs(input).await,
+        "container_start" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Start,
+                input,
+            )
+            .await
+        }
+        "container_stop" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Stop,
+                input,
+            )
+            .await
+        }
+        "container_restart" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Restart,
+                input,
+            )
+            .await
+        }
+        "agent_describe" => tool_agent_describe(input, kernel),
+        "agent_skills_set" => tool_agent_skills_set(input, kernel),
+        "skill_reload" => tool_skill_reload(kernel),
+        "model_list" => tool_model_list(input, kernel),
+
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
             if mcp::is_mcp_tool(other) {
@@ -1821,6 +1851,141 @@ them.".to_string(),
                 "required": ["skill"]
             }),
         },
+        // --- Running the installation (the CEO role holds these) ---
+        ToolDefinition {
+            name: "container_list".to_string(),
+            description: "List every container on this machine, whatever started it: FreEco's \
+                          services, hands, the CRM, speech, accounting, the daemon itself. Shows \
+                          name, state, status, image and ports. Use this first whenever a \
+                          service seems down, before reading logs or restarting anything."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter": { "type": "string", "description": "Optional text to match in the container name or image, e.g. crm or speaches" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "container_logs".to_string(),
+            description: "Read the last lines a container wrote. Use it to find out why a \
+                          service fails before restarting it: a restart hides the cause and \
+                          the same error usually comes back."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id, exactly as container_list shows it" },
+                    "lines": { "type": "integer", "description": "How many of the newest lines to read (default 100, max 1000)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_start".to_string(),
+            description: "Start a stopped container and report the state it reaches. A \
+                          container that exits straight away is reported as not running, \
+                          with a pointer to its logs."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_stop".to_string(),
+            description: "Stop a running container. It gets 20 seconds to shut down cleanly. \
+                          Whatever it serves is unavailable until it is started again. \
+                          FreEco's own container cannot be stopped from here."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_restart".to_string(),
+            description: "Restart a container and report the state it reaches. Read \
+                          container_logs first: restart only when the logs show a transient \
+                          fault (a lost connection, a hung process), not a configuration error. \
+                          FreEco's own container cannot be restarted from here."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_describe".to_string(),
+            description: "Show one agent's full setup: model and provider, output limit, the \
+                          tools it really has, which skills are switched on for it, its MCP \
+                          servers and tags. Call it on yourself to see your own abilities, \
+                          and on an agent before changing it."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_skills_set".to_string(),
+            description: "Switch skills on or off for one agent. An agent with no list uses \
+                          every installed skill; switching one off gives it a list of all the \
+                          others. Pass all=true to go back to every skill. With no changes it \
+                          reports the agent's current skills. Find skill names with skill_list."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" },
+                    "enable": { "type": "array", "items": { "type": "string" }, "description": "Skill names to switch on" },
+                    "disable": { "type": "array", "items": { "type": "string" }, "description": "Skill names to switch off" },
+                    "only": { "type": "array", "items": { "type": "string" }, "description": "Replace the agent's skills with exactly these" },
+                    "all": { "type": "boolean", "description": "true: the agent uses every installed skill again" }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_reload".to_string(),
+            description: "Reload installed skills from disk, after skill folders were added, \
+                          changed or removed. Reports how many skills are installed now. New \
+                          skills reach agents from their next message."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "model_list".to_string(),
+            description: "List the models agents can be switched to, with provider, tier, \
+                          context size, tool support and price. By default only models whose \
+                          provider has a working key; include_unavailable=true shows the rest. \
+                          Use it before agent_set_model, and provider_list to see which \
+                          providers still need a key."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "provider": { "type": "string", "description": "Only this provider, e.g. anthropic, groq, nvidia" },
+                    "query": { "type": "string", "description": "Text to match in the model id or name, e.g. opus or llama" },
+                    "include_unavailable": { "type": "boolean", "description": "Also list models whose provider has no key yet" }
+                }
+            }),
+        },
     ]
 }
 
@@ -2419,6 +2584,302 @@ fn tool_agent_activate(
     Ok(format!(
         "Agent '{name}' activated. It is now Running and ready to receive messages."
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Running the installation: agent details, per-agent skills, models
+// ---------------------------------------------------------------------------
+
+/// A JSON array of strings, trimmed, empty entries dropped.
+fn string_list(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn required_agent_ref(input: &serde_json::Value) -> Result<&str, String> {
+    input["agent_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "agent_id is required: the agent's UUID or name".to_string())
+}
+
+fn tool_agent_describe(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let details = kh.describe_agent(required_agent_ref(input)?)?;
+    Ok(serde_json::to_string_pretty(&details).unwrap_or_else(|_| details.to_string()))
+}
+
+/// What a skill change asks for, worked out before anything is stored.
+#[derive(Debug, PartialEq, Eq)]
+enum SkillChange {
+    /// Nothing to store; the agent already has what was asked.
+    Unchanged,
+    /// Store this allowlist. Empty means every installed skill.
+    Set(Vec<String>),
+}
+
+/// Work out an agent's next skill allowlist.
+///
+/// The stored form has one quirk every rule here works around: an empty list
+/// means "every skill". So switching one skill off for an agent that has no
+/// list gives it a list of all the others, a list that would end up empty is
+/// refused rather than silently turning every skill back on, and a list that
+/// names every installed skill is stored as empty, so skills installed later
+/// reach the agent too.
+fn next_skill_list(
+    assigned: &[String],
+    installed: &[String],
+    enable: &[String],
+    disable: &[String],
+    only: Option<&[String]>,
+    all: bool,
+) -> Result<SkillChange, String> {
+    let unknown: Vec<&str> = enable
+        .iter()
+        .chain(disable.iter())
+        .chain(only.unwrap_or(&[]).iter())
+        .filter(|name| !installed.contains(name))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "No installed skill is called {}. skill_list shows the installed names.",
+            unknown.join(", ")
+        ));
+    }
+    if all {
+        if only.is_some() || !enable.is_empty() || !disable.is_empty() {
+            return Err("all=true cannot be combined with enable, disable or only.".to_string());
+        }
+        return Ok(if assigned.is_empty() {
+            SkillChange::Unchanged
+        } else {
+            SkillChange::Set(Vec::new())
+        });
+    }
+    let next: Vec<String> = match only {
+        Some(list) => {
+            if !enable.is_empty() || !disable.is_empty() {
+                return Err("only cannot be combined with enable or disable.".to_string());
+            }
+            if list.is_empty() {
+                return Err(
+                    "only must name at least one skill. Use all=true for every skill.".to_string(),
+                );
+            }
+            let mut out: Vec<String> = Vec::new();
+            for name in list {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            out
+        }
+        None => {
+            if enable.is_empty() && disable.is_empty() {
+                return Ok(SkillChange::Unchanged);
+            }
+            // Every skill is already on for an agent without a list.
+            if assigned.is_empty() && disable.is_empty() {
+                return Ok(SkillChange::Unchanged);
+            }
+            let mut out: Vec<String> = if assigned.is_empty() {
+                installed.to_vec()
+            } else {
+                assigned.to_vec()
+            };
+            for name in enable {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            out.retain(|name| !disable.contains(name));
+            out
+        }
+    };
+    if next.is_empty() {
+        return Err(
+            "That would switch off every skill for this agent, which cannot be stored: an \
+             empty list means every skill. Leave at least one switched on."
+                .to_string(),
+        );
+    }
+    if !installed.is_empty() && installed.iter().all(|name| next.contains(name)) {
+        return Ok(if assigned.is_empty() {
+            SkillChange::Unchanged
+        } else {
+            SkillChange::Set(Vec::new())
+        });
+    }
+    if next == assigned {
+        return Ok(SkillChange::Unchanged);
+    }
+    Ok(SkillChange::Set(next))
+}
+
+/// One line saying which skills an agent has.
+fn describe_skill_assignment(agent: &str, assigned: &[String], installed: usize) -> String {
+    if assigned.is_empty() {
+        return format!("{agent} uses every installed skill ({installed}).");
+    }
+    const SHOWN: usize = 40;
+    let mut names = assigned
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if assigned.len() > SHOWN {
+        names.push_str(&format!(" and {} more", assigned.len() - SHOWN));
+    }
+    format!(
+        "{agent} uses {} of {installed} installed skills: {names}.",
+        assigned.len()
+    )
+}
+
+fn tool_agent_skills_set(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent = required_agent_ref(input)?;
+    let (assigned, installed) = kh.agent_skills(agent)?;
+    let only = input.get("only").filter(|v| v.is_array()).map(string_list);
+    let change = next_skill_list(
+        &assigned,
+        &installed,
+        &string_list(&input["enable"]),
+        &string_list(&input["disable"]),
+        only.as_deref(),
+        input["all"].as_bool().unwrap_or(false),
+    )?;
+    match change {
+        SkillChange::Unchanged => Ok(format!(
+            "No change. {}",
+            describe_skill_assignment(agent, &assigned, installed.len())
+        )),
+        SkillChange::Set(skills) => {
+            kh.set_agent_skills_by_ref(agent, skills)?;
+            // Report what was stored, read back, not what was asked for.
+            let (stored, installed) = kh.agent_skills(agent)?;
+            Ok(format!(
+                "Saved. {} The change applies from the agent's next message.",
+                describe_skill_assignment(agent, &stored, installed.len())
+            ))
+        }
+    }
+}
+
+fn tool_skill_reload(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let count = kh.reload_skills_now()?;
+    Ok(format!(
+        "Skills reloaded from disk: {count} installed. Agents see the new set from their next \
+         message; skill_list in this same turn still shows the set from when it began."
+    ))
+}
+
+fn tool_model_list(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    const MAX_SHOWN: usize = 60;
+    let kh = require_kernel(kernel)?;
+    let provider = input["provider"]
+        .as_str()
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty());
+    let query = input["query"]
+        .as_str()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty());
+    let include_unavailable = input["include_unavailable"].as_bool().unwrap_or(false);
+
+    let mut models: Vec<crate::kernel_handle::ModelChoice> = kh
+        .list_model_choices()
+        .into_iter()
+        .filter(|m| include_unavailable || m.usable)
+        .filter(|m| {
+            provider
+                .as_ref()
+                .is_none_or(|p| m.provider.to_lowercase() == *p)
+        })
+        .filter(|m| {
+            query.as_ref().is_none_or(|q| {
+                m.id.to_lowercase().contains(q) || m.display_name.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    if models.is_empty() {
+        return Ok(if include_unavailable {
+            "No model in the catalog matches.".to_string()
+        } else {
+            "No usable model matches. Pass include_unavailable=true to see models whose \
+             provider still needs a key, and provider_list for which keys are missing."
+                .to_string()
+        });
+    }
+    models.sort_by(|a, b| {
+        b.usable
+            .cmp(&a.usable)
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let total = models.len();
+    let mut out = format!(
+        "{} models{}. Pass the id to agent_set_model.\n",
+        total,
+        if total > MAX_SHOWN {
+            format!(", the first {MAX_SHOWN} shown (narrow with provider or query)")
+        } else {
+            String::new()
+        }
+    );
+    for m in models.iter().take(MAX_SHOWN) {
+        let context = if m.context_window >= 1000 {
+            format!("{}k context", m.context_window / 1000)
+        } else {
+            format!("{} context", m.context_window)
+        };
+        let price = if m.input_cost_per_m == 0.0 && m.output_cost_per_m == 0.0 {
+            "no per-token price".to_string()
+        } else {
+            format!(
+                "${:.2} in / ${:.2} out per M tokens",
+                m.input_cost_per_m, m.output_cost_per_m
+            )
+        };
+        out.push_str(&format!(
+            "- {} | {} | {} | {} | tools: {} | {}{}\n",
+            m.id,
+            m.provider,
+            m.tier,
+            context,
+            if m.supports_tools { "yes" } else { "no" },
+            price,
+            if m.usable {
+                ""
+            } else {
+                " | provider has no key"
+            }
+        ));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -4536,6 +4997,149 @@ async fn tool_skill_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn management_tools_are_defined_with_object_schemas() {
+        let tools = builtin_tool_definitions();
+        for name in [
+            "container_list",
+            "container_logs",
+            "container_start",
+            "container_stop",
+            "container_restart",
+            "agent_describe",
+            "agent_skills_set",
+            "skill_reload",
+            "model_list",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} not defined"));
+            assert_eq!(tool.input_schema["type"], "object", "{name}");
+        }
+        let unique: HashSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(unique.len(), tools.len(), "a tool is defined twice");
+    }
+
+    #[test]
+    fn skills_switched_off_from_all_leave_the_others_on() {
+        let installed = names(&["a", "b", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &names(&["b"]), None, false),
+            Ok(SkillChange::Set(names(&["a", "c"])))
+        );
+    }
+
+    #[test]
+    fn switching_on_a_skill_an_agent_already_has_changes_nothing() {
+        let installed = names(&["a", "b", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &names(&["a"]), &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &names(&["a"]), &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &[], &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+    }
+
+    #[test]
+    fn skills_are_added_and_removed_from_a_list() {
+        let installed = names(&["a", "b", "c", "d"]);
+        assert_eq!(
+            next_skill_list(
+                &names(&["a", "b"]),
+                &installed,
+                &names(&["c"]),
+                &names(&["a"]),
+                None,
+                false
+            ),
+            Ok(SkillChange::Set(names(&["b", "c"])))
+        );
+    }
+
+    #[test]
+    fn switching_the_last_skill_off_is_refused_not_turned_into_all() {
+        let installed = names(&["a", "b"]);
+        let err = next_skill_list(&names(&["a"]), &installed, &[], &names(&["a"]), None, false)
+            .unwrap_err();
+        assert!(err.contains("every skill"), "{err}");
+        assert!(next_skill_list(&[], &installed, &[], &names(&["a", "b"]), None, false).is_err());
+    }
+
+    #[test]
+    fn a_list_naming_every_skill_is_stored_as_all() {
+        let installed = names(&["a", "b"]);
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &names(&["b"]), &[], None, false),
+            Ok(SkillChange::Set(vec![]))
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &[], &[], None, true),
+            Ok(SkillChange::Set(vec![]))
+        );
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &[], None, true),
+            Ok(SkillChange::Unchanged)
+        );
+    }
+
+    #[test]
+    fn only_replaces_the_list() {
+        let installed = names(&["a", "b", "c"]);
+        let only = names(&["c", "a", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &[], Some(&only), false),
+            Ok(SkillChange::Set(names(&["c", "a"])))
+        );
+        assert!(next_skill_list(&[], &installed, &[], &[], Some(&[]), false).is_err());
+        assert!(next_skill_list(&[], &installed, &names(&["a"]), &[], Some(&only), false).is_err());
+    }
+
+    #[test]
+    fn unknown_skill_names_are_named_in_the_refusal() {
+        let installed = names(&["a"]);
+        let err =
+            next_skill_list(&[], &installed, &names(&["ghost"]), &[], None, false).unwrap_err();
+        assert!(err.contains("ghost") && err.contains("skill_list"), "{err}");
+        assert!(
+            next_skill_list(&[], &installed, &names(&["a"]), &[], None, true).is_err(),
+            "all cannot be mixed with changes"
+        );
+    }
+
+    #[test]
+    fn skill_assignment_is_described_in_one_line() {
+        assert_eq!(
+            describe_skill_assignment("ceo", &[], 335),
+            "ceo uses every installed skill (335)."
+        );
+        let many: Vec<String> = (0..45).map(|i| format!("s{i}")).collect();
+        let line = describe_skill_assignment("ceo", &many, 335);
+        assert!(line.starts_with("ceo uses 45 of 335 installed skills: s0, s1"));
+        assert!(line.ends_with(" and 5 more."), "{line}");
+    }
+
+    #[test]
+    fn management_tools_need_a_kernel() {
+        let input = serde_json::json!({"agent_id": "ceo"});
+        assert!(tool_agent_describe(&input, None).is_err());
+        assert!(tool_agent_skills_set(&input, None).is_err());
+        assert!(tool_skill_reload(None).is_err());
+        assert!(tool_model_list(&serde_json::json!({}), None).is_err());
+        let err = required_agent_ref(&serde_json::json!({"agent_id": "  "})).unwrap_err();
+        assert!(err.contains("agent_id"));
+    }
 
     #[test]
     fn test_builtin_tool_definitions() {
