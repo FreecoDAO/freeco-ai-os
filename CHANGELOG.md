@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An agent asked a question by an agent it is itself waiting on is told so,
   instead of both waiting for each other forever.
 - `project_create` stored the description as the company id.
+- Opening an agent's chat from a link (a project's Open button, the assistant's
+  "open the chat" links) while another chat was open landed on the agent list
+  instead of the chat.
 
 ## [0.9.8] - 2026-10-28
 
