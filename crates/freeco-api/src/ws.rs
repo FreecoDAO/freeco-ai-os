@@ -718,10 +718,25 @@ async fn handle_text_message(
             // different one. Without it, the agent's current conversation.
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
-            let pinned_session = parsed["session_id"]
-                .as_str()
-                .and_then(|sid| uuid::Uuid::parse_str(sid.trim()).ok())
-                .map(freeco_types::agent::SessionId);
+            // A conversation named but not readable is refused, as over HTTP:
+            // treating it as unnamed would send the message somewhere else.
+            let pinned_session = match parsed["session_id"].as_str().map(str::trim) {
+                None | Some("") => None,
+                Some(sid) => match uuid::Uuid::parse_str(sid) {
+                    Ok(u) => Some(freeco_types::agent::SessionId(u)),
+                    Err(_) => {
+                        let _ = send_json(
+                            sender,
+                            &serde_json::json!({
+                                "type": "error",
+                                "content": "Invalid session_id",
+                            }),
+                        )
+                        .await;
+                        return;
+                    }
+                },
+            };
             let started = match pinned_session {
                 Some(session_id) => state.kernel.send_message_streaming_in_session(
                     agent_id,
@@ -1438,6 +1453,9 @@ fn classify_streaming_error(err: &freeco_kernel::error::KernelError) -> String {
     }
     if inner.contains("quota") || inner.contains("Quota") {
         return "Token quota exceeded. Try /compact or /new to free up space.".to_string();
+    }
+    if inner.contains(freeco_kernel::kernel::CONVERSATION_RESET_WHILE_WAITING) {
+        return freeco_kernel::kernel::CONVERSATION_RESET_WHILE_WAITING.to_string();
     }
 
     // Use the LLM error classifier for everything else

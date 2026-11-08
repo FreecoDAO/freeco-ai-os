@@ -1195,11 +1195,14 @@ function chatPage() {
     //
     // Everything is fetched once and the last HISTORY_WINDOW messages drawn;
     // "Show earlier" reveals more from memory, with no request that can fail.
-    async loadHistory(agentId) {
+    async loadHistory(agentId, sessionId) {
       var gen = ++this._historyGen;
       this.historyLoading = true;
       try {
-        var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/session');
+        // Without a conversation named, the agent's current one.
+        var url = '/api/agents/' + encodeURIComponent(agentId) + '/session';
+        if (sessionId) url += '?session_id=' + encodeURIComponent(sessionId);
+        var data = await FreecoAPI.get(url);
         // A newer load started while this one was in flight -- that agent or
         // session is what the user is looking at now.
         if (gen !== this._historyGen || !data) return;
@@ -1215,14 +1218,15 @@ function chatPage() {
         this._historyWindow = HISTORY_WINDOW;
         this._showHistoryWindow();
         // A parked chat whose work is all done and saved is just history now.
-        var parked = this._parked[agentId];
-        if (parked && !parked.sending && !data.busy) { delete this._parked[agentId]; parked = null; }
+        var key = this._parkKey(agentId, this.sessionId);
+        var parked = this._parked[key];
+        if (parked && !parked.sending && !data.busy) { delete this._parked[key]; parked = null; }
         if (parked) this._showParkedMessages(parked);
         this.$nextTick(function() { self.scrollToBottom(true); });
         // A run is still working here: left mid-reply, a message delivered
         // while away, or a reload during a run. Say so and pick the reply up
         // when it lands, rather than show a thread that looks ignored.
-        if (data.busy || parked) this._watchBusy(agentId);
+        if (data.busy || parked) this._watchBusy(agentId, this.sessionId);
       } catch (e) {
         if (gen === this._historyGen) {
           FreecoToast.error('Could not load this conversation: ' + (e.message || 'error'));
@@ -1362,6 +1366,8 @@ function chatPage() {
         await this.loadSession(this.currentAgent.id);
         this.messages = [];
         this.scrollToBottom();
+        this._wsAgent = null;
+        this.connectWs(this.currentAgent.id);
         if (typeof FreecoToast !== 'undefined') FreecoToast.success(t('chat.session_created'));
       } catch(e) {
         if (typeof FreecoToast !== 'undefined') FreecoToast.error(t('chat.session_create_failed'));
@@ -1759,26 +1765,36 @@ function chatPage() {
       var unanswered = this.messages
         .filter(function(m) { return m.role === 'user' && m.pending; })
         .map(function(m) { return m.text; });
-      var parked = this._parked[agent.id] || { texts: [], sending: 0 };
+      var key = this._parkKey(agent.id, this.sessionId);
+      var parked = this._parked[key] || { texts: [], sending: 0 };
       parked.texts = parked.texts.concat(unanswered);
-      this._parked[agent.id] = parked;
+      this._parked[key] = parked;
       if (queue.length) this._deliverParked(agent.id, this.sessionId, queue);
     },
 
+    // Parked state belongs to one conversation: an agent can be working in
+    // several, and one left mid-reply must not show up in another.
+    _parkKey: function(agentId, sessionId) {
+      return agentId + '|' + (sessionId || '');
+    },
+
     // Moving to another conversation of the same agent: what was queued for
-    // the one on screen is delivered to it, not to the one being opened.
+    // the one on screen is delivered to it, not to the one being opened, and
+    // it is parked like a chat left for another agent.
+    //
+    // The agent's socket is dropped too, before the switch is even asked for:
+    // frames of the run left behind would otherwise be drawn into the next
+    // conversation. The run carries on and is saved; whoever opens the next
+    // conversation connects again.
     _leaveConversation: function() {
       if (!this.currentAgent) return;
-      this._stopBusyWatch();
-      this._clearTypingTimeout();
-      var queue = this.messageQueue.slice();
-      this.messageQueue = [];
-      this.sending = false;
-      if (queue.length) this._deliverParked(this.currentAgent.id, this.sessionId, queue);
+      this._parkCurrentChat();
+      FreecoAPI.wsDisconnect();
+      this._wsAgent = null;
     },
 
     _deliverParked: async function(agentId, sessionId, queue) {
-      var parked = this._parked[agentId];
+      var parked = this._parked[this._parkKey(agentId, sessionId)];
       if (parked) parked.sending += queue.length;
       for (var i = 0; i < queue.length; i++) {
         var q = queue[i];
@@ -1804,28 +1820,38 @@ function chatPage() {
     },
 
     // Show that the agent is working here, and reload once it has finished.
-    _watchBusy: function(agentId) {
+    //
+    // Watched by conversation, not by agent: another window switching the
+    // agent to a different conversation must not end this watch or swap what
+    // this chat shows and where its queue goes.
+    _watchBusy: function(agentId, sessionId) {
       this._stopBusyWatch();
       this.sending = true;
       if (!this.messages.some(function(m) { return m.thinking; })) {
         this.messages.push({ id: ++msgId, role: 'agent', text: 'Still working on this...', meta: '', thinking: true, tools: [], ts: Date.now() });
       }
       var self = this;
+      var key = this._parkKey(agentId, sessionId);
+      var here = function() {
+        return self.currentAgent && self.currentAgent.id === agentId && self.sessionId === sessionId;
+      };
       this._busyPoll = setInterval(async function() {
-        if (!self.currentAgent || self.currentAgent.id !== agentId) { self._stopBusyWatch(); return; }
-        var parked = self._parked[agentId];
+        if (!here()) { self._stopBusyWatch(); return; }
+        var parked = self._parked[key];
         if (parked && parked.sending > 0) return;
         try {
-          var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/session');
+          var url = '/api/agents/' + encodeURIComponent(agentId) + '/session';
+          if (sessionId) url += '?session_id=' + encodeURIComponent(sessionId);
+          var data = await FreecoAPI.get(url);
           if (!data || data.busy) return;
         } catch (e) { return; }
-        if (!self.currentAgent || self.currentAgent.id !== agentId || !self._busyPoll) return;
+        if (!here() || !self._busyPoll) return;
         self._stopBusyWatch();
-        delete self._parked[agentId];
+        delete self._parked[key];
         // Messages typed meanwhile stay: they are pending and still queued.
         self.messages = self.messages.filter(function(m) { return !m.thinking && !m.parked; });
         self.sending = false;
-        await self.loadHistory(agentId);
+        await self.loadHistory(agentId, sessionId);
         self._processQueue();
       }, 3000);
     },
@@ -1946,22 +1972,28 @@ function chatPage() {
       this.messages.push({ id: ++msgId, role: 'agent', text: '', meta: '', thinking: true, tools: [], ts: Date.now() });
       this.scrollToBottom();
 
+      var sentSession = this.sessionId;
+      var self0 = this;
+      // The user moved to another chat, or another conversation of this
+      // agent, while this ran. The reply is saved with its conversation and
+      // shows when that is opened again; drawing it here would put it into a
+      // chat it does not belong to.
+      var left = function() {
+        return !self0.currentAgent || self0.currentAgent.id !== agentId || self0.sessionId !== sentSession;
+      };
       try {
         var httpBody = { message: finalText };
         if (uploadedFiles && uploadedFiles.length) httpBody.attachments = uploadedFiles;
-        if (this.sessionId) httpBody.session_id = this.sessionId;
+        if (sentSession) httpBody.session_id = sentSession;
         var res = await FreecoAPI.post('/api/agents/' + agentId + '/message', httpBody);
-        // The user moved to another chat while this ran. The reply is saved
-        // with that conversation and shows when it is opened again; drawing it
-        // here would put one agent's answer into another agent's chat.
-        if (!this.currentAgent || this.currentAgent.id !== agentId) return;
+        if (left()) return;
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
         this._pushAgentReply(res.response, httpMeta, [], Date.now());
       } catch(e) {
-        if (!this.currentAgent || this.currentAgent.id !== agentId) {
+        if (left()) {
           FreecoToast.error('A message did not reach ' + this._agentName(agentId) + ': ' + e.message);
           return;
         }

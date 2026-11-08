@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the chat just left were still rendered into the next one.
 - A message lands in the conversation it was typed in, even after another
   window switched the agent to a different conversation.
+- A message waiting behind a reply goes to the new conversation when the old
+  one is reset meanwhile, instead of bringing the reset one back. A streamed
+  message in that spot is refused with a note to send it again.
 - An agent asked a question by an agent it is itself waiting on is told so,
   instead of both waiting for each other forever.
 - `project_create` stored the description as the company id.

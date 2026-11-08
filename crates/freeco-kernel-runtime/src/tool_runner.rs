@@ -2329,9 +2329,16 @@ async fn tool_agent_send(
 /// Most tasks one `agent_delegate` call may start at once.
 const MAX_DELEGATED_TASKS: usize = 8;
 
-/// Longest delegated result handed back to the lead agent, in characters. The
-/// whole answer stays in the delegated conversation, which the result names.
-const MAX_DELEGATED_RESULT_CHARS: usize = 12_000;
+/// Longest delegated reply handed back to the lead agent, in bytes. The whole
+/// answer stays in the delegated conversation, which the result names.
+const MAX_DELEGATED_RESULT_BYTES: usize = 12_000;
+
+/// All replies of one call together, in bytes. The agent loop cuts a tool
+/// result at 30% of the context window (2 bytes a token), so eight full
+/// replies would be cut mid-JSON on a 128k model and the later tasks lost,
+/// conversations included. Splitting this keeps every task in the result on
+/// any model with a context of 40k tokens or more.
+const MAX_DELEGATED_RESULTS_TOTAL_BYTES: usize = 24_000;
 
 /// Hand tasks to agents and run them all at once.
 ///
@@ -2405,6 +2412,8 @@ async fn tool_agent_delegate(
         )
         .await;
 
+    let per_reply =
+        (MAX_DELEGATED_RESULTS_TOTAL_BYTES / planned.len().max(1)).min(MAX_DELEGATED_RESULT_BYTES);
     let mut finished = 0usize;
     let results: Vec<serde_json::Value> = planned
         .iter()
@@ -2412,13 +2421,9 @@ async fn tool_agent_delegate(
         .map(|((agent, title, _), outcome)| match outcome {
             Ok(done) => {
                 finished += 1;
-                let truncated = done.reply.chars().count() > MAX_DELEGATED_RESULT_CHARS;
-                let reply: String = if truncated {
-                    let mut r: String = done
-                        .reply
-                        .chars()
-                        .take(MAX_DELEGATED_RESULT_CHARS)
-                        .collect();
+                let reply: String = if done.reply.len() > per_reply {
+                    let mut r =
+                        crate::str_utils::safe_truncate_str(&done.reply, per_reply).to_string();
                     r.push_str("\n[... cut here; the whole reply is in its conversation]");
                     r
                 } else {

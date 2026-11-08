@@ -27,6 +27,8 @@ struct Call {
 #[derive(Default)]
 struct Script {
     calls: Mutex<Vec<Call>>,
+    /// The system prompt of every request, by who sent it.
+    prompts: Mutex<Vec<(String, String)>>,
 }
 
 impl Script {
@@ -87,6 +89,23 @@ fn reply_for(who: &str, body: &serde_json::Value) -> (Duration, serde_json::Valu
         ("lead", Some(result)) => (
             Duration::from_millis(10),
             text(format!("LEAD GOT {result}")),
+        ),
+        // Eight tasks whose answers are each far longer than a share of the
+        // result: the worker echoes its prompt, task text included.
+        ("wide", None) => (
+            Duration::from_millis(10),
+            call(
+                "agent_delegate",
+                serde_json::json!({ "tasks": (0..8).map(|i| serde_json::json!({
+                    "agent": "worker-a",
+                    "title": format!("part {i}"),
+                    "task": format!("Part {i}. {}", "long ".repeat(3_000)),
+                })).collect::<Vec<_>>() }),
+            ),
+        ),
+        ("wide", Some(result)) => (
+            Duration::from_millis(10),
+            text(format!("WIDE GOT {result}")),
         ),
         ("ping", None) => (
             Duration::from_millis(10),
@@ -247,6 +266,11 @@ async fn serve(script: Arc<Script>) -> String {
                     .and_then(|rest| rest.split_whitespace().next())
                     .unwrap_or("unknown")
                     .to_string();
+                script
+                    .prompts
+                    .lock()
+                    .unwrap()
+                    .push((who.clone(), system.clone()));
                 let start = Instant::now();
                 let (delay, reply) = reply_for(&who, &body);
                 tokio::time::sleep(delay).await;
@@ -298,6 +322,17 @@ fn boot(test: &str) -> Arc<FreecoKernel> {
 }
 
 fn spawn(kernel: &FreecoKernel, name: &str, base_url: &str, tools: &[&str]) -> AgentId {
+    spawn_with(kernel, name, base_url, tools, "")
+}
+
+/// `spawn`, with extra top-level manifest lines such as a tool profile.
+fn spawn_with(
+    kernel: &FreecoKernel,
+    name: &str,
+    base_url: &str,
+    tools: &[&str],
+    extra: &str,
+) -> AgentId {
     let tools = tools
         .iter()
         .map(|t| format!("\"{t}\""))
@@ -307,6 +342,7 @@ fn spawn(kernel: &FreecoKernel, name: &str, base_url: &str, tools: &[&str]) -> A
         r#"
 name = "{name}"
 module = "builtin:chat"
+{extra}
 [model]
 provider = "openai"
 model = "scripted"
@@ -515,4 +551,165 @@ async fn an_addressed_conversation_is_checked_before_use() {
         .expect("a vanished conversation falls back to the current one");
     let current = kernel.registry.get(mine).unwrap().session_id;
     assert_eq!(user_texts(&kernel, current), vec!["after a reset"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_waiting_on_a_reset_conversation_goes_to_the_new_one() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("reset-wait");
+    let agent = spawn(&kernel, "echo", &url, &[]);
+    let old = kernel.registry.get(agent).unwrap().session_id;
+
+    let k1 = Arc::clone(&kernel);
+    let first = tokio::spawn(async move { k1.send_message(agent, "first").await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let k2 = Arc::clone(&kernel);
+    let second = tokio::spawn(async move {
+        k2.send_message_in_session(agent, old, "second", None, None)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The user starts over while the first reply runs and the second waits.
+    kernel.reset_session(agent).unwrap();
+    let new = kernel.registry.get(agent).unwrap().session_id;
+    assert_ne!(new, old);
+
+    first.await.unwrap().expect("the running reply finishes");
+    second
+        .await
+        .unwrap()
+        .expect("the waiting message is still answered");
+    assert_eq!(
+        user_texts(&kernel, new),
+        vec!["second"],
+        "the waiting message goes to the conversation the agent is in now"
+    );
+    assert!(
+        !user_texts(&kernel, old).iter().any(|t| t == "second"),
+        "it is not saved into the conversation that was reset"
+    );
+
+    // Addressed to the reset conversation afterwards, a message is redirected
+    // too, even though the first reply saved that conversation again.
+    kernel
+        .send_message_in_session(agent, old, "third", None, None)
+        .await
+        .unwrap();
+    assert_eq!(user_texts(&kernel, new), vec!["second", "third"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_streamed_message_waiting_on_a_reset_conversation_says_so() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("reset-stream");
+    let agent = spawn(&kernel, "echo", &url, &[]);
+    let old = kernel.registry.get(agent).unwrap().session_id;
+
+    let k1 = Arc::clone(&kernel);
+    let first = tokio::spawn(async move { k1.send_message(agent, "first").await });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let (mut rx, streamed) = kernel
+        .send_message_streaming_in_session(agent, old, "streamed", None, None)
+        .expect("streaming starts");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    kernel.reset_session(agent).unwrap();
+    let new = kernel.registry.get(agent).unwrap().session_id;
+
+    first.await.unwrap().unwrap();
+    let err = streamed
+        .await
+        .unwrap()
+        .expect_err("the sender is told, not answered in a deleted chat");
+    assert!(
+        err.to_string()
+            .contains(freeco_kernel::kernel::CONVERSATION_RESET_WHILE_WAITING),
+        "{err}"
+    );
+    drain.await.unwrap();
+    assert!(!user_texts(&kernel, old).iter().any(|t| t == "streamed"));
+    assert!(user_texts(&kernel, new).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pinned_message_keeps_its_sender() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("sender");
+    let agent = spawn(&kernel, "echo", &url, &[]);
+    let session = kernel.registry.get(agent).unwrap().session_id;
+
+    kernel
+        .send_message_in_session_from(
+            agent,
+            session,
+            "hello",
+            None,
+            None,
+            Some("+41790000000".to_string()),
+            Some("Guest Room 12".to_string()),
+        )
+        .await
+        .unwrap();
+    let prompts = script.prompts.lock().unwrap().clone();
+    assert!(
+        prompts
+            .iter()
+            .any(|(who, p)| who == "echo" && p.contains("Message from: Guest Room 12")),
+        "the sender reaches the prompt: {prompts:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_messaging_profile_can_delegate() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("profile");
+    // No tool list: the tools come from the profile, which has `agent_send`.
+    let lead = spawn_with(&kernel, "lead", &url, &[], "profile = \"messaging\"");
+    spawn(&kernel, "worker-a", &url, &[]);
+    spawn(&kernel, "worker-b", &url, &[]);
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(30),
+        kernel.send_message(lead, "split this up"),
+    )
+    .await
+    .expect("delegation finishes")
+    .expect("lead run succeeds")
+    .response;
+    assert!(reply.contains("2 of 2 tasks finished"), "{reply}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eight_long_answers_all_come_back_whole() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("wide");
+    let lead = spawn(&kernel, "wide", &url, &["agent_send"]);
+    spawn(&kernel, "worker-a", &url, &[]);
+
+    let reply = tokio::time::timeout(
+        Duration::from_secs(60),
+        kernel.send_message(lead, "eight parts"),
+    )
+    .await
+    .expect("delegation finishes")
+    .expect("lead run succeeds")
+    .response;
+    let json = reply
+        .strip_prefix("WIDE GOT ")
+        .expect("the lead saw the result");
+    let result: serde_json::Value =
+        serde_json::from_str(json).expect("the result reaches the lead as whole JSON");
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 8, "every task is in the result");
+    for r in results {
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(r["conversation"].as_str().is_some(), "{r}");
+        assert!(r["reply"].as_str().unwrap().contains("cut here"), "{r}");
+    }
+    assert!(json.len() < 30_000, "{} bytes", json.len());
 }

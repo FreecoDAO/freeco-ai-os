@@ -180,7 +180,10 @@ function projectsPage() {
         var res = await FreecoAPI.put('/api/org/projects/' + encodeURIComponent(this.selected.id),
                                       { description: this.brief });
         if (res && res.project) {
-          this.selected.description = res.project.description;
+          // Another project may have been opened while this saved.
+          if (this.selected && this.selected.id === res.project.id) {
+            this.selected.description = res.project.description;
+          }
           var p = this.projects.find(function (x) { return x.id === res.project.id; });
           if (p) p.description = res.project.description;
         }

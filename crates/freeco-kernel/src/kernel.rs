@@ -62,6 +62,12 @@ fn held_conversations() -> Vec<SessionId> {
 
 /// The conversation the current call chain is running in, if any: the one
 /// whose agent is calling a tool right now.
+/// Told to a streaming sender whose conversation was reset while its message
+/// waited for the run before it.
+pub const CONVERSATION_RESET_WHILE_WAITING: &str =
+    "This conversation was reset while your message waited for the reply before it, \
+     so it was not sent. Send it again to continue in the new conversation.";
+
 fn current_conversation() -> Option<SessionId> {
     HELD_CONVERSATIONS
         .try_with(|held| held.last().copied())
@@ -210,6 +216,10 @@ pub struct FreecoKernel {
     /// conversations of the same agent, which is what lets one agent answer a
     /// WhatsApp guest, a dashboard chat and a delegated task together.
     conversation_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
+    /// Conversations reset or deleted since boot. A run still going in one
+    /// saves it again when it finishes, so "no longer stored" cannot tell a
+    /// message waiting behind that run that its conversation has ended.
+    ended_conversations: dashmap::DashSet<SessionId>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<FreecoKernel>>,
 }
@@ -1282,6 +1292,7 @@ impl FreecoKernel {
             default_model_override: std::sync::RwLock::new(None),
             fallback_providers_override: std::sync::RwLock::new(None),
             conversation_locks: dashmap::DashMap::new(),
+            ended_conversations: dashmap::DashSet::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -2043,6 +2054,57 @@ impl FreecoKernel {
         .await
     }
 
+    /// [`Self::send_message_in_session`], naming who wrote the message, as
+    /// [`Self::send_message_with_handle_and_blocks`] does for the current one.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message_in_session_from(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_pinned(
+            agent_id,
+            Some(session_id),
+            message,
+            kernel_handle,
+            content_blocks,
+            sender_id,
+            sender_name,
+        )
+        .await
+    }
+
+    /// Whether a conversation a message waited on was reset or deleted
+    /// meanwhile. `existed` is whether it was stored when the wait began.
+    ///
+    /// A reset deletes the conversation and starts a new one. A message that
+    /// waited on the old one would otherwise be saved under the deleted id,
+    /// bringing it back as a conversation the agent is no longer in.
+    fn conversation_gone(&self, agent_id: AgentId, session_id: SessionId, existed: bool) -> bool {
+        if self.ended_conversations.contains(&session_id) {
+            return true;
+        }
+        let missing = matches!(self.memory.get_session(session_id), Ok(None));
+        let current = self.registry.get(agent_id).map(|e| e.session_id);
+        missing && (existed || current != Some(session_id))
+    }
+
+    /// Record that a conversation was reset or deleted, so a message still
+    /// waiting to run in it goes elsewhere instead of bringing it back.
+    pub fn mark_conversation_ended(&self, session_id: SessionId) {
+        // Resets are rare and made by hand; the bound only keeps a daemon
+        // that runs for months from holding every id it ever ended.
+        if self.ended_conversations.len() > 4096 {
+            self.ended_conversations.clear();
+        }
+        self.ended_conversations.insert(session_id);
+    }
+
     /// The lock for one conversation, created on first use.
     fn conversation_lock(&self, session_id: SessionId) -> Arc<tokio::sync::Mutex<()>> {
         // Every delegated task is a new conversation, so on a daemon that runs
@@ -2108,6 +2170,13 @@ impl FreecoKernel {
         if session_id == entry.session_id {
             return Ok(session_id);
         }
+        // Reset or deleted: a run that was still going may have saved it
+        // again, but it is no longer a conversation the agent is in.
+        if self.ended_conversations.contains(&session_id) {
+            info!(agent_id = %agent_id, session_id = %session_id.0,
+                  "Addressed conversation was reset; using the current one");
+            return Ok(entry.session_id);
+        }
         match self
             .memory
             .get_session(session_id)
@@ -2137,45 +2206,70 @@ impl FreecoKernel {
         sender_id: Option<String>,
         sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
-        let entry = self
-            .registry
-            .get(agent_id)
-            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
-        let session_id = match pinned_session {
-            Some(sid) => self.resolve_conversation(agent_id, sid)?,
-            None => entry.session_id,
-        };
+        let mut target = pinned_session;
+        let mut retries = 0;
+        loop {
+            let entry = self.registry.get(agent_id).ok_or_else(|| {
+                KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string()))
+            })?;
+            let session_id = match target {
+                Some(sid) => self.resolve_conversation(agent_id, sid)?,
+                None => entry.session_id,
+            };
 
-        let mut chain = held_conversations();
-        if chain.contains(&session_id) {
-            return Err(KernelError::Freeco(FreecoError::Internal(format!(
-                "{} is already busy in that conversation: it is the one waiting for \
-                 this answer. Answer from what you have instead of asking it back.",
-                entry.name
-            ))));
+            let mut chain = held_conversations();
+            if chain.contains(&session_id) {
+                return Err(KernelError::Freeco(FreecoError::Internal(format!(
+                    "{} is already busy in that conversation: it is the one waiting for \
+                     this answer. Answer from what you have instead of asking it back.",
+                    entry.name
+                ))));
+            }
+
+            // Take turns within the conversation. Rapid voice notes on
+            // Telegram, a WhatsApp guest writing twice, the popup and the main
+            // chat open on one agent: each waits here for the run before it,
+            // in order.
+            let existed = matches!(self.memory.get_session(session_id), Ok(Some(_)));
+            let lock = self.conversation_lock(session_id);
+            let guard = lock.lock().await;
+
+            // Reset or deleted while this waited: the message goes to the
+            // conversation the agent is in now, not back into the old one.
+            if self.conversation_gone(agent_id, session_id, existed) {
+                drop(guard);
+                retries += 1;
+                if retries > 3 {
+                    return Err(KernelError::Freeco(FreecoError::Internal(
+                        "The conversation kept being reset while this message waited; \
+                         it was not sent."
+                            .to_string(),
+                    )));
+                }
+                info!(agent_id = %agent_id, session = %session_id,
+                    "Conversation reset while a message waited; sending it to the current one");
+                target = None;
+                continue;
+            }
+            chain.push(session_id);
+
+            let outcome = HELD_CONVERSATIONS
+                .scope(
+                    chain,
+                    self.run_in_conversation(
+                        agent_id,
+                        session_id,
+                        message,
+                        kernel_handle,
+                        content_blocks,
+                        sender_id,
+                        sender_name,
+                    ),
+                )
+                .await;
+            drop(guard);
+            return outcome;
         }
-
-        // Take turns within the conversation. Rapid voice notes on Telegram,
-        // a WhatsApp guest writing twice, the popup and the main chat open on
-        // one agent: each waits here for the run before it, in order.
-        let lock = self.conversation_lock(session_id);
-        let _guard = lock.lock().await;
-        chain.push(session_id);
-
-        HELD_CONVERSATIONS
-            .scope(
-                chain,
-                self.run_in_conversation(
-                    agent_id,
-                    session_id,
-                    message,
-                    kernel_handle,
-                    content_blocks,
-                    sender_id,
-                    sender_name,
-                ),
-            )
-            .await
     }
 
     /// Run one message in a conversation whose lock the caller holds.
@@ -2416,17 +2510,18 @@ impl FreecoKernel {
 
         // LLM agent: true streaming via agent loop
         let session_id = pinned_session.unwrap_or(entry.session_id);
-        let mut session = self
+        let stored = self
             .memory
             .get_session(session_id)
-            .map_err(KernelError::Freeco)?
-            .unwrap_or_else(|| freeco_memory::session::Session {
-                id: session_id,
-                agent_id,
-                messages: Vec::new(),
-                context_window_tokens: 0,
-                label: None,
-            });
+            .map_err(KernelError::Freeco)?;
+        let existed = stored.is_some();
+        let mut session = stored.unwrap_or_else(|| freeco_memory::session::Session {
+            id: session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        });
 
         // Check if auto-compaction is needed: message-count OR token-count OR quota-headroom trigger
         let needs_compact = {
@@ -2685,6 +2780,15 @@ impl FreecoKernel {
             // saved its own copy, and the later save erased the other's
             // messages: they vanished for the user and for the agent alike.
             let _turn = conversation_lock.lock().await;
+            // Reset or deleted while this waited: saving would bring the old
+            // conversation back with this message in it, out of the agent's
+            // sight. Everything here was prepared for that conversation, so
+            // the sender is told instead.
+            if kernel_clone.conversation_gone(agent_id, session.id, existed) {
+                return Err(KernelError::Freeco(FreecoError::Internal(
+                    CONVERSATION_RESET_WHILE_WAITING.to_string(),
+                )));
+            }
             // Another run may have saved this conversation while this waited.
             if let Ok(Some(fresh)) = memory.get_session(session.id) {
                 session = fresh;
@@ -3527,6 +3631,7 @@ impl FreecoKernel {
 
         // Delete the old session
         let _ = self.memory.delete_session(entry.session_id);
+        self.mark_conversation_ended(entry.session_id);
 
         // Create a fresh session
         let new_session = self
@@ -7047,9 +7152,12 @@ impl FreecoKernel {
                         .into_iter()
                         .filter(|t| {
                             allowed.iter().any(|a| {
+                                let a = freeco_types::tool_compat::normalize_tool_name(a);
                                 a == "*"
-                                    || freeco_types::tool_compat::normalize_tool_name(a)
-                                        == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                                    || a == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                                    // As for declared tools: a profile with
+                                    // `agent_send` may hand out tasks too.
+                                    || (a == "agent_send" && t.name == "agent_delegate")
                             })
                         })
                         .collect()
