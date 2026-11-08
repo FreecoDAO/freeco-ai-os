@@ -31,6 +31,11 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const ACTION_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_GRACE_SECS: u32 = 20;
 
+/// How long a started container must stay up before it counts as running. A
+/// container that fails on start is still "running" for its first moment, and
+/// reading the state straight away reported a crash-looping service as fixed.
+const SETTLE: Duration = Duration::from_secs(3);
+
 const DEFAULT_LOG_LINES: u64 = 100;
 const MAX_LOG_LINES: u64 = 1000;
 /// The newest part of a log is kept when it is longer than this.
@@ -448,8 +453,11 @@ pub async fn tool_container_action(
         ));
     }
 
-    // Report the state the runtime now shows: a container that exits a
-    // second after starting looks "started" to the command alone.
+    // Report the state the runtime shows once it has settled: a container
+    // that exits a second after starting looks "started" to the command alone.
+    if action != ContainerAction::Stop {
+        tokio::time::sleep(SETTLE).await;
+    }
     let after = list_containers(rt)
         .await
         .ok()
