@@ -241,6 +241,10 @@ var FreecoAPI = (function() {
       };
 
       socket.onmessage = function(e) {
+        // Guard: a socket left behind by switching chats can still deliver a
+        // frame or two while it closes. Without this, the end of one agent's
+        // reply was drawn into the next agent's chat.
+        if (_ws !== socket) return;
         try {
           var data = JSON.parse(e.data);
         } catch(parseErr) {

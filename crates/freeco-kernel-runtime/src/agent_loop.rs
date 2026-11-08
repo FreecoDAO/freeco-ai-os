@@ -79,7 +79,7 @@ fn env_timeout_secs_with_legacy(current: &str, legacy: &str) -> Option<u64> {
 /// say that, and say what to do instead of waiting again.
 fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
     match tool_name {
-        "agent_send" | "agent_spawn" => format!(
+        "agent_send" | "agent_delegate" | "agent_spawn" => format!(
             "Tool '{tool_name}' timed out after {timeout_secs}s: the other agent did not \
              reply in time. The usual cause is that its model is not answering - an \
              exhausted provider balance, or a fallback model that does not exist. Do not \
@@ -92,7 +92,7 @@ fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
 
 fn tool_timeout_for(tool_name: &str) -> Option<Duration> {
     let secs = match tool_name {
-        "agent_send" | "agent_spawn" => env_timeout_secs_with_legacy(
+        "agent_send" | "agent_delegate" | "agent_spawn" => env_timeout_secs_with_legacy(
             "FREECO_AI_AGENT_TOOL_TIMEOUT_SECS",
             "OPENFANG_AGENT_TOOL_TIMEOUT_SECS",
         )

@@ -711,17 +711,35 @@ async fn handle_text_message(
             )
             .await;
 
-            // Send message to agent with streaming
+            // Send message to agent with streaming.
+            //
+            // A chat names the conversation it shows, so the message lands
+            // there even if another window has since switched the agent to a
+            // different one. Without it, the agent's current conversation.
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
-            match state.kernel.send_message_streaming(
-                agent_id,
-                &content,
-                Some(kernel_handle),
-                None,
-                None,
-                ws_content_blocks,
-            ) {
+            let pinned_session = parsed["session_id"]
+                .as_str()
+                .and_then(|sid| uuid::Uuid::parse_str(sid.trim()).ok())
+                .map(freeco_types::agent::SessionId);
+            let started = match pinned_session {
+                Some(session_id) => state.kernel.send_message_streaming_in_session(
+                    agent_id,
+                    session_id,
+                    &content,
+                    Some(kernel_handle),
+                    ws_content_blocks,
+                ),
+                None => state.kernel.send_message_streaming(
+                    agent_id,
+                    &content,
+                    Some(kernel_handle),
+                    None,
+                    None,
+                    ws_content_blocks,
+                ),
+            };
+            match started {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing.
                     //

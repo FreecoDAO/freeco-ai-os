@@ -24,9 +24,29 @@ function projectsPage() {
     newProject: '',
     newCompany: '',
     creating: false,
+    // The brief every agent working in this project reads -- the project's
+    // CLAUDE.md -- and the conversations running in it right now.
+    brief: '',
+    briefSaving: false,
+    newConvAgent: '',
+    working: 0,
+    _refresh: null,
 
     async init() {
       await this.load();
+    },
+
+    destroy() {
+      if (this._refresh) { clearInterval(this._refresh); this._refresh = null; }
+    },
+
+    agents() {
+      return (Alpine.store('app').agents || []);
+    },
+
+    agentName(id) {
+      var a = this.agents().filter(function (x) { return x.id === id; })[0];
+      return a ? a.name : '';
     },
 
     async load() {
@@ -126,15 +146,75 @@ function projectsPage() {
 
     async select(project) {
       this.selected = project;
+      this.brief = project.description || '';
       this.sessionsLoading = true;
       this.sessions = [];
-      try {
-        var res = await FreecoAPI.get('/api/org/projects/' + encodeURIComponent(project.id) + '/sessions');
-        this.sessions = (res && res.sessions) || [];
-      } catch (e) {
-        FreecoToast.error('Could not load this project’s conversations: ' + e.message);
-      }
+      await this.loadSessions(false);
       this.sessionsLoading = false;
+      // Conversations in a project run side by side; keep their state live
+      // so the page shows which agents are working without a reload.
+      var self = this;
+      if (this._refresh) clearInterval(this._refresh);
+      this._refresh = setInterval(function () {
+        if (self.selected && !document.hidden) self.loadSessions(true);
+      }, 4000);
+    },
+
+    async loadSessions(quiet) {
+      if (!this.selected) return;
+      var id = this.selected.id;
+      try {
+        var res = await FreecoAPI.get('/api/org/projects/' + encodeURIComponent(id) + '/sessions');
+        if (!this.selected || this.selected.id !== id) return;
+        this.sessions = (res && res.sessions) || [];
+        this.working = (res && res.working) || 0;
+      } catch (e) {
+        if (!quiet) FreecoToast.error('Could not load this project’s conversations: ' + e.message);
+      }
+    },
+
+    async saveBrief() {
+      if (!this.selected) return;
+      this.briefSaving = true;
+      try {
+        var res = await FreecoAPI.put('/api/org/projects/' + encodeURIComponent(this.selected.id),
+                                      { description: this.brief });
+        if (res && res.project) {
+          this.selected.description = res.project.description;
+          var p = this.projects.find(function (x) { return x.id === res.project.id; });
+          if (p) p.description = res.project.description;
+        }
+        FreecoToast.success('Brief saved. Agents read it on their next message in this project.');
+      } catch (e) {
+        FreecoToast.error('Could not save the brief: ' + e.message);
+      }
+      this.briefSaving = false;
+    },
+
+    // A new conversation of the chosen agent, filed here. It does not take
+    // the agent away from any chat it is already in, so several run at once.
+    async startConversation() {
+      if (!this.selected || !this.newConvAgent) return;
+      try {
+        var res = await FreecoAPI.post('/api/org/projects/' + encodeURIComponent(this.selected.id) + '/conversations',
+                                       { agent_id: this.newConvAgent });
+        await this.loadSessions(true);
+        this.openConversation({ id: res.session_id, agent_id: res.agent_id });
+      } catch (e) {
+        FreecoToast.error('Could not start a conversation: ' + e.message);
+      }
+    },
+
+    async openConversation(s) {
+      if (!s.agent_id) return;
+      try {
+        await FreecoAPI.post('/api/agents/' + encodeURIComponent(s.agent_id) + '/sessions/' +
+                             encodeURIComponent(s.id) + '/switch', {});
+      } catch (e) {
+        FreecoToast.error('Could not open that conversation: ' + e.message);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('freeco-open-agent', { detail: s.agent_id }));
     },
 
     // Archive is "done, keep it". Distinct from trash on purpose: if the only

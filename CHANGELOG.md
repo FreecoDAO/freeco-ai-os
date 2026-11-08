@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Agents work in parallel. Each conversation has its own queue, so one agent
+  can answer a WhatsApp guest, a dashboard chat and a delegated task at the
+  same time, and different agents never wait for each other.
+- `agent_delegate`: a lead agent hands several tasks to several agents at once
+  (or to fresh conversations of itself) and gets every result back together.
+  Each task runs in a conversation of its own, filed under the lead's project,
+  where the user can open and follow it. Any agent allowed `agent_send` may use
+  it.
+- Projects you can work in. A project's brief is read by every agent working
+  in one of its conversations; the Projects page edits the brief, starts a
+  conversation with any agent inside the project, shows which conversations are
+  working right now, and opens each one.
+
+### Fixed
+
+- Messages no longer vanish when two things talk to one agent at once. The
+  streaming path (dashboard chat and popup) took no lock, so a reply running
+  while a channel message or a second window arrived saved over the other's
+  messages. The agent's shared history had the same race.
+- Switching chats no longer stalls or drops messages. The dashboard had one
+  "sending" flag and one queue for every chat, so a reply running in one chat
+  queued every message typed into any other behind it, and leaving a chat
+  mid-reply could strand its queue for good. Each chat now keeps its own; what
+  was queued is still delivered after switching away, and a chat opened while
+  its agent is still working says so and shows the reply when it lands.
+- A reply can no longer be drawn into the wrong chat. Frames from the socket of
+  the chat just left were still rendered into the next one.
+- A message lands in the conversation it was typed in, even after another
+  window switched the agent to a different conversation.
+- An agent asked a question by an agent it is itself waiting on is told so,
+  instead of both waiting for each other forever.
+- `project_create` stored the description as the company id.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

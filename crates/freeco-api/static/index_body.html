@@ -650,7 +650,37 @@
         <div x-show="selected" style="margin-top:26px">
           <h2 style="font-size:1.1rem;margin-bottom:10px">
             <span x-text="selected && selected.name"></span> &mdash; conversations
+            <span class="badge badge-running" x-show="working > 0" style="margin-left:6px"
+                  x-text="working + ' working now'"></span>
           </h2>
+
+          <!-- The brief: what every agent working in this project is told,
+               the way a CLAUDE.md is read by whoever works in its folder. -->
+          <div class="card" style="padding:12px;margin-bottom:14px">
+            <label class="text-xs text-dim" for="project-brief">
+              Brief &mdash; every agent working in this project reads it
+            </label>
+            <textarea id="project-brief" class="form-input" rows="4" x-model="brief"
+                      style="width:100%;margin-top:6px;font-size:13px"
+                      placeholder="Goal, constraints, who decides, where files live, what done looks like..."></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:6px">
+              <button class="btn btn-sm" @click="saveBrief()"
+                      :disabled="briefSaving || brief === ((selected && selected.description) || '')">Save brief</button>
+            </div>
+          </div>
+
+          <!-- Conversations run side by side: starting one never pulls an
+               agent out of a chat it is already in. -->
+          <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+            <select class="form-input" style="flex:1;max-width:280px;font-size:12px" x-model="newConvAgent"
+                    aria-label="Agent for the new conversation">
+              <option value="">Start a conversation with...</option>
+              <template x-for="a in agents()" :key="a.id">
+                <option :value="a.id" x-text="a.name"></option>
+              </template>
+            </select>
+            <button class="btn btn-sm" @click="startConversation()" :disabled="!newConvAgent">New conversation</button>
+          </div>
           <div style="display:flex;gap:8px;margin-bottom:12px">
             <input class="form-input" style="flex:1;max-width:280px;font-size:12px" x-model="newTeam"
                    placeholder="Add a team to this project..." @keydown.enter="createTeam()">
@@ -688,11 +718,14 @@
                 <tr>
                   <td>
                     <span x-text="s.label || 'Untitled conversation'"></span>
+                    <span class="badge badge-running" x-show="s.busy" style="margin-left:6px">Working</span>
                     <span class="badge" x-show="s.archived"
                           style="background:var(--surface2);color:var(--text-dim);margin-left:6px">Done</span>
                   </td>
+                  <td class="text-xs text-dim" x-text="s.agent_name || agentName(s.agent_id)"></td>
                   <td class="text-xs text-dim" x-text="when(s.updated_at)"></td>
                   <td style="text-align:right;white-space:nowrap">
+                    <button class="btn btn-ghost btn-sm" @click="openConversation(s)" x-show="s.agent_id">Open</button>
                     <button class="btn btn-ghost btn-sm" @click="setArchived(s, !s.archived)"
                             x-text="s.archived ? 'Reopen' : 'Archive'"></button>
                     <button class="btn btn-ghost btn-sm" @click="trash(s)"

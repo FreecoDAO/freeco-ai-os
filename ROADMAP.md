@@ -675,6 +675,19 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+- 🟨 **Conversations run in parallel.** Runs take turns per conversation, not
+  per agent, so different chats -- including several of one agent -- run at the
+  same time, and two runs in one conversation can no longer save over each
+  other. Verified by `crates/freeco-kernel/tests/parallel_conversations_test.rs`
+  against a scripted model: it fails with the old unlocked streaming path.
+- 🟨 **`agent_delegate`** runs several tasks on several agents at once, each in
+  a fresh conversation filed under the lead's project. Still one canonical
+  history per agent: a delegated task is appended to it like any other turn.
+- 🟨 **Projects page** edits the brief every agent in the project reads, starts
+  conversations inside a project and shows which are working.
+- ⚠️ Stopping a run still stops the agent's most recent one; with parallel
+  conversations that may not be the one on screen.
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase

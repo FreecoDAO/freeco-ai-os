@@ -41,6 +41,34 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
+tokio::task_local! {
+    /// Conversations the current call chain is already running in, innermost
+    /// last.
+    ///
+    /// An agent that asks another agent waits inside its own run, holding its
+    /// conversation. If the answer requires asking the first agent back in that
+    /// same conversation, the second run would wait for the first, which waits
+    /// for the second: neither ever finishes. Knowing what the chain holds
+    /// turns that into an immediate, explained refusal.
+    static HELD_CONVERSATIONS: Vec<SessionId>;
+}
+
+/// The conversations held by the current call chain (empty outside one).
+fn held_conversations() -> Vec<SessionId> {
+    HELD_CONVERSATIONS
+        .try_with(|held| held.clone())
+        .unwrap_or_default()
+}
+
+/// The conversation the current call chain is running in, if any: the one
+/// whose agent is calling a tool right now.
+fn current_conversation() -> Option<SessionId> {
+    HELD_CONVERSATIONS
+        .try_with(|held| held.last().copied())
+        .ok()
+        .flatten()
+}
+
 /// The main Freeco kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -173,10 +201,15 @@ pub struct FreecoKernel {
     /// boot-time `self.config.fallback_providers`". (#1129)
     pub fallback_providers_override:
         std::sync::RwLock<Option<Vec<freeco_types::config::FallbackProviderConfig>>>,
-    /// Per-agent message locks — serializes LLM calls for the same agent to prevent
-    /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
-    /// messages via Telegram). Different agents can still run in parallel.
-    agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// One run at a time per conversation, any number of conversations at once.
+    ///
+    /// Keyed by session, not by agent. Each run loads the conversation, works
+    /// on it and saves it whole, so two runs in one conversation must take
+    /// turns or the later save erases the earlier one's messages. Two
+    /// conversations share nothing, so they run side by side -- including two
+    /// conversations of the same agent, which is what lets one agent answer a
+    /// WhatsApp guest, a dashboard chat and a delegated task together.
+    conversation_locks: dashmap::DashMap<SessionId, Arc<tokio::sync::Mutex<()>>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<FreecoKernel>>,
 }
@@ -1248,7 +1281,7 @@ impl FreecoKernel {
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             fallback_providers_override: std::sync::RwLock::new(None),
-            agent_msg_locks: dashmap::DashMap::new(),
+            conversation_locks: dashmap::DashMap::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -1960,9 +1993,9 @@ impl FreecoKernel {
     /// multimodal content (text + images) instead of just a text string. This
     /// enables vision models to process images sent from channels like Telegram.
     ///
-    /// Per-agent locking ensures that concurrent messages for the same agent
-    /// are serialized (preventing session corruption), while messages for
-    /// different agents run in parallel.
+    /// The message goes into the agent's current conversation. Messages for
+    /// one conversation take turns; other conversations, of this agent or any
+    /// other, run at the same time.
     pub async fn send_message_with_handle_and_blocks(
         &self,
         agent_id: AgentId,
@@ -1972,26 +2005,193 @@ impl FreecoKernel {
         sender_id: Option<String>,
         sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
-        // Acquire per-agent lock to serialize concurrent messages for the same agent.
-        // This prevents session corruption when multiple messages arrive in quick
-        // succession (e.g. rapid voice messages via Telegram). Messages for different
-        // agents are not blocked — each agent has its own independent lock.
-        let lock = self
-            .agent_msg_locks
-            .entry(agent_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = lock.lock().await;
+        self.send_message_pinned(
+            agent_id,
+            None,
+            message,
+            kernel_handle,
+            content_blocks,
+            sender_id,
+            sender_name,
+        )
+        .await
+    }
 
+    /// Send a message into one named conversation of the agent.
+    ///
+    /// The agent's "current" conversation is whichever a window last switched
+    /// to, so a message addressed by agent alone can land in a conversation
+    /// other than the one the sender is looking at. This addresses the
+    /// conversation itself, and leaves which one is current alone.
+    pub async fn send_message_in_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_pinned(
+            agent_id,
+            Some(session_id),
+            message,
+            kernel_handle,
+            content_blocks,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// The lock for one conversation, created on first use.
+    fn conversation_lock(&self, session_id: SessionId) -> Arc<tokio::sync::Mutex<()>> {
+        // Every delegated task is a new conversation, so on a daemon that runs
+        // for months the map would only grow. A lock nobody holds or waits on
+        // is referenced by the map alone; those are dropped in bulk. Clones are
+        // only taken under the map's shard lock, so none can appear mid-sweep.
+        if self.conversation_locks.len() > 1024 {
+            self.conversation_locks
+                .retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        self.conversation_locks
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Whether a run is working in this conversation right now.
+    pub fn is_conversation_busy(&self, session_id: SessionId) -> bool {
+        self.conversation_locks
+            .get(&session_id)
+            .is_some_and(|lock| lock.try_lock().is_err())
+    }
+
+    /// What an agent working in this conversation is told about its project:
+    /// the name, the brief, and that the project's other conversations exist.
+    fn project_brief_for(&self, session_id: SessionId) -> Option<String> {
+        let org = self.memory.org();
+        let (project_id, _team) = org.session_scope(&session_id.0.to_string()).ok()??;
+        let project = org.get_project(&project_id?).ok()??;
+        let mut brief = format!(
+            "This conversation is part of the project \"{}\" (id {}).",
+            project.name, project.id
+        );
+        if let Some(text) = project.description.as_deref().map(str::trim) {
+            if !text.is_empty() {
+                brief.push_str("\n\n");
+                brief.push_str(text);
+            }
+        }
+        brief.push_str(
+            "\n\nTasks you hand out with `agent_delegate` are filed under this project too.",
+        );
+        Some(brief)
+    }
+
+    /// Refuse a conversation that does not exist or belongs to another agent.
+    ///
+    /// A session id arrives from a browser or a tool call; running agent A's
+    /// turn in agent B's conversation would hand B's history to A's model.
+    pub fn check_conversation_owner(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> KernelResult<()> {
+        match self
+            .memory
+            .get_session(session_id)
+            .map_err(KernelError::Freeco)?
+        {
+            Some(session) if session.agent_id == agent_id => Ok(()),
+            Some(_) => Err(KernelError::Freeco(FreecoError::Internal(
+                "That conversation belongs to a different agent".to_string(),
+            ))),
+            None => Err(KernelError::Freeco(FreecoError::Internal(
+                "Conversation not found".to_string(),
+            ))),
+        }
+    }
+
+    /// Wait for the conversation, then run the message in it.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_message_pinned(
+        &self,
+        agent_id: AgentId,
+        pinned_session: Option<SessionId>,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+    ) -> KernelResult<AgentLoopResult> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        let session_id = match pinned_session {
+            Some(sid) => {
+                self.check_conversation_owner(agent_id, sid)?;
+                sid
+            }
+            None => entry.session_id,
+        };
+
+        let mut chain = held_conversations();
+        if chain.contains(&session_id) {
+            return Err(KernelError::Freeco(FreecoError::Internal(format!(
+                "{} is already busy in that conversation: it is the one waiting for \
+                 this answer. Answer from what you have instead of asking it back.",
+                entry.name
+            ))));
+        }
+
+        // Take turns within the conversation. Rapid voice notes on Telegram,
+        // a WhatsApp guest writing twice, the popup and the main chat open on
+        // one agent: each waits here for the run before it, in order.
+        let lock = self.conversation_lock(session_id);
+        let _guard = lock.lock().await;
+        chain.push(session_id);
+
+        HELD_CONVERSATIONS
+            .scope(
+                chain,
+                self.run_in_conversation(
+                    agent_id,
+                    session_id,
+                    message,
+                    kernel_handle,
+                    content_blocks,
+                    sender_id,
+                    sender_name,
+                ),
+            )
+            .await
+    }
+
+    /// Run one message in a conversation whose lock the caller holds.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_in_conversation(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+    ) -> KernelResult<AgentLoopResult> {
         // Enforce quota before running the agent loop
         self.scheduler
             .check_quota(agent_id)
             .map_err(KernelError::Freeco)?;
 
-        let entry = self
+        // Read after waiting: the manifest may have changed while this queued.
+        // The conversation is the one locked, whichever is current by now.
+        let mut entry = self
             .registry
             .get(agent_id)
             .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        entry.session_id = session_id;
 
         // Dispatch based on module type
         let result = if entry.manifest.module.starts_with("wasm:") {
@@ -2090,6 +2290,56 @@ impl FreecoKernel {
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        self.send_message_streaming_pinned(
+            agent_id,
+            None,
+            message,
+            kernel_handle,
+            sender_id,
+            sender_name,
+            content_blocks,
+        )
+    }
+
+    /// Stream a message into one named conversation of the agent, leaving
+    /// which conversation is current alone. See [`Self::send_message_in_session`].
+    pub fn send_message_streaming_in_session(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        session_id: SessionId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.check_conversation_owner(agent_id, session_id)?;
+        self.send_message_streaming_pinned(
+            agent_id,
+            Some(session_id),
+            message,
+            kernel_handle,
+            None,
+            None,
+            content_blocks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_message_streaming_pinned(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        pinned_session: Option<SessionId>,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
         // Enforce quota before spawning the streaming task
         self.scheduler
             .check_quota(agent_id)
@@ -2155,12 +2405,13 @@ impl FreecoKernel {
         }
 
         // LLM agent: true streaming via agent loop
+        let session_id = pinned_session.unwrap_or(entry.session_id);
         let mut session = self
             .memory
-            .get_session(entry.session_id)
+            .get_session(session_id)
             .map_err(KernelError::Freeco)?
             .unwrap_or_else(|| freeco_memory::session::Session {
-                id: entry.session_id,
+                id: session_id,
                 agent_id,
                 messages: Vec::new(),
                 context_window_tokens: 0,
@@ -2383,6 +2634,7 @@ impl FreecoKernel {
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     freeco_kernel_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
+                project_brief: self.project_brief_for(session.id),
             };
             manifest.model.system_prompt =
                 freeco_kernel_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -2410,8 +2662,24 @@ impl FreecoKernel {
             message.to_string()
         };
         let kernel_clone = Arc::clone(self);
+        let conversation_lock = self.conversation_lock(session.id);
 
-        let handle = tokio::spawn(async move {
+        let chain = vec![session.id];
+
+        let handle = tokio::spawn(HELD_CONVERSATIONS.scope(chain, async move {
+            // Take turns within the conversation, as the non-streaming path does.
+            //
+            // Streaming took no lock at all. With the popup and the main chat
+            // both open on one agent, or a WhatsApp guest writing while the
+            // dashboard chat ran, two runs loaded the same conversation, each
+            // saved its own copy, and the later save erased the other's
+            // messages: they vanished for the user and for the agent alike.
+            let _turn = conversation_lock.lock().await;
+            // Another run may have saved this conversation while this waited.
+            if let Ok(Some(fresh)) = memory.get_session(session.id) {
+                session = fresh;
+            }
+
             // Auto-compact if the session is large before running the loop
             if needs_compact {
                 info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
@@ -2578,7 +2846,7 @@ impl FreecoKernel {
                     Err(KernelError::Freeco(e))
                 }
             }
-        });
+        }));
 
         // Store abort handle for cancellation support
         self.running_tasks.insert(agent_id, handle.abort_handle());
@@ -2986,6 +3254,7 @@ impl FreecoKernel {
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     freeco_kernel_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
+                project_brief: self.project_brief_for(entry.session_id),
             };
             manifest.model.system_prompt =
                 freeco_kernel_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -6747,8 +7016,13 @@ impl FreecoKernel {
                 // lists the old name (the Developer agent does).
                 .filter(|t| {
                     declared_tools.iter().any(|d| {
-                        freeco_types::tool_compat::normalize_tool_name(d)
-                            == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                        let d = freeco_types::tool_compat::normalize_tool_name(d);
+                        d == freeco_types::tool_compat::normalize_tool_name(&t.name)
+                            // Handing work to several agents at once is the
+                            // same permission as messaging one of them, so an
+                            // agent that may `agent_send` may `agent_delegate`
+                            // without every manifest having to list both.
+                            || (d == "agent_send" && t.name == "agent_delegate")
                     })
                 })
                 .collect()
@@ -7931,6 +8205,86 @@ impl KernelHandle for FreecoKernel {
         Ok(result.response)
     }
 
+    async fn delegate_task(
+        &self,
+        caller_id: Option<&str>,
+        agent: Option<&str>,
+        title: &str,
+        task: &str,
+    ) -> Result<kernel_handle::DelegatedTask, String> {
+        let caller = caller_id
+            .and_then(|c| c.parse::<AgentId>().ok())
+            .and_then(|id| self.registry.get(id));
+        let target_id = match agent.map(str::trim).filter(|a| !a.is_empty()) {
+            Some(name) => match name.parse::<AgentId>() {
+                Ok(id) => id,
+                Err(_) => self
+                    .registry
+                    .find_by_name(name)
+                    .map(|e| e.id)
+                    .ok_or_else(|| format!("Agent not found: {name}"))?,
+            },
+            None => caller
+                .as_ref()
+                .map(|c| c.id)
+                .ok_or("Name the agent to hand this task to")?,
+        };
+        let target = self
+            .registry
+            .get(target_id)
+            .ok_or_else(|| format!("Agent not found: {target_id}"))?;
+        let caller_name = caller
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Another agent".to_string());
+
+        let title = title.trim();
+        let label: String = format!("Task from {caller_name}: {title}")
+            .chars()
+            .take(80)
+            .collect();
+        let session = self
+            .memory
+            .create_session_with_label(target_id, Some(&label))
+            .map_err(|e| format!("Could not start a conversation for {}: {e}", target.name))?;
+
+        // Filed where the asking conversation is filed, so the project page
+        // shows the lead's chat and every task it handed out together.
+        if let Some(parent) = current_conversation() {
+            let org = self.memory.org();
+            if let Ok(Some((project_id, team_id))) = org.session_scope(&parent.0.to_string()) {
+                if project_id.is_some() || team_id.is_some() {
+                    let _ = org.assign_session(
+                        &session.id.0.to_string(),
+                        project_id.as_deref(),
+                        team_id.as_deref(),
+                    );
+                }
+            }
+        }
+
+        let prompt = format!(
+            "{caller_name} handed you this task. It has a conversation of its own, and \
+             your final reply goes back to {caller_name} as the result, so end with \
+             the result itself.\n\n{task}"
+        );
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        let result = self
+            .send_message_in_session(target_id, session.id, &prompt, handle, None)
+            .await
+            .map_err(|e| format!("{} could not finish it: {e}", target.name))?;
+        Ok(kernel_handle::DelegatedTask {
+            agent_id: target_id.to_string(),
+            agent_name: target.name,
+            session_id: session.id.0.to_string(),
+            reply: result.response,
+        })
+    }
+
     fn list_agents(&self) -> Vec<kernel_handle::AgentInfo> {
         self.registry
             .list()
@@ -8423,7 +8777,8 @@ impl KernelHandle for FreecoKernel {
         let project = self
             .memory
             .org()
-            .create_project(name, description, company_id)
+            // The store takes (name, company, description).
+            .create_project(name, company_id, description)
             .map_err(|e| format!("{e}"))?;
         Ok(format!(
             "Created project \"{}\" (id {})",

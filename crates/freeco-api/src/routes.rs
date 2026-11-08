@@ -611,19 +611,48 @@ pub async fn send_message(
         None => req.message.clone(),
     };
 
+    let pinned_session = match req.session_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(sid) => match uuid::Uuid::parse_str(sid) {
+            Ok(u) => Some(freeco_types::agent::SessionId(u)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid session_id"})),
+                );
+            }
+        },
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle_and_blocks(
-            agent_id,
-            &message,
-            Some(kernel_handle),
-            content_blocks,
-            req.sender_id,
-            req.sender_name,
-        )
-        .await
-    {
+    let outcome = match pinned_session {
+        Some(session_id) => {
+            state
+                .kernel
+                .send_message_in_session(
+                    agent_id,
+                    session_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                )
+                .await
+        }
+        None => {
+            state
+                .kernel
+                .send_message_with_handle_and_blocks(
+                    agent_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                    req.sender_id,
+                    req.sender_name,
+                )
+                .await
+        }
+    };
+    match outcome {
         Ok(result) => {
             // Strip <think>...</think> blocks from model output
             let cleaned = crate::ws::strip_think_tags(&result.response);
@@ -864,6 +893,11 @@ pub async fn get_agent_session(
                     "context_window_tokens": session.context_window_tokens,
                     "label": session.label,
                     "messages": messages,
+                    // A run is still working in this conversation. Its reply
+                    // is saved when it finishes, so a chat opened mid-run --
+                    // after switching away and back, or a reload -- shows that
+                    // it is coming rather than a thread that looks ignored.
+                    "busy": state.kernel.is_conversation_busy(session.id),
                 })),
             )
         }
@@ -875,6 +909,7 @@ pub async fn get_agent_session(
                 "message_count": 0,
                 "context_window_tokens": 0,
                 "messages": [],
+                "busy": state.kernel.is_conversation_busy(entry.session_id),
             })),
         ),
         Err(e) => {
