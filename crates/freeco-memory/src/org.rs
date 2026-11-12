@@ -259,7 +259,12 @@ impl OrgStore {
             .map_err(mem_err)?;
 
         let mut member_stmt = conn
-            .prepare("SELECT agent_id, role FROM team_members WHERE team_id = ?1")
+            // In the order they joined: with no member marked lead, the first
+            // one to join leads a team run.
+            .prepare(
+                "SELECT agent_id, role FROM team_members WHERE team_id = ?1 \
+                 ORDER BY created_at, agent_id",
+            )
             .map_err(mem_err)?;
         let mut out = Vec::with_capacity(teams.len());
         for (id, mut team) in teams {
@@ -280,6 +285,14 @@ impl OrgStore {
             out.push(team);
         }
         Ok(out)
+    }
+
+    /// One team, with its project and members, archived or not.
+    pub fn get_team(&self, team_id: &str) -> FreecoResult<Option<serde_json::Value>> {
+        Ok(self
+            .list_teams(true)?
+            .into_iter()
+            .find(|t| t["id"].as_str() == Some(team_id)))
     }
 
     pub fn add_team_member(

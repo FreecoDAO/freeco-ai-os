@@ -350,6 +350,93 @@ pub async fn start_project_conversation(
     )
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AddTeamMember {
+    pub agent_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// POST /api/org/teams/:id/members — put an agent on a team.
+///
+/// Members are what a team run hands work to, and the dashboard had no way
+/// to add one: a team could be created and never staffed.
+pub async fn add_team_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AddTeamMember>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    match org.get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let role = body
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Err(e) = org.add_team_member(&id, &entry.id.to_string(), role) {
+        return fail(e);
+    }
+    match org.get_team(&id) {
+        Ok(team) => (StatusCode::OK, Json(serde_json::json!({ "team": team }))),
+        Err(e) => fail(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunTeam {
+    pub goal: String,
+}
+
+/// POST /api/org/teams/:id/run — give a team a goal.
+///
+/// Its lead gets a new conversation filed under the team, with the goal as
+/// its first message, and hands parts to the other members, who work at the
+/// same time. Returns at once with the lead's conversation; the work shows
+/// on the project page as it happens.
+pub async fn run_team(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RunTeam>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    match state.kernel.start_team_run(&id, &body.goal) {
+        Ok(run) => (StatusCode::OK, Json(run)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
 /// PUT /api/sessions/:id/assign — move a conversation into a project/team.
 pub async fn assign_session(
     State(state): State<Arc<AppState>>,

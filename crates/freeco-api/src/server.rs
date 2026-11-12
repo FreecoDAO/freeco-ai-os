@@ -661,6 +661,14 @@ pub async fn build_router(
             axum::routing::post(crate::org_routes::start_project_conversation),
         )
         .route(
+            "/api/org/teams/{id}/members",
+            axum::routing::post(crate::org_routes::add_team_member),
+        )
+        .route(
+            "/api/org/teams/{id}/run",
+            axum::routing::post(crate::org_routes::run_team),
+        )
+        .route(
             "/api/sessions/{id}/assign",
             axum::routing::put(crate::org_routes::assign_session),
         )

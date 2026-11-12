@@ -22,6 +22,7 @@ pub mod copilot_oauth;
 pub mod crm_tool;
 pub mod docker_sandbox;
 pub mod drivers;
+pub mod earlier_conversation;
 pub mod embedding;
 pub mod graceful_shutdown;
 pub mod hooks;

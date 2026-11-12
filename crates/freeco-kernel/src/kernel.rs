@@ -505,6 +505,32 @@ fn generate_identity_files(workspace: &Path, manifest: &AgentManifest) {
     }
 }
 
+/// Keep what a run did before it failed.
+///
+/// The incoming message is saved before the model is called. This adds what
+/// the run produced after that: a tool that booked, wrote or sent something
+/// must stay in the conversation, or the agent does it again on the next
+/// message. Without it a provider error after the tools ran erased the whole
+/// turn, the user's message included.
+fn keep_failed_turn(
+    memory: &MemorySubstrate,
+    agent_id: AgentId,
+    session: &freeco_memory::session::Session,
+    messages_before: usize,
+) {
+    if session.messages.len() <= messages_before {
+        return;
+    }
+    if let Err(e) = memory.save_session(session) {
+        warn!(agent_id = %agent_id, "Could not keep the failed turn: {e}");
+        return;
+    }
+    let new_messages = &session.messages[messages_before..];
+    if let Err(e) = memory.append_canonical(agent_id, new_messages, None) {
+        warn!(agent_id = %agent_id, "Could not add the failed turn to the shared history: {e}");
+    }
+}
+
 /// Append an assistant response summary to the daily memory log (best-effort, append-only).
 /// Caps daily log at 1MB to prevent unbounded growth. Writes to the agent's
 /// private state directory (`state_dir/memory/`), never to the user-facing
@@ -2128,26 +2154,205 @@ impl FreecoKernel {
             .is_some_and(|lock| lock.try_lock().is_err())
     }
 
-    /// What an agent working in this conversation is told about its project:
-    /// the name, the brief, and that the project's other conversations exist.
-    fn project_brief_for(&self, session_id: SessionId) -> Option<String> {
+    /// What an agent working in this conversation is told about where it is
+    /// filed: the project with its brief, and the team with who is on it.
+    fn project_brief_for(&self, agent_id: AgentId, session_id: SessionId) -> Option<String> {
         let org = self.memory.org();
-        let (project_id, _team) = org.session_scope(&session_id.0.to_string()).ok()??;
-        let project = org.get_project(&project_id?).ok()??;
-        let mut brief = format!(
-            "This conversation is part of the project \"{}\" (id {}).",
-            project.name, project.id
-        );
-        if let Some(text) = project.description.as_deref().map(str::trim) {
+        let (project_id, team_id) = org.session_scope(&session_id.0.to_string()).ok()??;
+        let project = project_id.and_then(|id| org.get_project(&id).ok().flatten());
+        let team = team_id
+            .and_then(|id| org.get_team(&id).ok().flatten())
+            .and_then(|team| self.team_roster(agent_id, &team));
+        if project.is_none() && team.is_none() {
+            return None;
+        }
+        let mut brief = match &project {
+            Some(p) => format!(
+                "This conversation is part of the project \"{}\" (id {}).",
+                p.name, p.id
+            ),
+            None => "This conversation belongs to a team.".to_string(),
+        };
+        // The roster before the brief: a long brief is capped, and losing the
+        // team would leave a lead with nobody to hand work to.
+        if let Some(roster) = team {
+            brief.push_str("\n\n");
+            brief.push_str(&roster);
+        }
+        if let Some(text) = project
+            .as_ref()
+            .and_then(|p| p.description.as_deref())
+            .map(str::trim)
+        {
             if !text.is_empty() {
                 brief.push_str("\n\n");
                 brief.push_str(text);
             }
         }
-        brief.push_str(
-            "\n\nTasks you hand out with `agent_delegate` are filed under this project too.",
-        );
+        brief.push_str("\n\nTasks you hand out with `agent_delegate` are filed here too.");
         Some(brief)
+    }
+
+    /// The members who lead a team run: the one whose role names them lead,
+    /// or else whoever joined first. Members no longer running are skipped.
+    fn team_lead(&self, team: &serde_json::Value) -> Option<AgentId> {
+        let members: Vec<(AgentId, String)> = team["members"]
+            .as_array()?
+            .iter()
+            .filter_map(|m| {
+                let id = m["agent_id"].as_str()?.parse::<AgentId>().ok()?;
+                self.registry.get(id)?;
+                Some((id, m["role"].as_str().unwrap_or("").to_lowercase()))
+            })
+            .collect();
+        members
+            .iter()
+            .find(|(_, role)| role.contains("lead"))
+            .or_else(|| members.first())
+            .map(|(id, _)| *id)
+    }
+
+    /// The team section of a member's prompt: who is on it, who leads, and
+    /// how to work together. A lead told only "you have tools" did the work
+    /// itself; one shown its team by name hands parts of it out.
+    fn team_roster(&self, agent_id: AgentId, team: &serde_json::Value) -> Option<String> {
+        let name = team["name"].as_str().unwrap_or("this team");
+        let lead = self.team_lead(team);
+        let mut lines = Vec::new();
+        for m in team["members"].as_array()? {
+            let Some(id) = m["agent_id"]
+                .as_str()
+                .and_then(|a| a.parse::<AgentId>().ok())
+            else {
+                continue;
+            };
+            let Some(entry) = self.registry.get(id) else {
+                continue;
+            };
+            let mut line = format!("- {}", entry.name);
+            if let Some(role) = m["role"].as_str().map(str::trim).filter(|r| !r.is_empty()) {
+                line.push_str(&format!(" — {role}"));
+            }
+            if Some(id) == lead {
+                line.push_str(" (leads the team)");
+            }
+            if id == agent_id {
+                line.push_str(" (you)");
+            }
+            lines.push(line);
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let mut out = format!("Team \"{name}\":\n{}\n\n", lines.join("\n"));
+        if lead == Some(agent_id) {
+            out.push_str(
+                "You lead this team. Do simple work yourself. For the rest, split it and hand \
+                 the parts to members with `agent_delegate`: they work at the same time, each \
+                 in a conversation of its own filed here, and every result comes back to you. \
+                 Then check the results and combine them into one answer. A finished task is \
+                 evidence to check, not proof the goal is met.",
+            );
+        } else {
+            let lead_name = lead
+                .and_then(|id| self.registry.get(id))
+                .map(|e| e.name)
+                .unwrap_or_else(|| "The first member".to_string());
+            out.push_str(&format!(
+                "{lead_name} leads this team. Do the part you were given and end with its \
+                 result. To ask a teammate something, use `agent_send` with their name."
+            ));
+        }
+        Some(out)
+    }
+
+    /// Start a team on a goal: a new conversation for its lead, filed under
+    /// the team and its project, with the goal as its first message. The run
+    /// goes on in the background; the conversation shows it working.
+    pub fn start_team_run(&self, team_id: &str, goal: &str) -> KernelResult<serde_json::Value> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            return Err(KernelError::Freeco(FreecoError::InvalidInput(
+                "Say what the team should do".to_string(),
+            )));
+        }
+        let org = self.memory.org();
+        let team = org
+            .get_team(team_id)
+            .map_err(KernelError::Freeco)?
+            .ok_or_else(|| {
+                KernelError::Freeco(FreecoError::InvalidInput("No such team".to_string()))
+            })?;
+        let lead = self.team_lead(&team).ok_or_else(|| {
+            KernelError::Freeco(FreecoError::InvalidInput(
+                "This team has no running members yet. Add an agent to it first.".to_string(),
+            ))
+        })?;
+        let entry = self
+            .registry
+            .get(lead)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(lead.to_string())))?;
+        let team_name = team["name"].as_str().unwrap_or("Team").to_string();
+        let head: String = goal.chars().take(60).collect();
+        let label = format!("{team_name}: {head}");
+        let session = self
+            .memory
+            .create_session_with_label(lead, Some(&label))
+            .map_err(KernelError::Freeco)?;
+        org.assign_session(
+            &session.id.0.to_string(),
+            team["project_id"].as_str(),
+            Some(team_id),
+        )
+        .map_err(KernelError::Freeco)?;
+
+        // The members named at the end, where a model weighs a prompt most:
+        // the roster alone sits in the middle of a long system prompt.
+        let others: Vec<String> = team["members"]
+            .as_array()
+            .map(|ms| {
+                ms.iter()
+                    .filter_map(|m| m["agent_id"].as_str()?.parse::<AgentId>().ok())
+                    .filter(|id| *id != lead)
+                    .filter_map(|id| self.registry.get(id).map(|e| e.name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut kickoff = format!("Team goal for \"{team_name}\":\n\n{goal}");
+        if !others.is_empty() {
+            kickoff.push_str(&format!(
+                "\n\nYou lead. Hand the parts that can run at the same time to {} with \
+                 agent_delegate, then check and combine what comes back.",
+                others.join(", ")
+            ));
+        }
+
+        let me = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| {
+                KernelError::Freeco(FreecoError::Internal("Kernel is shutting down".to_string()))
+            })?;
+        let session_id = session.id;
+        tokio::spawn(async move {
+            let handle: Arc<dyn KernelHandle> = me.clone();
+            if let Err(e) = me
+                .send_message_in_session(lead, session_id, &kickoff, Some(handle), None)
+                .await
+            {
+                warn!(agent_id = %lead, session = %session_id, "Team run failed: {e}");
+            }
+        });
+        info!(team = %team_id, lead = %entry.name, "Team run started");
+        Ok(serde_json::json!({
+            "session_id": session_id.0.to_string(),
+            "agent_id": lead.to_string(),
+            "agent_name": entry.name,
+            "label": label,
+            "project_id": team["project_id"],
+            "team_id": team_id,
+        }))
     }
 
     /// The conversation a message addressed to `session_id` runs in.
@@ -2523,47 +2728,6 @@ impl FreecoKernel {
             label: None,
         });
 
-        // Check if auto-compaction is needed: message-count OR token-count OR quota-headroom trigger
-        let needs_compact = {
-            use freeco_kernel_runtime::compactor::{
-                estimate_token_count, needs_compaction as check_compact,
-                needs_compaction_by_tokens, CompactionConfig,
-            };
-            let config = CompactionConfig::default();
-            let by_messages = check_compact(&session, &config);
-            let estimated = estimate_token_count(
-                &session.messages,
-                Some(&entry.manifest.model.system_prompt),
-                None,
-            );
-            let by_tokens = needs_compaction_by_tokens(estimated, &config);
-            if by_tokens && !by_messages {
-                info!(
-                    agent_id = %agent_id,
-                    estimated_tokens = estimated,
-                    messages = session.messages.len(),
-                    "Token-based compaction triggered (messages below threshold but tokens above)"
-                );
-            }
-            let by_quota = if let Some(headroom) = self.scheduler.token_headroom(agent_id) {
-                let threshold = (headroom as f64 * 0.8) as u64;
-                if estimated as u64 > threshold && session.messages.len() > 4 {
-                    info!(
-                        agent_id = %agent_id,
-                        estimated_tokens = estimated,
-                        quota_headroom = headroom,
-                        "Quota-headroom compaction triggered (session would consume >80% of remaining quota)"
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            by_messages || by_tokens || by_quota
-        };
-
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog
@@ -2739,7 +2903,7 @@ impl FreecoKernel {
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     freeco_kernel_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
-                project_brief: self.project_brief_for(session.id),
+                project_brief: self.project_brief_for(agent_id, session.id),
             };
             manifest.model.system_prompt =
                 freeco_kernel_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -2794,22 +2958,12 @@ impl FreecoKernel {
                 session = fresh;
             }
 
-            // Auto-compact if the session is large before running the loop
-            if needs_compact {
-                info!(agent_id = %agent_id, messages = session.messages.len(), "Auto-compacting session");
-                match kernel_clone.compact_agent_session(agent_id).await {
-                    Ok(msg) => {
-                        info!(agent_id = %agent_id, "{msg}");
-                        // Reload the session after compaction
-                        if let Ok(Some(reloaded)) = memory.get_session(session.id) {
-                            session = reloaded;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(agent_id = %agent_id, "Auto-compaction failed: {e}");
-                    }
-                }
-            }
+            // No summarising call before the reply. One ran here on every
+            // message once a chat passed 30 messages, made the user wait for
+            // it, summarised the agent's current chat rather than this one,
+            // and never shrank what the model is sent. What the window drops
+            // now reaches the model through the agent loop's earlier-
+            // conversation note, at no cost.
 
             let messages_before = session.messages.len();
             // skill_snapshot was built before the spawn and moved into this
@@ -2955,6 +3109,7 @@ impl FreecoKernel {
                     Ok(result)
                 }
                 Err(e) => {
+                    keep_failed_turn(&memory, agent_id, &session, messages_before);
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     Err(KernelError::Freeco(e))
@@ -3157,41 +3312,9 @@ impl FreecoKernel {
                 label: None,
             });
 
-        // Pre-emptive compaction: compact before LLM call if session is large or quota headroom is low
-        {
-            use freeco_kernel_runtime::compactor::{
-                estimate_token_count, needs_compaction as check_compact,
-                needs_compaction_by_tokens, CompactionConfig,
-            };
-            let config = CompactionConfig::default();
-            let by_messages = check_compact(&session, &config);
-            let estimated = estimate_token_count(
-                &session.messages,
-                Some(&entry.manifest.model.system_prompt),
-                None,
-            );
-            let by_tokens = needs_compaction_by_tokens(estimated, &config);
-            let by_quota = if let Some(headroom) = self.scheduler.token_headroom(agent_id) {
-                let threshold = (headroom as f64 * 0.8) as u64;
-                estimated as u64 > threshold && session.messages.len() > 4
-            } else {
-                false
-            };
-            if by_messages || by_tokens || by_quota {
-                info!(agent_id = %agent_id, messages = session.messages.len(), estimated_tokens = estimated, "Pre-emptive compaction before LLM call");
-                match self.compact_agent_session(agent_id).await {
-                    Ok(msg) => {
-                        info!(agent_id = %agent_id, "{msg}");
-                        if let Ok(Some(reloaded)) = self.memory.get_session(session.id) {
-                            session = reloaded;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(agent_id = %agent_id, "Pre-emptive compaction failed: {e}");
-                    }
-                }
-            }
-        }
+        // No summarising call before the reply: see the streaming path. What
+        // the window drops reaches the model through the earlier-conversation
+        // note instead.
 
         let messages_before = session.messages.len();
 
@@ -3368,7 +3491,7 @@ impl FreecoKernel {
                 context_md: manifest.workspace.as_ref().and_then(|w| {
                     freeco_kernel_runtime::agent_context::load_context_md(w, manifest.cache_context)
                 }),
-                project_brief: self.project_brief_for(entry.session_id),
+                project_brief: self.project_brief_for(agent_id, entry.session_id),
             };
             manifest.model.system_prompt =
                 freeco_kernel_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
@@ -3496,7 +3619,10 @@ impl FreecoKernel {
             content_blocks,
         )
         .await
-        .map_err(KernelError::Freeco)?;
+        .map_err(|e| {
+            keep_failed_turn(&self.memory, agent_id, &session, messages_before);
+            KernelError::Freeco(e)
+        })?;
 
         // Append new messages to canonical session for cross-channel memory
         if session.messages.len() > messages_before {

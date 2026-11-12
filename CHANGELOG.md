@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in one of its conversations; the Projects page edits the brief, starts a
   conversation with any agent inside the project, shows which conversations are
   working right now, and opens each one.
+- Teams you can run. Give a team a goal on the Projects page: its lead gets it
+  in a conversation of its own, hands parts to the other members, who work at
+  the same time, and combines what comes back. Every member's prompt names the
+  team, who leads it and who else is on it. Members are added on the same page,
+  with a role; the member whose role says lead leads, otherwise the first to
+  join.
 
 ### Fixed
 
@@ -43,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message in that spot is refused with a note to send it again.
 - An agent asked a question by an agent it is itself waiting on is told so,
   instead of both waiting for each other forever.
+- Long chats no longer forget their start. The model is sent only the newest
+  messages of a conversation (20 by default, tool calls included), and what
+  dropped out was simply gone: the only summary meant to cover it was shared by
+  all of an agent's chats, cut to 500 characters, and the first thing the trim
+  removed. What drops out is now carried in the prompt instead: everything the
+  user said, word for word, and the agent's own replies in short with the tools
+  they used. It needs no extra model call.
+- A failed or stopped reply no longer takes the user's message with it. The
+  conversation was saved only once a reply finished, so a provider error, a
+  blocked request or a pressed Stop erased the message, and any tool results of
+  that turn. The message is now saved before the model is called, and what a
+  failed run did is kept.
+- Long chats no longer make a summarising call before every reply. Once a chat
+  passed 30 messages, every message waited on one, for a summary of the agent's
+  current chat rather than the one being answered.
 - `project_create` stored the description as the company id.
 - Opening an agent's chat from a link (a project's Open button, the assistant's
   "open the chat" links) while another chat was open landed on the agent list

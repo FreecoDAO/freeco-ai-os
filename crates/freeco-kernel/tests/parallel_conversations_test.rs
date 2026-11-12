@@ -129,6 +129,11 @@ fn reply_for(who: &str, body: &serde_json::Value) -> (Duration, serde_json::Valu
             Duration::from_millis(10),
             text(format!("PONG GOT {result}")),
         ),
+        // Long chats: many quick turns.
+        (w, _) if w.starts_with("fast") => (
+            Duration::from_millis(10),
+            text(format!("{who} answered: {last_user}")),
+        ),
         // Workers and the echo agent: slow enough that overlap is unambiguous.
         (_, _) => (
             Duration::from_millis(600),
@@ -272,6 +277,23 @@ async fn serve(script: Arc<Script>) -> String {
                     .unwrap()
                     .push((who.clone(), system.clone()));
                 let start = Instant::now();
+                // A provider that refuses the request, as a bad key, a blocked
+                // prompt or an outage does.
+                if who == "failing" {
+                    let payload = r#"{"error":{"message":"scripted failure","type":"invalid_request_error"}}"#;
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                    script.calls.lock().unwrap().push(Call {
+                        who,
+                        start,
+                        end: Instant::now(),
+                    });
+                    return;
+                }
                 let (delay, reply) = reply_for(&who, &body);
                 tokio::time::sleep(delay).await;
                 let streaming = body["stream"].as_bool().unwrap_or(false);
@@ -712,4 +734,238 @@ async fn eight_long_answers_all_come_back_whole() {
         assert!(r["reply"].as_str().unwrap().contains("cut here"), "{r}");
     }
     assert!(json.len() < 30_000, "{} bytes", json.len());
+}
+
+/// The last system prompt sent for `who`.
+fn last_prompt(script: &Script, who: &str) -> String {
+    script
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(w, _)| w == who)
+        .map(|(_, p)| p.clone())
+        .unwrap_or_default()
+}
+
+/// A reply that fails must not take the user's message with it: it showed in
+/// the chat while typed and was gone on reload, and the agent never knew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_reply_keeps_the_message() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("failed");
+    let agent = spawn(&kernel, "failing", &url, &[]);
+    let session = kernel.registry.get(agent).unwrap().session_id;
+
+    let err = kernel
+        .send_message(agent, "please book the 7 pm table")
+        .await;
+    assert!(err.is_err(), "the scripted provider refuses");
+
+    let (mut rx, streamed) = kernel
+        .send_message_streaming(agent, "and a taxi at 6:30", None, None, None, None)
+        .expect("streaming starts");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    assert!(
+        streamed.await.unwrap().is_err(),
+        "the streamed reply fails too"
+    );
+    drain.await.unwrap();
+
+    let texts = user_texts(&kernel, session);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("please book the 7 pm table")),
+        "the message of a failed reply is kept: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.contains("and a taxi at 6:30")),
+        "the message of a failed streamed reply is kept: {texts:?}"
+    );
+}
+
+/// Stop ends the run before anything was saved at the end of it; the
+/// message it was answering stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_reply_keeps_the_message() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("stopped");
+    let agent = spawn(&kernel, "echo", &url, &[]);
+    let session = kernel.registry.get(agent).unwrap().session_id;
+
+    let (mut rx, streamed) = kernel
+        .send_message_streaming(
+            agent,
+            "write the welcome note for room 12",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("streaming starts");
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(kernel.stop_agent_run(agent).unwrap(), "a run was going");
+    let _ = streamed.await;
+    drain.await.unwrap();
+
+    let texts = user_texts(&kernel, session);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("write the welcome note for room 12")),
+        "the message of a stopped reply is kept: {texts:?}"
+    );
+}
+
+/// The model is sent only the newest messages. What drops out of that window
+/// reaches it as a note, the user's words verbatim, so a long chat does not
+/// forget its start, and no extra model call is made for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_long_chat_keeps_its_start_in_view() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("longchat");
+    let agent = spawn_with(&kernel, "fast-chat", &url, &[], "max_history_messages = 6");
+    let session = kernel.registry.get(agent).unwrap().session_id;
+
+    kernel
+        .send_message(
+            agent,
+            "My name is Ada Rossi and my room is 412. Never call before 9 am.",
+        )
+        .await
+        .expect("first turn");
+    for i in 0..7 {
+        kernel
+            .send_message(agent, &format!("question {i}"))
+            .await
+            .expect("later turn");
+    }
+
+    let prompt = last_prompt(&script, "fast-chat");
+    assert!(
+        prompt.contains("## Earlier in this conversation"),
+        "the dropped part is carried: {prompt}"
+    );
+    assert!(
+        prompt.contains("My name is Ada Rossi and my room is 412. Never call before 9 am."),
+        "the user's words are carried verbatim: {prompt}"
+    );
+    assert!(
+        prompt.contains("fast-chat answered: My name is Ada Rossi"),
+        "the agent's own reply is carried in short: {prompt}"
+    );
+    // The newest messages are still sent as messages, not repeated in the note.
+    assert!(!prompt.contains("- question 6"), "{prompt}");
+    // One model call per turn: carrying the start costs nothing extra.
+    assert_eq!(script.calls_of("fast-chat").len(), 8);
+    assert_eq!(script.calls_of("unknown").len(), 0, "no summarising calls");
+    // And the stored conversation is whole.
+    assert_eq!(user_texts(&kernel, session).len(), 8);
+}
+
+/// A team runs like a lead with teammates: the lead gets the goal and its
+/// team by name, hands parts to the members, and they work at once, each in
+/// a conversation filed under the team.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_team_run_hands_work_to_its_members() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("team");
+    let lead = spawn(&kernel, "lead", &url, &["agent_send"]);
+    let worker_a = spawn(&kernel, "worker-a", &url, &["agent_send"]);
+    let worker_b = spawn(&kernel, "worker-b", &url, &[]);
+
+    let org = kernel.memory.org();
+    let project = org
+        .create_project("Launch", None, Some("Ship the launch."))
+        .unwrap();
+    let team = org.create_team("Launch crew", Some(&project.id)).unwrap();
+    // Joined first, but the role says who leads.
+    org.add_team_member(&team.id, &worker_a.to_string(), Some("research"))
+        .unwrap();
+    org.add_team_member(&team.id, &lead.to_string(), Some("lead"))
+        .unwrap();
+    org.add_team_member(&team.id, &worker_b.to_string(), None)
+        .unwrap();
+
+    let run = kernel
+        .start_team_run(&team.id, "Prepare the launch plan.")
+        .expect("team run starts");
+    assert_eq!(run["agent_id"], lead.to_string());
+    let lead_session = freeco_types::agent::SessionId(
+        uuid::Uuid::parse_str(run["session_id"].as_str().unwrap()).unwrap(),
+    );
+
+    // The run goes on in the background; wait for the lead's answer.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let answer = loop {
+        let session = kernel.memory.get_session(lead_session).unwrap();
+        let last = session.and_then(|s| {
+            s.messages
+                .iter()
+                .rev()
+                .find(|m| m.role == freeco_types::message::Role::Assistant)
+                .map(|m| m.content.text_content())
+        });
+        if let Some(text) = last.filter(|t| t.contains("LEAD GOT")) {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "the team run finishes");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(answer.contains("worker-a answered"), "{answer}");
+    assert!(answer.contains("worker-b answered"), "{answer}");
+
+    let lead_prompt = last_prompt(&script, "lead");
+    assert!(
+        lead_prompt.contains("Team \"Launch crew\""),
+        "{lead_prompt}"
+    );
+    assert!(lead_prompt.contains("You lead this team"), "{lead_prompt}");
+    assert!(
+        lead_prompt.contains("- worker-a — research"),
+        "{lead_prompt}"
+    );
+    assert!(lead_prompt.contains("Ship the launch."), "{lead_prompt}");
+    let kickoff = user_texts(&kernel, lead_session);
+    assert!(
+        kickoff[0].contains("Prepare the launch plan.")
+            && kickoff[0].contains("worker-a, worker-b"),
+        "{kickoff:?}"
+    );
+
+    // Members are told who leads and who their teammates are.
+    let worker_prompt = last_prompt(&script, "worker-a");
+    assert!(
+        worker_prompt.contains("lead leads this team"),
+        "{worker_prompt}"
+    );
+    assert!(worker_prompt.contains("- worker-b"), "{worker_prompt}");
+
+    let a = script.calls_of("worker-a");
+    let b = script.calls_of("worker-b");
+    assert_eq!((a.len(), b.len()), (1, 1));
+    assert!(overlaps(&a[0], &b[0]), "members work at the same time");
+
+    let filed = org.sessions_for_project(&project.id).unwrap();
+    assert_eq!(filed.len(), 3, "the lead's chat and both tasks: {filed:?}");
+    for s in &filed {
+        let scope = org
+            .session_scope(s["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            scope.1.as_deref(),
+            Some(team.id.as_str()),
+            "filed under the team: {s}"
+        );
+    }
+    // Running a team never pulls the lead out of the chat it was in.
+    assert_ne!(kernel.registry.get(lead).unwrap().session_id, lead_session);
 }

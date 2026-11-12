@@ -693,17 +693,42 @@
           <div x-show="selected && teamsFor(selected.id).length" style="margin-bottom:16px">
             <div style="display:flex;flex-wrap:wrap;gap:8px">
               <template x-for="t in teamsFor(selected ? selected.id : '')" :key="t.id">
-                <div class="card" style="padding:8px 12px;min-width:180px">
+                <!-- A team is run like a lead with teammates: the lead gets the
+                     goal, hands parts to the members, and they work at once. -->
+                <div class="card" style="padding:10px 12px;min-width:240px;flex:1;max-width:440px">
                   <div style="display:flex;align-items:baseline;gap:8px">
                     <strong style="font-size:13px" x-text="t.name"></strong>
                     <span class="text-xs text-dim"
                           x-text="t.member_count + ' member' + (t.member_count === 1 ? '' : 's')"></span>
                   </div>
-                  <p class="text-xs text-dim" style="margin:3px 0 0;word-break:break-all"
+                  <p class="text-xs" style="margin:4px 0 0"
+                     x-show="t.members && t.members.length" x-text="memberLine(t)"></p>
+                  <p class="text-xs text-dim" style="margin:4px 0 0"
+                     x-show="!t.members || !t.members.length">No members yet. Add the agents who will do the work.</p>
+                  <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+                    <select class="form-input" style="flex:1;min-width:120px;font-size:12px"
+                            x-model="tf(t).agent" aria-label="Agent to add to this team">
+                      <option value="">Add a member...</option>
+                      <template x-for="a in agents()" :key="a.id">
+                        <option :value="a.id" x-text="a.name"></option>
+                      </template>
+                    </select>
+                    <input class="form-input" style="width:96px;font-size:12px" x-model="tf(t).role"
+                           placeholder="Role, e.g. lead" aria-label="Role in the team">
+                    <button class="btn btn-ghost btn-sm" @click="addMember(t)" :disabled="!tf(t).agent">Add</button>
+                  </div>
+                  <!-- x-show sits on a wrapper: showing an element clears its
+                       inline display, which would drop the row's flex. -->
+                  <div x-show="t.members && t.members.length">
+                    <div style="display:flex;gap:6px;margin-top:6px">
+                      <input class="form-input" style="flex:1;font-size:12px" x-model="tf(t).goal"
+                             placeholder="Give the team a goal..." @keydown.enter="runTeam(t)" aria-label="Team goal">
+                      <button class="btn btn-sm" @click="runTeam(t)"
+                              :disabled="tf(t).busy || !tf(t).goal.trim()">Run team</button>
+                    </div>
+                  </div>
+                  <p class="text-xs text-dim" style="margin:6px 0 0;word-break:break-all"
                      x-text="'memory scope: team:' + t.id"></p>
-                  <p class="text-xs text-dim" style="margin:2px 0 0"
-                     x-show="t.members && t.members.length"
-                     x-text="t.members.map(function(m){return m.role ? m.agent_id + ' (' + m.role + ')' : m.agent_id;}).join(', ')"></p>
                 </div>
               </template>
             </div>
