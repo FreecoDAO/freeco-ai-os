@@ -6478,26 +6478,26 @@ pub async fn logs_stream(
     >(256);
 
     tokio::spawn(async move {
-        let mut last_seq: u64 = 0;
-        let mut first_poll = true;
+        // The last entry sent. None until the backfill has been sent.
+        let mut last_seq: Option<u64> = None;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit_log.recent(200);
+            // First the latest 200 as backfill, then everything after the
+            // last entry sent -- not the latest 200 again, which lost the
+            // entries in between whenever more than 200 came in a second.
+            let entries = match last_seq {
+                None => state.kernel.audit_log.recent(200),
+                Some(seq) => state.kernel.audit_log.since(seq, 1000),
+            };
 
             for entry in &entries {
-                // On first poll, send all existing entries as backfill.
-                // After that, only send entries newer than last_seq.
-                if !first_poll && entry.seq <= last_seq {
-                    continue;
-                }
-
                 let action_str = format!("{:?}", entry.action);
 
                 // Apply level filter
                 if !level_filter.is_empty() {
-                    let classified = classify_audit_level(&action_str);
+                    let classified = classify_audit_level(&action_str, &entry.outcome);
                     if classified != level_filter {
                         continue;
                     }
@@ -6529,9 +6529,8 @@ pub async fn logs_stream(
 
             // Update tracking state
             if let Some(last) = entries.last() {
-                last_seq = last.seq;
+                last_seq = Some(last.seq);
             }
-            first_poll = false;
         }
     });
 
@@ -6545,12 +6544,27 @@ pub async fn logs_stream(
         .into_response()
 }
 
-/// Classify an audit action string into a level (info, warn, error).
-fn classify_audit_level(action: &str) -> &'static str {
+/// Classify an audit entry into a level (info, warn, error).
+///
+/// By its outcome as well as its action: no action name contains "error",
+/// so going by the action alone, the ERROR filter never showed a failed
+/// message or tool call.
+fn classify_audit_level(action: &str, outcome: &str) -> &'static str {
     let a = action.to_lowercase();
-    if a.contains("error") || a.contains("fail") || a.contains("crash") || a.contains("denied") {
+    let o = outcome.to_lowercase();
+    if o.starts_with("error")
+        || o.contains("fail")
+        || a.contains("error")
+        || a.contains("fail")
+        || a.contains("crash")
+    {
         "error"
-    } else if a.contains("warn") || a.contains("block") || a.contains("kill") {
+    } else if o.starts_with("denied")
+        || a.contains("denied")
+        || a.contains("warn")
+        || a.contains("block")
+        || a.contains("kill")
+    {
         "warn"
     } else {
         "info"
@@ -14443,37 +14457,64 @@ fn audit_to_comms_event(
     let action_str = format!("{:?}", entry.action);
     let (kind, detail, target_label) = match action_str.as_str() {
         "AgentMessage" => {
-            // Format detail: "tokens_in=X, tokens_out=Y" → readable summary
-            let detail = if entry.detail.starts_with("tokens_in=") {
-                let parts: Vec<&str> = entry.detail.split(", ").collect();
-                let in_tok = parts
-                    .first()
-                    .and_then(|p| p.strip_prefix("tokens_in="))
-                    .unwrap_or("?");
-                let out_tok = parts
-                    .get(1)
-                    .and_then(|p| p.strip_prefix("tokens_out="))
-                    .unwrap_or("?");
-                if entry.outcome == "ok" {
-                    format!("{} in / {} out tokens", in_tok, out_tok)
-                } else {
-                    format!(
-                        "{} in / {} out — {}",
-                        in_tok,
-                        out_tok,
-                        freeco_types::truncate_str(&entry.outcome, 80)
-                    )
+            // Detail is "key=value, ..." pairs: from=, from_id= (when the
+            // sender is known), then tokens_in=, tokens_out= or "agent loop
+            // failed". Older entries have no sender.
+            let mut from = None;
+            let mut from_id = None;
+            let mut tokens_in = None;
+            let mut tokens_out = None;
+            for part in entry.detail.split(", ") {
+                match part.split_once('=') {
+                    Some(("from", v)) => from = Some(v),
+                    Some(("from_id", v)) => from_id = Some(v),
+                    Some(("tokens_in", v)) => tokens_in = Some(v),
+                    Some(("tokens_out", v)) => tokens_out = Some(v),
+                    _ => {}
                 }
-            } else if entry.outcome != "ok" {
-                format!(
-                    "{} — {}",
-                    freeco_types::truncate_str(&entry.detail, 80),
+            }
+            let detail = match (tokens_in, tokens_out) {
+                (Some(i), Some(o)) if entry.outcome == "ok" => format!("{i} in / {o} out tokens"),
+                (Some(i), Some(o)) => format!(
+                    "{i} in / {o} out — {}",
                     freeco_types::truncate_str(&entry.outcome, 80)
-                )
-            } else {
-                freeco_types::truncate_str(&entry.detail, 200).to_string()
+                ),
+                _ if entry.outcome != "ok" => format!(
+                    "Failed — {}",
+                    freeco_types::truncate_str(&entry.outcome, 80)
+                ),
+                _ => freeco_types::truncate_str(&entry.detail, 200).to_string(),
             };
-            (CommsEventKind::AgentMessage, detail, "user")
+            match (from, from_id) {
+                // From an agent: draw it as sender → receiver.
+                (_, Some(fid)) if fid.starts_with("agent:") => {
+                    let sender = fid.trim_start_matches("agent:");
+                    return Some(CommsEvent {
+                        id: format!("audit-{}", entry.seq),
+                        timestamp: entry.timestamp.clone(),
+                        kind: CommsEventKind::AgentMessage,
+                        source_id: sender.to_string(),
+                        source_name: resolve_name(sender),
+                        target_id: entry.agent_id.clone(),
+                        target_name: resolve_name(&entry.agent_id),
+                        detail,
+                    });
+                }
+                // From a named person or service.
+                (Some(name), _) => {
+                    return Some(CommsEvent {
+                        id: format!("audit-{}", entry.seq),
+                        timestamp: entry.timestamp.clone(),
+                        kind: CommsEventKind::AgentMessage,
+                        source_id: from_id.unwrap_or_default().to_string(),
+                        source_name: name.to_string(),
+                        target_id: entry.agent_id.clone(),
+                        target_name: resolve_name(&entry.agent_id),
+                        detail,
+                    });
+                }
+                _ => (CommsEventKind::AgentMessage, detail, "user"),
+            }
         }
         "AgentSpawn" => (
             CommsEventKind::AgentSpawned,
@@ -14512,6 +14553,58 @@ fn audit_to_comms_event(
         },
         detail,
     })
+}
+
+#[cfg(test)]
+mod comms_log_tests {
+    use super::*;
+    use freeco_kernel_runtime::audit::{AuditAction, AuditLog};
+
+    fn message(detail: &str, outcome: &str) -> freeco_kernel_runtime::audit::AuditEntry {
+        let log = AuditLog::new();
+        log.record_entry("receiver-id", AuditAction::AgentMessage, detail, outcome)
+    }
+
+    #[test]
+    fn an_agent_to_agent_message_is_drawn_from_sender_to_receiver() {
+        let e = message(
+            "from=Researcher, from_id=agent:sender-id, tokens_in=10, tokens_out=4",
+            "ok",
+        );
+        let ev = audit_to_comms_event(&e, &[]).unwrap();
+        assert_eq!(ev.source_id, "sender-id");
+        assert_eq!(ev.target_id, "receiver-id");
+        assert_eq!(ev.detail, "10 in / 4 out tokens");
+    }
+
+    #[test]
+    fn a_named_sender_is_shown_by_name() {
+        let e = message("from=Ana, from_id=wa:41, tokens_in=1, tokens_out=2", "ok");
+        let ev = audit_to_comms_event(&e, &[]).unwrap();
+        assert_eq!(ev.source_name, "Ana");
+        assert_eq!(ev.target_id, "receiver-id");
+    }
+
+    #[test]
+    fn older_entries_and_failures_still_read() {
+        let ev = audit_to_comms_event(&message("tokens_in=3, tokens_out=5", "ok"), &[]).unwrap();
+        assert_eq!(ev.target_name, "user");
+        assert_eq!(ev.detail, "3 in / 5 out tokens");
+        let ev = audit_to_comms_event(&message("agent loop failed", "error: rate limited"), &[])
+            .unwrap();
+        assert_eq!(ev.detail, "Failed — error: rate limited");
+    }
+
+    #[test]
+    fn failures_and_denials_get_their_level() {
+        assert_eq!(classify_audit_level("AgentMessage", "error: boom"), "error");
+        assert_eq!(classify_audit_level("ToolInvoke", "ok"), "info");
+        assert_eq!(
+            classify_audit_level("CapabilityCheck", "denied: no"),
+            "warn"
+        );
+        assert_eq!(classify_audit_level("AgentKill", "ok"), "warn");
+    }
 }
 
 /// GET /api/comms/events — Return recent inter-agent communication events.
@@ -14568,21 +14661,22 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
     >(256);
 
     tokio::spawn(async move {
-        let mut last_seq: u64 = {
-            let entries = state.kernel.audit_log.recent(1);
-            entries.last().map(|e| e.seq).unwrap_or(0)
-        };
+        // Where the page's initial load (GET /api/comms/events) ends.
+        let mut last_seq: Option<u64> = state.kernel.audit_log.recent(1).last().map(|e| e.seq);
+        let mut last_bus = chrono::Utc::now();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
             let agents = state.kernel.registry.list();
-            let entries = state.kernel.audit_log.recent(50);
+            // Everything after the last entry seen. A fixed window of the
+            // latest 50 lost whatever came in a burst bigger than that.
+            let entries = match last_seq {
+                Some(seq) => state.kernel.audit_log.since(seq, 1000),
+                None => state.kernel.audit_log.recent(1000),
+            };
 
             for entry in &entries {
-                if entry.seq <= last_seq {
-                    continue;
-                }
                 if let Some(comms_event) = audit_to_comms_event(entry, &agents) {
                     let data = serde_json::to_string(&comms_event).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
@@ -14592,8 +14686,27 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
             }
 
             if let Some(last) = entries.last() {
-                last_seq = last.seq;
+                last_seq = Some(last.seq);
             }
+
+            // Agent-to-agent messages, with their text, are on the event bus
+            // rather than in the audit trail; this feed used to read only the
+            // trail, so they appeared only after a reload.
+            let bus = state.kernel.event_bus.history(200).await;
+            let mut newest = last_bus;
+            for event in bus.iter().filter(|e| e.timestamp > last_bus) {
+                if !matches!(event.payload, freeco_types::event::EventPayload::Message(_)) {
+                    continue;
+                }
+                newest = newest.max(event.timestamp);
+                if let Some(comms_event) = filter_to_comms_event(event, &agents) {
+                    let data = serde_json::to_string(&comms_event).unwrap_or_default();
+                    if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                        return; // Client disconnected
+                    }
+                }
+            }
+            last_bus = newest;
         }
     });
 
@@ -14663,7 +14776,12 @@ pub async fn comms_send(
         );
     }
 
-    match state.kernel.send_message(to_id, &req.message).await {
+    // As the sending agent, so the exchange shows who talked to whom.
+    match state
+        .kernel
+        .send_agent_message(from_id, to_id, &req.message, "comms_send")
+        .await
+    {
         Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({

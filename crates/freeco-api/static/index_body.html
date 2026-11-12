@@ -6040,9 +6040,11 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <template x-for="entry in filteredEntries" :key="entry.seq">
                 <div class="log-entry">
                   <span class="log-timestamp" x-text="new Date(entry.timestamp).toLocaleTimeString()"></span>
-                  <span class="log-level" :class="'log-level-' + classifyLevel(entry.action)" x-text="classifyLevel(entry.action).toUpperCase()"></span>
+                  <span class="log-level" :class="'log-level-' + classifyLevel(entry)" x-text="classifyLevel(entry).toUpperCase()"></span>
                   <span class="text-xs" style="color:var(--text-dim);margin-right:6px" x-text="'[' + entry.action + ']'"></span>
+                  <span class="text-xs" style="font-weight:600;margin-right:6px" x-text="auditAgentName(entry.agent_id)"></span>
                   <span class="text-xs" x-text="entry.detail"></span>
+                  <span class="text-xs" style="color:var(--error);margin-left:6px" x-show="entry.outcome && entry.outcome !== 'ok'" x-text="entry.outcome"></span>
                 </div>
               </template>
               <div class="empty-state" x-show="!filteredEntries.length" style="padding:20px">

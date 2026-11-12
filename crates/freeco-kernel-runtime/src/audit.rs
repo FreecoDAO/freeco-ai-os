@@ -569,6 +569,20 @@ impl AuditLog {
         let start = entries.len().saturating_sub(n);
         entries[start..].to_vec()
     }
+
+    /// Entries recorded after `seq`, oldest first, at most `max` of them.
+    ///
+    /// For live feeds. They used to re-read a fixed number of the latest
+    /// entries on every poll, so a burst larger than that between two polls
+    /// -- one agent turn with many tool calls -- lost the entries in between.
+    /// Reading from where the feed stopped loses none: one that falls more
+    /// than `max` behind catches up over the next polls.
+    pub fn since(&self, seq: u64, max: usize) -> Vec<AuditEntry> {
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let start = entries.partition_point(|e| e.seq <= seq);
+        let end = start.saturating_add(max).min(entries.len());
+        entries[start..end].to_vec()
+    }
 }
 
 impl Default for AuditLog {
@@ -801,6 +815,18 @@ mod tests {
         let next = log.record_entry("a", AuditAction::ToolInvoke, "next", "ok");
         assert_eq!(next.seq, n as u64);
         assert_eq!(log.len(), n + 1);
+    }
+
+    #[test]
+    fn since_reads_on_from_where_a_feed_stopped() {
+        let log = AuditLog::new();
+        for i in 0..10 {
+            log.record("a", AuditAction::ToolInvoke, format!("e{i}"), "ok");
+        }
+        let seqs = |v: Vec<AuditEntry>| v.iter().map(|e| e.seq).collect::<Vec<_>>();
+        assert_eq!(seqs(log.since(6, 100)), vec![7, 8, 9]);
+        assert_eq!(seqs(log.since(2, 3)), vec![3, 4, 5]);
+        assert!(log.since(9, 100).is_empty());
     }
 
     #[test]
