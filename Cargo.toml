@@ -65,7 +65,7 @@ chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.41", features = ["bundled", "serde_json"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -146,7 +146,7 @@ html-escape = "0.2"
 regex-lite = "0.1"
 
 # MCP SDK (official Rust implementation)
-rmcp = { version = "1.2", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+rmcp = { version = "3.9", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 # Socket options (SO_REUSEADDR)
 socket2 = "0.5"

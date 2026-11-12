@@ -134,7 +134,8 @@ impl AuditLog {
                         _ => AuditAction::ToolInvoke, // fallback
                     };
                     Ok(AuditEntry {
-                        seq: row.get(0)?,
+                        // Stored as i64 (see the INSERT); rusqlite reads no u64.
+                        seq: row.get::<_, i64>(0)? as u64,
                         timestamp: row.get(1)?,
                         agent_id: row.get(2)?,
                         action,

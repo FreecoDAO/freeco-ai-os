@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins the compiler, but the release workflow added each target to the
   stable toolchain, so in v0.9.8 the installer and CLI for both failed with
   "can't find crate for `core`".
+- An MCP server reached over HTTP can no longer crash the daemon by sending
+  an endless response. rmcp before 3.9 read the whole body into memory, even
+  during the first handshake (RUSTSEC-2026-0462); rmcp 3.9 caps it.
+- The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
+  stale memory when opening a database with a `-wal` file someone else wrote
+  (RUSTSEC-2026-0459).
 
 ### Changed
 
