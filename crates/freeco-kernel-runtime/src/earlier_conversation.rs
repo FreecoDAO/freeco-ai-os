@@ -15,8 +15,9 @@
 //!   bare acknowledgements go first, then ordinary messages, and instructions
 //!   ("always", "never", "from now on", "I prefer"...) last, because that is
 //!   where standing requests live;
-//! - the agent's own replies from that part as short heads, newest first,
-//!   with the tools each used, so it knows what it already did.
+//! - the agent's own replies from that part as short heads, oldest first,
+//!   with the tools each used, so it knows what it already did. When they do
+//!   not all fit, the newest are kept and the rest are counted.
 //!
 //! No model call: it costs nothing, adds no delay, and the same history
 //! renders the same note every turn, so nothing is paraphrased differently
