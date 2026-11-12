@@ -6019,6 +6019,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <div class="flex gap-2 items-center" x-show="tab === 'audit'">
             <button class="btn btn-ghost btn-sm" @click="verifyChain()">Verify Chain</button>
             <span class="badge" :class="chainValid === true ? 'badge-running' : chainValid === false ? 'badge-crashed' : ''" x-text="chainValid === true ? 'VALID' : chainValid === false ? 'BROKEN' : ''" x-show="chainValid !== null"></span>
+            <span class="text-xs text-dim" x-show="chainValid === false && chainDetail" x-text="chainDetail" style="max-width:520px"></span>
           </div>
         </div>
         <div class="tabs">

@@ -4644,18 +4644,17 @@ pub async fn audit_append(
     };
     let outcome = req.outcome.clone().unwrap_or_else(|| "ok".to_string());
 
-    let hash = state
+    let entry = state
         .kernel
         .audit_log
-        .record(agent_id, action, detail, outcome);
-    let seq = state.kernel.audit_log.len().saturating_sub(1) as u64;
+        .record_entry(agent_id, action, detail, outcome);
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "appended",
-            "seq": seq,
-            "hash": hash,
+            "seq": entry.seq,
+            "hash": entry.hash,
             "tip": state.kernel.audit_log.tip_hash(),
         })),
     )
@@ -6385,32 +6384,68 @@ pub async fn audit_recent(
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
+///
+/// Checks the record in the database and lists every break with its date,
+/// plus where the unbroken run to the end begins -- one old break used to
+/// make every check read "BROKEN" with nothing to say whether anything
+/// recent was affected.
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entry_count = state.kernel.audit_log.len();
-    match state.kernel.audit_log.verify_integrity() {
-        Ok(()) => {
-            if entry_count == 0 {
-                // SECURITY: Warn that an empty audit log has no forensic value
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": 0,
-                    "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
-                }))
-            } else {
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": entry_count,
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
-                }))
-            }
-        }
-        Err(msg) => Json(serde_json::json!({
-            "valid": false,
-            "error": msg,
-            "entries": entry_count,
-        })),
+    let report = state.kernel.audit_log.verify_report();
+    if report.entries == 0 {
+        // SECURITY: Warn that an empty audit log has no forensic value
+        return Json(serde_json::json!({
+            "valid": true,
+            "entries": 0,
+            "warning": "Audit log is empty — no events have been recorded yet",
+            "tip_hash": state.kernel.audit_log.tip_hash(),
+        }));
     }
+    let error = (!report.is_intact()).then(|| {
+        let list: Vec<String> = report
+            .breaks
+            .iter()
+            .map(|b| {
+                let what = match b.kind.as_str() {
+                    "altered" => "changed after it was written",
+                    "missing" => "entries before it are missing",
+                    _ => "does not chain from the entry before it",
+                };
+                format!(
+                    "entry {} ({}): {what}",
+                    b.seq,
+                    b.timestamp.get(..10).unwrap_or("")
+                )
+            })
+            .collect();
+        let more = report.break_count.saturating_sub(report.breaks.len());
+        let intact = match (&report.intact_since_seq, &report.intact_since) {
+            (Some(seq), Some(ts)) => format!(
+                " Intact since entry {seq} ({}).",
+                ts.get(..10).unwrap_or("")
+            ),
+            _ => " The latest entry is itself affected.".to_string(),
+        };
+        format!(
+            "{} break(s): {}{}.{intact}",
+            report.break_count,
+            list.join("; "),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            },
+        )
+    });
+    Json(serde_json::json!({
+        "valid": report.is_intact(),
+        "entries": report.entries,
+        "breaks": report.breaks,
+        "break_count": report.break_count,
+        "intact_since_seq": report.intact_since_seq,
+        "intact_since": report.intact_since,
+        "error": error,
+        "tip_hash": state.kernel.audit_log.tip_hash(),
+    }))
 }
 
 /// GET /api/logs/stream — SSE endpoint for real-time audit log streaming.

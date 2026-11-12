@@ -23,6 +23,7 @@ function logsPage() {
     auditEntries: [],
     tipHash: '',
     chainValid: null,
+    chainDetail: '',
     filterAction: '',
     auditLoading: false,
     auditLoadError: '',
@@ -236,13 +237,16 @@ function logsPage() {
       try {
         var data = await FreecoAPI.get('/api/audit/verify');
         this.chainValid = data.valid === true;
+        this.chainDetail = data.error || '';
         if (this.chainValid) {
           FreecoToast.success('Audit chain verified — ' + (data.entries || 0) + ' entries valid');
         } else {
-          FreecoToast.error('Audit chain broken!');
+          // Say where and since when, not just "broken".
+          FreecoToast.error('Audit chain: ' + (data.error || 'broken'), 15000);
         }
       } catch(e) {
         this.chainValid = false;
+        this.chainDetail = '';
         FreecoToast.error('Chain verification failed: ' + e.message);
       }
     },
