@@ -79,7 +79,7 @@ fn env_timeout_secs_with_legacy(current: &str, legacy: &str) -> Option<u64> {
 /// say that, and say what to do instead of waiting again.
 fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
     match tool_name {
-        "agent_send" | "agent_spawn" => format!(
+        "agent_send" | "agent_delegate" | "agent_spawn" => format!(
             "Tool '{tool_name}' timed out after {timeout_secs}s: the other agent did not \
              reply in time. The usual cause is that its model is not answering - an \
              exhausted provider balance, or a fallback model that does not exist. Do not \
@@ -92,7 +92,7 @@ fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
 
 fn tool_timeout_for(tool_name: &str) -> Option<Duration> {
     let secs = match tool_name {
-        "agent_send" | "agent_spawn" => env_timeout_secs_with_legacy(
+        "agent_send" | "agent_delegate" | "agent_spawn" => env_timeout_secs_with_legacy(
             "FREECO_AI_AGENT_TOOL_TIMEOUT_SECS",
             "OPENFANG_AGENT_TOOL_TIMEOUT_SECS",
         )
@@ -599,20 +599,16 @@ pub async fn run_agent_loop(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -650,7 +646,17 @@ pub async fn run_agent_loop(
             max_history = max_history,
             "Trimming old messages to prevent context overflow"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -659,6 +665,22 @@ pub async fn run_agent_loop(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default
@@ -2027,20 +2049,16 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -2058,7 +2076,17 @@ pub async fn run_agent_loop_streaming(
             max_history = max_history,
             "Trimming old messages to prevent context overflow (streaming)"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -2067,6 +2095,22 @@ pub async fn run_agent_loop_streaming(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default

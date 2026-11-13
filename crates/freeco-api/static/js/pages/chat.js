@@ -14,6 +14,17 @@ function chatPage() {
     messageQueue: [],    // Queue for messages sent while streaming
     thinkingMode: 'off', // 'off' | 'on' | 'stream'
     _wsAgent: null,
+    // The conversation on screen. Every send names it, so a message lands in
+    // the chat it was typed in even if another window switched the agent.
+    sessionId: null,
+    // Chats left while they were working, by agent id. `sending` and
+    // `messageQueue` belong to the chat on screen; one shared pair of them
+    // is why a reply running in one chat queued every message typed into
+    // every other chat behind it, and why switching away could strand what
+    // was queued for good. Now each chat keeps its own, and switching away
+    // never stops, blocks or drops anything.
+    _parked: {},
+    _busyPoll: null,
     showSlashMenu: false,
     slashFilter: '',
     slashIdx: 0,
@@ -426,6 +437,12 @@ function chatPage() {
       });
     },
 
+    // Closing the chat (back to the agent list) must not take its queue with
+    // it: whatever was waiting is handed to the server, and the poll stops.
+    destroy() {
+      this._parkCurrentChat();
+    },
+
     init() {
       var self = this;
 
@@ -772,6 +789,7 @@ function chatPage() {
           if (self.currentAgent) {
             FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function() {
               self.messages = [];
+              self.sessionId = null; // the reset made a new conversation
               FreecoToast.success('Session reset');
             }).catch(function(e) { FreecoToast.error('Reset failed: ' + e.message); });
           }
@@ -1177,11 +1195,14 @@ function chatPage() {
     //
     // Everything is fetched once and the last HISTORY_WINDOW messages drawn;
     // "Show earlier" reveals more from memory, with no request that can fail.
-    async loadHistory(agentId) {
+    async loadHistory(agentId, sessionId) {
       var gen = ++this._historyGen;
       this.historyLoading = true;
       try {
-        var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(agentId) + '/session');
+        // Without a conversation named, the agent's current one.
+        var url = '/api/agents/' + encodeURIComponent(agentId) + '/session';
+        if (sessionId) url += '?session_id=' + encodeURIComponent(sessionId);
+        var data = await FreecoAPI.get(url);
         // A newer load started while this one was in flight -- that agent or
         // session is what the user is looking at now.
         if (gen !== this._historyGen || !data) return;
@@ -1192,10 +1213,20 @@ function chatPage() {
           .filter(function(m) { return (m.text && m.text.trim()) || m.tools.length || m.images.length; });
         this._allHistory = all;
         this.sessionLabel = data.label || '';
+        this.sessionId = data.session_id || null;
         this.historyTotal = all.length;
         this._historyWindow = HISTORY_WINDOW;
         this._showHistoryWindow();
+        // A parked chat whose work is all done and saved is just history now.
+        var key = this._parkKey(agentId, this.sessionId);
+        var parked = this._parked[key];
+        if (parked && !parked.sending && !data.busy) { delete this._parked[key]; parked = null; }
+        if (parked) this._showParkedMessages(parked);
         this.$nextTick(function() { self.scrollToBottom(true); });
+        // A run is still working here: left mid-reply, a message delivered
+        // while away, or a reload during a run. Say so and pick the reply up
+        // when it lands, rather than show a thread that looks ignored.
+        if (data.busy || parked) this._watchBusy(agentId, this.sessionId);
       } catch (e) {
         if (gen === this._historyGen) {
           FreecoToast.error('Could not load this conversation: ' + (e.message || 'error'));
@@ -1255,6 +1286,14 @@ function chatPage() {
     },
 
     selectAgent(agent) {
+      // Another chat: park this one with its run and queue intact, and start
+      // the next with its own. The same chat again keeps both.
+      if (!this.currentAgent || this.currentAgent.id !== agent.id) {
+        if (this.currentAgent) this._parkCurrentChat();
+        this.sessionId = null;
+        this.sending = false;
+        this.messageQueue = [];
+      }
       this.currentAgent = agent;
       this.messages = [];
       try { localStorage.setItem('of-active-agent', agent.id); } catch(e) { /* ignore */ }
@@ -1318,6 +1357,7 @@ function chatPage() {
       var t = typeof window.t === 'function' ? window.t : function(s) { return s; };
       var label = prompt(t('chat.session_name_prompt'));
       if (label === null) return; // cancelled
+      this._leaveConversation();
       try {
         await FreecoAPI.post('/api/agents/' + this.currentAgent.id + '/sessions', {
           label: label.trim() || undefined
@@ -1326,6 +1366,8 @@ function chatPage() {
         await this.loadSession(this.currentAgent.id);
         this.messages = [];
         this.scrollToBottom();
+        this._wsAgent = null;
+        this.connectWs(this.currentAgent.id);
         if (typeof FreecoToast !== 'undefined') FreecoToast.success(t('chat.session_created'));
       } catch(e) {
         if (typeof FreecoToast !== 'undefined') FreecoToast.error(t('chat.session_create_failed'));
@@ -1335,6 +1377,7 @@ function chatPage() {
     // Multi-session: switch to an existing session
     async switchSession(sessionId) {
       if (!this.currentAgent) return;
+      this._leaveConversation();
       try {
         await FreecoAPI.post('/api/agents/' + this.currentAgent.id + '/sessions/' + sessionId + '/switch', {});
         this.messages = [];
@@ -1569,6 +1612,7 @@ function chatPage() {
 
         case 'response':
           this._clearTypingTimeout();
+          this._stopBusyWatch();
           // Update context pressure from response
           if (data.context_pressure) {
             this.contextPressure = data.context_pressure;
@@ -1618,6 +1662,7 @@ function chatPage() {
         case 'silent_complete':
           // Agent intentionally chose not to reply (NO_REPLY)
           this._clearTypingTimeout();
+          this._stopBusyWatch();
           this.messages = this.messages.filter(function(m) { return !m.thinking && !m.streaming; });
           this.sending = false;
           this.tokenCount = 0;
@@ -1628,6 +1673,7 @@ function chatPage() {
 
         case 'error':
           this._clearTypingTimeout();
+          this._stopBusyWatch();
           this.messages = this.messages.filter(function(m) { return !m.thinking && !m.streaming; });
           this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + data.content, meta: '', tools: [], ts: Date.now() });
           this.sending = false;
@@ -1692,6 +1738,126 @@ function chatPage() {
         msg._copied = true;
         setTimeout(function() { msg._copied = false; }, 2000);
       }).catch(function() {});
+    },
+
+    _agentName: function(agentId) {
+      var a = (Alpine.store('app').agents || []).filter(function(x) { return x.id === agentId; })[0];
+      return a ? a.name : 'the agent';
+    },
+
+    // Leave the chat on screen without stopping anything in it.
+    //
+    // Its run keeps going on the server and is saved there when it finishes.
+    // Messages queued behind it are handed to the server now, addressed to
+    // their conversation: the server keeps them in order behind the run, so
+    // they are answered while the user works in another chat.
+    _parkCurrentChat: function() {
+      var agent = this.currentAgent;
+      this._stopBusyWatch();
+      this._clearTypingTimeout();
+      var queue = this.messageQueue.slice();
+      var wasSending = this.sending;
+      this.messageQueue = [];
+      this.sending = false;
+      if (!agent || (!wasSending && !queue.length)) return;
+      // Everything typed here that the server has not answered yet, so it is
+      // still on screen when the user comes back before its turn is saved.
+      var unanswered = this.messages
+        .filter(function(m) { return m.role === 'user' && m.pending; })
+        .map(function(m) { return m.text; });
+      var key = this._parkKey(agent.id, this.sessionId);
+      var parked = this._parked[key] || { texts: [], sending: 0 };
+      parked.texts = parked.texts.concat(unanswered);
+      this._parked[key] = parked;
+      if (queue.length) this._deliverParked(agent.id, this.sessionId, queue);
+    },
+
+    // Parked state belongs to one conversation: an agent can be working in
+    // several, and one left mid-reply must not show up in another.
+    _parkKey: function(agentId, sessionId) {
+      return agentId + '|' + (sessionId || '');
+    },
+
+    // Moving to another conversation of the same agent: what was queued for
+    // the one on screen is delivered to it, not to the one being opened, and
+    // it is parked like a chat left for another agent.
+    //
+    // The agent's socket is dropped too, before the switch is even asked for:
+    // frames of the run left behind would otherwise be drawn into the next
+    // conversation. The run carries on and is saved; whoever opens the next
+    // conversation connects again.
+    _leaveConversation: function() {
+      if (!this.currentAgent) return;
+      this._parkCurrentChat();
+      FreecoAPI.wsDisconnect();
+      this._wsAgent = null;
+    },
+
+    _deliverParked: async function(agentId, sessionId, queue) {
+      var parked = this._parked[this._parkKey(agentId, sessionId)];
+      if (parked) parked.sending += queue.length;
+      for (var i = 0; i < queue.length; i++) {
+        var q = queue[i];
+        var body = { message: q.text };
+        if (q.files && q.files.length) body.attachments = q.files;
+        if (sessionId) body.session_id = sessionId;
+        try {
+          await FreecoAPI.post('/api/agents/' + agentId + '/message', body);
+        } catch (e) {
+          FreecoToast.error('A queued message to ' + this._agentName(agentId) + ' failed: ' + e.message);
+        }
+        if (parked) parked.sending -= 1;
+      }
+    },
+
+    // Messages of a parked chat that the server has not answered yet: not in
+    // its history until their turn is saved, so drawn from here meanwhile.
+    _showParkedMessages: function(parked) {
+      var self = this;
+      parked.texts.forEach(function(text) {
+        self.messages.push({ id: ++msgId, role: 'user', text: text, meta: '', tools: [], images: [], ts: Date.now(), parked: true });
+      });
+    },
+
+    // Show that the agent is working here, and reload once it has finished.
+    //
+    // Watched by conversation, not by agent: another window switching the
+    // agent to a different conversation must not end this watch or swap what
+    // this chat shows and where its queue goes.
+    _watchBusy: function(agentId, sessionId) {
+      this._stopBusyWatch();
+      this.sending = true;
+      if (!this.messages.some(function(m) { return m.thinking; })) {
+        this.messages.push({ id: ++msgId, role: 'agent', text: 'Still working on this...', meta: '', thinking: true, tools: [], ts: Date.now() });
+      }
+      var self = this;
+      var key = this._parkKey(agentId, sessionId);
+      var here = function() {
+        return self.currentAgent && self.currentAgent.id === agentId && self.sessionId === sessionId;
+      };
+      this._busyPoll = setInterval(async function() {
+        if (!here()) { self._stopBusyWatch(); return; }
+        var parked = self._parked[key];
+        if (parked && parked.sending > 0) return;
+        try {
+          var url = '/api/agents/' + encodeURIComponent(agentId) + '/session';
+          if (sessionId) url += '?session_id=' + encodeURIComponent(sessionId);
+          var data = await FreecoAPI.get(url);
+          if (!data || data.busy) return;
+        } catch (e) { return; }
+        if (!here() || !self._busyPoll) return;
+        self._stopBusyWatch();
+        delete self._parked[key];
+        // Messages typed meanwhile stay: they are pending and still queued.
+        self.messages = self.messages.filter(function(m) { return !m.thinking && !m.parked; });
+        self.sending = false;
+        await self.loadHistory(agentId, sessionId);
+        self._processQueue();
+      }, 3000);
+    },
+
+    _stopBusyWatch: function() {
+      if (this._busyPoll) { clearInterval(this._busyPoll); this._busyPoll = null; }
     },
 
     // Process queued messages after current response completes
@@ -1786,10 +1952,12 @@ function chatPage() {
 
     async _sendPayload(finalText, uploadedFiles, msgImages) {
       this.sending = true;
+      var agentId = this.currentAgent.id;
 
       // Try WebSocket first
       var wsPayload = { type: 'message', content: finalText };
       if (uploadedFiles && uploadedFiles.length) wsPayload.attachments = uploadedFiles;
+      if (this.sessionId) wsPayload.session_id = this.sessionId;
       if (FreecoAPI.wsSend(wsPayload)) {
         this.messages.push({ id: ++msgId, role: 'agent', text: '', meta: '', thinking: true, streaming: true, tools: [], ts: Date.now() });
         this.scrollToBottom();
@@ -1804,16 +1972,31 @@ function chatPage() {
       this.messages.push({ id: ++msgId, role: 'agent', text: '', meta: '', thinking: true, tools: [], ts: Date.now() });
       this.scrollToBottom();
 
+      var sentSession = this.sessionId;
+      var self0 = this;
+      // The user moved to another chat, or another conversation of this
+      // agent, while this ran. The reply is saved with its conversation and
+      // shows when that is opened again; drawing it here would put it into a
+      // chat it does not belong to.
+      var left = function() {
+        return !self0.currentAgent || self0.currentAgent.id !== agentId || self0.sessionId !== sentSession;
+      };
       try {
         var httpBody = { message: finalText };
         if (uploadedFiles && uploadedFiles.length) httpBody.attachments = uploadedFiles;
-        var res = await FreecoAPI.post('/api/agents/' + this.currentAgent.id + '/message', httpBody);
+        if (sentSession) httpBody.session_id = sentSession;
+        var res = await FreecoAPI.post('/api/agents/' + agentId + '/message', httpBody);
+        if (left()) return;
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
         this._pushAgentReply(res.response, httpMeta, [], Date.now());
       } catch(e) {
+        if (left()) {
+          FreecoToast.error('A message did not reach ' + this._agentName(agentId) + ': ' + e.message);
+          return;
+        }
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + e.message, meta: '', tools: [], ts: Date.now() });
       }

@@ -75,6 +75,11 @@ pub struct PromptContext {
     /// Read per-turn by the kernel so external writers (cron jobs, integrations)
     /// are reflected in the next LLM call. See issue #843.
     pub context_md: Option<String>,
+    /// The project this conversation is filed under, and its brief.
+    ///
+    /// Every agent working in a project's conversation reads it, the way a
+    /// coding agent reads the CLAUDE.md of the folder it works in.
+    pub project_brief: Option<String>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -215,6 +220,14 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
             if !ws_ctx.trim().is_empty() {
                 sections.push(cap_str(ws_ctx, 1000));
             }
+        }
+    }
+
+    // Section 14b — the project this conversation belongs to.
+    if let Some(ref brief) = ctx.project_brief {
+        let trimmed = brief.trim();
+        if !trimmed.is_empty() {
+            sections.push(format!("## Project\n{}", cap_str(trimmed, 4000)));
         }
     }
 
@@ -618,7 +631,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
     }
     out.push_str(
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
-         Delegate tasks to specialized agents when appropriate.",
+         Delegate tasks to specialized agents when appropriate: `agent_delegate` hands several \
+         independent tasks to them at once and they work in parallel.",
     );
     out
 }
@@ -663,7 +677,8 @@ pub fn tool_category(name: &str) -> &'static str {
 
         "memory_store" | "memory_recall" | "memory_delete" | "memory_list" => "Memory",
 
-        "agent_send" | "agent_spawn" | "agent_list" | "agent_kill" | "agent_activate" => "Agents",
+        "agent_send" | "agent_delegate" | "agent_spawn" | "agent_list" | "agent_kill"
+        | "agent_activate" => "Agents",
 
         "image_describe" | "image_generate" | "audio_transcribe" | "tts_speak" => "Media",
 
@@ -722,6 +737,7 @@ pub fn tool_hint(name: &str) -> &'static str {
 
         // Agents
         "agent_send" => "send a message to another agent",
+        "agent_delegate" => "hand tasks to agents and run them at the same time",
         "agent_spawn" => "create a new agent",
         "agent_list" => "list running agents",
         "agent_kill" => "terminate an agent",

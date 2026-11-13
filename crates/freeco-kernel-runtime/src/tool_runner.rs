@@ -384,6 +384,7 @@ pub async fn execute_tool(
 
         // Inter-agent tools (require kernel handle)
         "agent_send" => tool_agent_send(input, kernel).await,
+        "agent_delegate" => tool_agent_delegate(input, kernel, caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
         // Setup tools. These change configuration rather than reading it, so
         // they are gated by the capability system like any other write.
@@ -1042,6 +1043,36 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "message": { "type": "string", "description": "The message to send to the agent" }
                 },
                 "required": ["agent_id", "message"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_delegate".to_string(),
+            description: "Hand one or more tasks to agents and have them worked on at the same \
+                          time. Each task runs in a fresh conversation of its agent, with its own \
+                          context, filed under the same project as this conversation. Waits for \
+                          all of them and returns every result together, each with the \
+                          conversation it ran in. Leave `agent` out to hand a task to a fresh \
+                          conversation of yourself. Split independent work into separate tasks \
+                          so they run in parallel; use agent_send instead for a quick question \
+                          inside another agent's ongoing conversation.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "The tasks, all started at once (at most 8)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent": { "type": "string", "description": "Agent name or UUID; omit for yourself" },
+                                "title": { "type": "string", "description": "A few words naming the task" },
+                                "task": { "type": "string", "description": "Everything the agent needs to do it: the goal, the facts, what to hand back" }
+                            },
+                            "required": ["task"]
+                        }
+                    }
+                },
+                "required": ["tasks"]
             }),
         },
         ToolDefinition {
@@ -2293,6 +2324,134 @@ async fn tool_agent_send(
             kh.send_to_agent(agent_id, message).await
         })
         .await
+}
+
+/// Most tasks one `agent_delegate` call may start at once.
+const MAX_DELEGATED_TASKS: usize = 8;
+
+/// Longest delegated reply handed back to the lead agent, in bytes. The whole
+/// answer stays in the delegated conversation, which the result names.
+const MAX_DELEGATED_RESULT_BYTES: usize = 12_000;
+
+/// All replies of one call together, in bytes. The agent loop cuts a tool
+/// result at 30% of the context window (2 bytes a token), so eight full
+/// replies would be cut mid-JSON on a 128k model and the later tasks lost,
+/// conversations included. Splitting this keeps every task in the result on
+/// any model with a context of 40k tokens or more.
+const MAX_DELEGATED_RESULTS_TOTAL_BYTES: usize = 24_000;
+
+/// Hand tasks to agents and run them all at once.
+///
+/// `agent_send` runs one exchange inside the other agent's current
+/// conversation, and the tool loop runs one call at a time, so a lead agent
+/// with three specialists waited for each in turn -- and for any chat a
+/// specialist was already busy in. Here every task gets a fresh conversation
+/// of its own and they all run together; the lead waits once, for the slowest.
+async fn tool_agent_delegate(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let tasks = input["tasks"]
+        .as_array()
+        .ok_or("Missing 'tasks': a list of {agent, title, task}")?;
+    if tasks.is_empty() {
+        return Err("'tasks' is empty: give at least one task".to_string());
+    }
+    if tasks.len() > MAX_DELEGATED_TASKS {
+        return Err(format!(
+            "{} tasks is more than {MAX_DELEGATED_TASKS} at once. Group related work, \
+             or delegate in two rounds.",
+            tasks.len()
+        ));
+    }
+    // Every task is checked before any starts: half a fan-out is harder to
+    // reason about than a refusal.
+    let mut planned: Vec<(Option<String>, String, String)> = Vec::with_capacity(tasks.len());
+    for (i, t) in tasks.iter().enumerate() {
+        let task = t["task"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("Task {} has no 'task' text", i + 1))?;
+        let agent = t["agent"]
+            .as_str()
+            .or_else(|| t["agent_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let title = t["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                let first = task.lines().next().unwrap_or(task);
+                crate::str_utils::safe_truncate_str(first, 60).to_string()
+            });
+        planned.push((agent, title, task.to_string()));
+    }
+
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= MAX_AGENT_CALL_DEPTH {
+        return Err(format!(
+            "Inter-agent call depth exceeded (max {MAX_AGENT_CALL_DEPTH}). \
+             Do this part yourself, or use the task queue instead."
+        ));
+    }
+
+    let runs = planned.iter().map(|(agent, title, task)| async move {
+        kh.delegate_task(caller_agent_id, agent.as_deref(), title, task)
+            .await
+    });
+    let outcomes = AGENT_CALL_DEPTH
+        .scope(
+            std::cell::Cell::new(current_depth + 1),
+            futures::future::join_all(runs),
+        )
+        .await;
+
+    let per_reply =
+        (MAX_DELEGATED_RESULTS_TOTAL_BYTES / planned.len().max(1)).min(MAX_DELEGATED_RESULT_BYTES);
+    let mut finished = 0usize;
+    let results: Vec<serde_json::Value> = planned
+        .iter()
+        .zip(outcomes)
+        .map(|((agent, title, _), outcome)| match outcome {
+            Ok(done) => {
+                finished += 1;
+                let reply: String = if done.reply.len() > per_reply {
+                    let mut r =
+                        crate::str_utils::safe_truncate_str(&done.reply, per_reply).to_string();
+                    r.push_str("\n[... cut here; the whole reply is in its conversation]");
+                    r
+                } else {
+                    done.reply
+                };
+                serde_json::json!({
+                    "title": title,
+                    "agent": done.agent_name,
+                    "agent_id": done.agent_id,
+                    "conversation": done.session_id,
+                    "ok": true,
+                    "reply": reply,
+                })
+            }
+            Err(e) => serde_json::json!({
+                "title": title,
+                "agent": agent.as_deref().unwrap_or("(yourself)"),
+                "ok": false,
+                "error": e,
+            }),
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "summary": format!("{finished} of {} tasks finished", results.len()),
+        "results": results,
+    }))
+    .map_err(|e| e.to_string())
 }
 
 async fn tool_agent_spawn(

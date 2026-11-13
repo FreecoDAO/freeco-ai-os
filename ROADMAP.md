@@ -675,6 +675,33 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+- 🟨 **Conversations run in parallel.** Runs take turns per conversation, not
+  per agent, so different chats -- including several of one agent -- run at the
+  same time, and two runs in one conversation can no longer save over each
+  other. Verified by `crates/freeco-kernel/tests/parallel_conversations_test.rs`
+  against a scripted model: it fails with the old unlocked streaming path.
+- 🟨 **`agent_delegate`** runs several tasks on several agents at once, each in
+  a fresh conversation filed under the lead's project. Still one canonical
+  history per agent: a delegated task is appended to it like any other turn.
+- 🟨 **Projects page** edits the brief every agent in the project reads, starts
+  conversations inside a project and shows which are working.
+- 🟨 **Teams run like a lead with teammates.** A goal given to a team goes to
+  its lead in a new conversation; the lead hands parts to members with
+  `agent_delegate`, they run at once, and every member's prompt carries the
+  roster. The delegated conversations are the team's task list on the Projects
+  page. There is no separate task board with dependencies yet.
+- 🟨 **Long chats keep their start in view.** What the history window drops is
+  carried in the system prompt: the user's words verbatim (instructions kept
+  longest when the budget is short), the agent's replies in short. Free and
+  deterministic; no summarising call.
+- 🟨 **A failed or stopped reply keeps the user's message**, saved before the
+  model is called.
+- ⚠️ Stopping a run still stops the agent's most recent one; with parallel
+  conversations that may not be the one on screen.
+- ⚠️ A chat of several hundred messages carries its earliest ordinary messages
+  only as a count once the note's budget is full; instructions are kept
+  longest. A paid summary for that case is not built.
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase

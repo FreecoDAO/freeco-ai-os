@@ -111,12 +111,22 @@ pub fn derive_session_label(messages: &[Message]) -> Option<String> {
 #[derive(Clone)]
 pub struct SessionStore {
     conn: Arc<Mutex<Connection>>,
+    /// Held across every load-change-save of a canonical session.
+    ///
+    /// The load and the save each take the connection on their own, so two
+    /// writers in between -- one agent answering a WhatsApp guest and a
+    /// dashboard chat at once -- both loaded the same history and the second
+    /// save dropped the first one's messages.
+    canonical_write: Arc<Mutex<()>>,
 }
 
 impl SessionStore {
     /// Create a new session store wrapping the given connection.
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            canonical_write: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Load a session from the database.
@@ -507,6 +517,10 @@ impl SessionStore {
         summary: &str,
         kept_messages: Vec<Message>,
     ) -> FreecoResult<()> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.compacted_summary = Some(summary.to_string());
 
@@ -656,6 +670,10 @@ impl SessionStore {
     /// Name an agent's conversation. An empty name clears it, so the next
     /// write derives one from the first user message again.
     pub fn set_canonical_label(&self, agent_id: AgentId, label: Option<&str>) -> FreecoResult<()> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.label = label
             .map(|l| l.trim().to_string())
@@ -770,6 +788,10 @@ impl SessionStore {
         new_messages: &[Message],
         compaction_threshold: Option<usize>,
     ) -> FreecoResult<CanonicalSession> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.messages.extend(new_messages.iter().cloned());
 
