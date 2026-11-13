@@ -19,16 +19,20 @@ pub struct EventBus {
     agent_channels: DashMap<AgentId, broadcast::Sender<Event>>,
     /// Event history ring buffer.
     history: Arc<RwLock<VecDeque<Event>>>,
+    /// Every published event, whatever its target, for live feeds.
+    every: broadcast::Sender<Event>,
 }
 
 impl EventBus {
     /// Create a new event bus.
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(1024);
+        let (every, _) = broadcast::channel(1024);
         Self {
             sender,
             agent_channels: DashMap::new(),
             history: Arc::new(RwLock::new(VecDeque::with_capacity(HISTORY_SIZE))),
+            every,
         }
     }
 
@@ -48,6 +52,7 @@ impl EventBus {
             }
             history.push_back(event.clone());
         }
+        let _ = self.every.send(event.clone());
 
         // Route to target
         match &event.target {
@@ -86,6 +91,17 @@ impl EventBus {
         self.sender.subscribe()
     }
 
+    /// Subscribe to every published event, whatever its target.
+    ///
+    /// An event addressed to one agent goes only to that agent's channel, so
+    /// [`subscribe_all`](Self::subscribe_all) never sees agent-to-agent
+    /// messages, and polling [`history`](Self::history) loses whatever more
+    /// than its window brings between two polls. A subscriber more than 1024
+    /// events behind is told how many it missed (`RecvError::Lagged`).
+    pub fn subscribe_every(&self) -> broadcast::Receiver<Event> {
+        self.every.subscribe()
+    }
+
     /// Get recent event history.
     pub async fn history(&self, limit: usize) -> Vec<Event> {
         let history = self.history.read().await;
@@ -121,6 +137,25 @@ mod tests {
         bus.publish(event).await;
         let history = bus.history(10).await;
         assert_eq!(history.len(), 1);
+    }
+
+    /// A feed subscribed to every event sees one addressed to a single
+    /// agent, which `subscribe_all` never delivers.
+    #[tokio::test]
+    async fn every_event_reaches_a_feed_whatever_its_target() {
+        let bus = EventBus::new();
+        let mut every = bus.subscribe_every();
+        let mut all = bus.subscribe_all();
+        let to = AgentId::new();
+        bus.publish(Event::new(
+            AgentId::new(),
+            EventTarget::Agent(to),
+            EventPayload::System(SystemEvent::KernelStarted),
+        ))
+        .await;
+        let got = every.try_recv().unwrap();
+        assert!(matches!(got.target, EventTarget::Agent(t) if t == to));
+        assert!(all.try_recv().is_err());
     }
 
     #[tokio::test]

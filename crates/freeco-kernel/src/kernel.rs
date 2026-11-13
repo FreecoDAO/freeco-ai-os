@@ -1992,19 +1992,32 @@ impl FreecoKernel {
             .clone();
         let _guard = lock.lock().await;
 
+        // Who the message is from, for the audit entry; the originals go on
+        // to the agent's prompt.
+        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
+        // A message refused before it runs is a message too.
+        let refused = |e: KernelError| {
+            crate::audit_trail::record_message(
+                &self.audit_log,
+                agent_id,
+                audit_sender_id.as_deref(),
+                audit_sender_name.as_deref(),
+                Err(e.to_string()),
+            );
+            e
+        };
+
         // Enforce quota before running the agent loop
         self.scheduler
             .check_quota(agent_id)
-            .map_err(KernelError::Freeco)?;
+            .map_err(KernelError::Freeco)
+            .map_err(refused)?;
 
         let entry = self
             .registry
             .get(agent_id)
-            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
-
-        // Who the message is from, for the audit entry; the originals go on
-        // to the agent's prompt.
-        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))
+            .map_err(refused)?;
 
         // Dispatch based on module type
         let result = if entry.manifest.module.starts_with("wasm:") {
@@ -2091,6 +2104,44 @@ impl FreecoKernel {
     /// WASM and Python agents don't support true streaming — they execute
     /// synchronously and emit a single `TextDelta` + `ContentComplete` pair.
     pub fn send_message_streaming(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
+        let started = self.start_message_stream(
+            agent_id,
+            message,
+            kernel_handle,
+            sender_id,
+            sender_name,
+            content_blocks,
+        );
+        // A message refused before its run starts -- no quota left, a
+        // provider without credentials -- is recorded here. Once the run is
+        // spawned, the run records its own outcome.
+        if let Err(e) = &started {
+            crate::audit_trail::record_message(
+                &self.audit_log,
+                agent_id,
+                audit_sender_id.as_deref(),
+                audit_sender_name.as_deref(),
+                Err(e.to_string()),
+            );
+        }
+        started
+    }
+
+    /// The body of [`send_message_streaming`](Self::send_message_streaming):
+    /// checks, then spawns the run.
+    fn start_message_stream(
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,

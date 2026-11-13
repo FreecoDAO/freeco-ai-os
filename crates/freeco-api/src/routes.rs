@@ -4644,10 +4644,20 @@ pub async fn audit_append(
     };
     let outcome = req.outcome.clone().unwrap_or_else(|| "ok".to_string());
 
-    let entry = state
+    let Some(entry) = state
         .kernel
         .audit_log
-        .record_entry(agent_id, action, detail, outcome);
+        .record_entry(agent_id, action, detail, outcome)
+    else {
+        // The database refused it; it is written before the next entry.
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "queued",
+                "tip": state.kernel.audit_log.tip_hash(),
+            })),
+        );
+    };
 
     (
         StatusCode::OK,
@@ -6391,7 +6401,7 @@ pub async fn audit_recent(
 /// recent was affected.
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let report = state.kernel.audit_log.verify_report();
-    if report.entries == 0 {
+    if report.entries == 0 && report.is_intact() {
         // SECURITY: Warn that an empty audit log has no forensic value
         return Json(serde_json::json!({
             "valid": true,
@@ -6400,7 +6410,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
             "tip_hash": state.kernel.audit_log.tip_hash(),
         }));
     }
-    let error = (!report.is_intact()).then(|| {
+    let breaks = (report.break_count > 0).then(|| {
         let list: Vec<String> = report
             .breaks
             .iter()
@@ -6408,6 +6418,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 let what = match b.kind.as_str() {
                     "altered" => "changed after it was written",
                     "missing" => "entries before it are missing",
+                    "unreadable" => "its row could not be read",
                     _ => "does not chain from the entry before it",
                 };
                 format!(
@@ -6436,9 +6447,24 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
             },
         )
     });
+    let mut problems: Vec<String> = Vec::new();
+    if report.error.is_some() {
+        problems.push(
+            "The audit database could not be read, so the chain could not be checked.".to_string(),
+        );
+    }
+    problems.extend(breaks);
+    if report.unsaved > 0 {
+        problems.push(format!(
+            "{} entries could not be written to the database yet and are missing from the record.",
+            report.unsaved
+        ));
+    }
+    let error = (!problems.is_empty()).then(|| problems.join(" "));
     Json(serde_json::json!({
         "valid": report.is_intact(),
         "entries": report.entries,
+        "unsaved": report.unsaved,
         "breaks": report.breaks,
         "break_count": report.break_count,
         "intact_since_seq": report.intact_since_seq,
@@ -14563,6 +14589,7 @@ mod comms_log_tests {
     fn message(detail: &str, outcome: &str) -> freeco_kernel_runtime::audit::AuditEntry {
         let log = AuditLog::new();
         log.record_entry("receiver-id", AuditAction::AgentMessage, detail, outcome)
+            .unwrap()
     }
 
     #[test]
@@ -14660,10 +14687,15 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
 
+    // Agent-to-agent messages, with their text, are on the event bus rather
+    // than in the audit trail. Subscribed from the moment the feed opens:
+    // polling the bus history lost whatever came beyond its window between
+    // two polls.
+    let mut bus = state.kernel.event_bus.subscribe_every();
+
     tokio::spawn(async move {
         // Where the page's initial load (GET /api/comms/events) ends.
         let mut last_seq: Option<u64> = state.kernel.audit_log.recent(1).last().map(|e| e.seq);
-        let mut last_bus = chrono::Utc::now();
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -14689,24 +14721,29 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
                 last_seq = Some(last.seq);
             }
 
-            // Agent-to-agent messages, with their text, are on the event bus
-            // rather than in the audit trail; this feed used to read only the
-            // trail, so they appeared only after a reload.
-            let bus = state.kernel.event_bus.history(200).await;
-            let mut newest = last_bus;
-            for event in bus.iter().filter(|e| e.timestamp > last_bus) {
+            // This feed used to read only the trail, so agent messages
+            // appeared only after a reload.
+            loop {
+                let event = match bus.try_recv() {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                        // Their audit entries still reach the feed above, as
+                        // sender -> receiver without the preview.
+                        tracing::warn!(missed, "Comms feed fell behind the event bus");
+                        continue;
+                    }
+                    Err(_) => break, // Empty, or the bus is gone
+                };
                 if !matches!(event.payload, freeco_types::event::EventPayload::Message(_)) {
                     continue;
                 }
-                newest = newest.max(event.timestamp);
-                if let Some(comms_event) = filter_to_comms_event(event, &agents) {
+                if let Some(comms_event) = filter_to_comms_event(&event, &agents) {
                     let data = serde_json::to_string(&comms_event).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
                         return; // Client disconnected
                     }
                 }
             }
-            last_bus = newest;
         }
     });
 

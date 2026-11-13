@@ -9,7 +9,9 @@
 //! Message text and tool inputs are never written to the trail. It is
 //! permanent and hash-chained, and both can hold personal data or secrets.
 //! The trail says who, what kind, when and whether it worked; the
-//! conversation itself stays in its session.
+//! conversation itself stays in its session. A failure is written as its
+//! kind ("LLM driver error", "Request failed"), never its full text, which
+//! can quote a provider's response, a search query or a key.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,8 +25,8 @@ use freeco_types::message::TokenUsage;
 /// Longest message preview put on the event bus for the Comms page.
 const PREVIEW_BYTES: usize = 200;
 
-/// Longest error text kept in an audit outcome.
-const OUTCOME_BYTES: usize = 120;
+/// Longest failure description kept in an audit outcome.
+const OUTCOME_BYTES: usize = 80;
 
 /// Make a value safe inside a `key=value, key=value` detail string.
 fn detail_value(s: &str) -> String {
@@ -97,7 +99,7 @@ pub fn record_message(
                 agent_id.to_string(),
                 AuditAction::AgentMessage,
                 failed_message_detail(sender_id, sender_name),
-                format!("error: {e}"),
+                format!("error: {}", failure_kind(&e)),
             );
         }
     }
@@ -161,20 +163,71 @@ fn looks_secret(word: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
 }
 
-/// The first line of a tool error, short, with anything that looks like a
-/// credential blanked. The trail cannot be edited later, so a key that
-/// reaches it stays there.
-fn short_error(content: &str) -> String {
-    let first = content.lines().next().unwrap_or("").trim();
+/// Replace quoted text ('...', "...", `...`) with an ellipsis: it is what
+/// errors quote back, such as a query, a path or a name. An apostrophe
+/// inside a word ("can't") is kept.
+fn without_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let apostrophe = c == '\''
+            && i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        if matches!(c, '\'' | '"' | '`') && !apostrophe {
+            if let Some(close) = chars[i + 1..].iter().position(|&x| x == c) {
+                out.push('\u{2026}');
+                i += close + 2;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// What kind of failure an error is, safe for the permanent trail: its
+/// first line up to the first ": ", with quoted text, URLs, paths,
+/// addresses and anything that looks like a credential blanked.
+///
+/// Errors carry their detail after the colon -- "LLM driver error: <the
+/// provider's response>", "Request failed: <url>" -- and that detail can
+/// echo conversation text, a search query or a key. The trail cannot be
+/// edited later, so it keeps the kind and the session keeps the rest.
+pub fn failure_kind(error: &str) -> String {
+    let first = error.lines().next().unwrap_or("").trim();
+    let first = first
+        .strip_prefix("Error:")
+        .or_else(|| first.strip_prefix("error:"))
+        .unwrap_or(first)
+        .trim();
+    let kind = first.split(": ").next().unwrap_or("").trim();
+    let kind = without_quotes(kind);
     let mut cleaned: Vec<&str> = Vec::new();
     let mut after_bearer = false;
-    for w in first.split_whitespace() {
+    for w in kind.split_whitespace() {
         // The word after "Bearer" is the token, whatever it looks like.
-        let secret = after_bearer || looks_secret(w);
+        let word = if after_bearer || looks_secret(w) || w.contains('@') {
+            "<redacted>"
+        } else if w.contains("://") {
+            "<url>"
+        } else if w.contains('/') || w.contains('\\') {
+            "<path>"
+        } else {
+            w
+        };
         after_bearer = w.eq_ignore_ascii_case("bearer");
-        cleaned.push(if secret { "<redacted>" } else { w });
+        cleaned.push(word);
     }
-    freeco_types::truncate_str(&cleaned.join(" "), OUTCOME_BYTES).to_string()
+    let out = freeco_types::truncate_str(&cleaned.join(" "), OUTCOME_BYTES).to_string();
+    if out.is_empty() {
+        "failed".to_string()
+    } else {
+        out
+    }
 }
 
 /// Writes one audit entry for every tool call an agent finishes.
@@ -204,12 +257,12 @@ impl HookHandler for ToolAuditHook {
         let (action, outcome) = if is_error && content.starts_with("Permission denied") {
             (
                 AuditAction::CapabilityCheck,
-                format!("denied: {}", short_error(content)),
+                format!("denied: {}", failure_kind(content)),
             )
         } else if is_error {
             (
                 action_for_tool(tool),
-                format!("error: {}", short_error(content)),
+                format!("error: {}", failure_kind(content)),
             )
         } else {
             (action_for_tool(tool), "ok".to_string())
@@ -297,9 +350,9 @@ mod tests {
         assert_eq!(e[0].detail, "tool=shell_exec");
         assert_eq!(e[0].outcome, "ok");
         assert!(matches!(e[1].action, AuditAction::NetworkAccess));
-        assert_eq!(e[1].outcome, "error: Request failed: 404");
+        assert_eq!(e[1].outcome, "error: Request failed");
         assert!(matches!(e[2].action, AuditAction::CapabilityCheck));
-        assert!(e[2].outcome.starts_with("denied: Permission denied"));
+        assert_eq!(e[2].outcome, "denied: Permission denied");
         assert!(matches!(e[3].action, AuditAction::ToolInvoke));
         assert!(e.iter().all(|x| x.agent_id == "ag"));
         assert!(e.iter().all(|x| !x.outcome.contains("secret")));
@@ -307,19 +360,56 @@ mod tests {
     }
 
     #[test]
-    fn credentials_in_an_error_are_blanked() {
+    fn a_failure_is_written_as_its_kind_without_its_detail() {
+        // The detail after the colon is dropped, whatever it holds.
         assert_eq!(
-            short_error("curl failed: Authorization: Bearer abc123 token=xyz"),
-            "curl failed: Authorization: <redacted> <redacted> <redacted>"
+            failure_kind("curl failed: Authorization: Bearer abc123 token=xyz"),
+            "curl failed"
         );
         assert_eq!(
-            short_error("bad key sk-live-1234 for 0123456789abcdef0123456789abcdef01"),
+            failure_kind(
+                r#"LLM driver error: API error 400: {"api_key": "abc123", "messages": "hi"}"#
+            ),
+            "LLM driver error"
+        );
+        assert_eq!(
+            failure_kind("Error: Failed to resolve parent directory: No such file (os error 2)"),
+            "Failed to resolve parent directory"
+        );
+        assert_eq!(failure_kind("Exit code 1: not found"), "Exit code 1");
+        // Without a colon, quoted text, URLs, paths, addresses and keys go.
+        assert_eq!(
+            failure_kind("No results found for 'flights to my ex in Gstaad'."),
+            "No results found for \u{2026}."
+        );
+        assert_eq!(
+            failure_kind("can't open /home/ana/tax.pdf for ana@example.com"),
+            "can't open <path> for <redacted>"
+        );
+        assert_eq!(
+            failure_kind("bad key sk-live-1234 for https://api.example.com/v1?key=abc"),
             "bad key <redacted> for <redacted>"
         );
         assert_eq!(
-            short_error("Exit code 1: not found"),
-            "Exit code 1: not found"
+            failure_kind("GET https://api.example.com/v1 timed out"),
+            "GET <url> timed out"
         );
+        assert_eq!(failure_kind(""), "failed");
+    }
+
+    #[test]
+    fn a_failed_message_names_the_kind_of_failure_only() {
+        let log = AuditLog::new();
+        record_message(
+            &log,
+            AgentId::new(),
+            None,
+            None,
+            Err("LLM driver error: API error 401: {\"error\": \"bad key sk-ant-123\"}".to_string()),
+        );
+        let e = log.recent(1);
+        assert_eq!(e[0].outcome, "error: LLM driver error");
+        assert_eq!(e[0].detail, "agent loop failed");
     }
 
     #[test]

@@ -30,6 +30,9 @@ const MEMORY_WINDOW: usize = 20_000;
 /// Most breaks listed in one report. A count of all of them is kept.
 const MAX_LISTED_BREAKS: usize = 100;
 
+/// Most entries kept waiting while the database refuses writes.
+const MAX_UNSAVED: usize = 10_000;
+
 /// Categories of auditable actions within the agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditAction {
@@ -121,8 +124,8 @@ pub struct ChainBreak {
     pub seq: u64,
     pub timestamp: String,
     /// `fork` (does not chain from the entry before it), `missing` (entries
-    /// before it are absent) or `altered` (its content does not match its
-    /// hash).
+    /// before it are absent), `altered` (its content does not match its
+    /// hash) or `unreadable` (its row could not be read).
     pub kind: String,
 }
 
@@ -137,12 +140,21 @@ pub struct ChainReport {
     /// First entry of the unbroken run that reaches the end.
     pub intact_since_seq: Option<u64>,
     pub intact_since: Option<String>,
+    /// Set when the record could not be read; the chain is then not known
+    /// to hold, whatever the other fields say.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Entries the database refused that are still waiting to be written.
+    /// Until they are, the record lacks them.
+    #[serde(default)]
+    pub unsaved: usize,
 }
 
 impl ChainReport {
-    /// Whether the chain holds from end to end.
+    /// Whether the whole record was read, holds from end to end and lacks
+    /// nothing.
     pub fn is_intact(&self) -> bool {
-        self.break_count == 0
+        self.break_count == 0 && self.error.is_none() && self.unsaved == 0
     }
 }
 
@@ -150,6 +162,11 @@ impl ChainReport {
 /// whole record in memory at once.
 #[derive(Default)]
 struct ChainCheck {
+    /// Checking the whole record, which must start at entry 0, rather than
+    /// a window of the latest entries.
+    full: bool,
+    /// Whether any row has been seen yet.
+    started: bool,
     entries: usize,
     breaks: Vec<ChainBreak>,
     break_count: usize,
@@ -160,11 +177,33 @@ struct ChainCheck {
 }
 
 impl ChainCheck {
+    /// A check of the whole record.
+    fn full() -> Self {
+        Self {
+            full: true,
+            ..Self::default()
+        }
+    }
+
+    fn note_break(&mut self, seq: u64, timestamp: &str, kind: &str) {
+        self.break_count += 1;
+        if self.breaks.len() < MAX_LISTED_BREAKS {
+            self.breaks.push(ChainBreak {
+                seq,
+                timestamp: timestamp.to_string(),
+                kind: kind.to_string(),
+            });
+        }
+    }
+
     fn push(&mut self, e: &AuditEntry) {
         let link = match &self.prev {
+            // The whole record starts at entry 0. Without it, deleting the
+            // first rows would leave a chain that checks out.
+            None if self.full && !self.started && e.seq != 0 => Some("missing"),
             // A chain that starts at entry 0 starts from the genesis hash. A
-            // window that starts later is taken as it is: what it chains from
-            // is not in it.
+            // window of the latest entries is taken as it is: what it chains
+            // from is not in it.
             None if e.seq == 0 && e.prev_hash != GENESIS => Some("fork"),
             None => None,
             Some((seq, _)) if e.seq != seq + 1 => Some("missing"),
@@ -187,14 +226,7 @@ impl ChainCheck {
         };
         match kind {
             Some(k) => {
-                self.break_count += 1;
-                if self.breaks.len() < MAX_LISTED_BREAKS {
-                    self.breaks.push(ChainBreak {
-                        seq: e.seq,
-                        timestamp: e.timestamp.clone(),
-                        kind: k.to_string(),
-                    });
-                }
+                self.note_break(e.seq, &e.timestamp, k);
                 // An altered entry is not part of any intact run; the run can
                 // start with the entry after it. After a fork or a gap, the
                 // run starts here.
@@ -211,6 +243,18 @@ impl ChainCheck {
             }
         }
         self.prev = Some((e.seq, e.hash.clone()));
+        self.started = true;
+        self.entries += 1;
+    }
+
+    /// A stored row that could not be read. It is a break: the chain cannot
+    /// be checked through it, and it was silently skipped before.
+    fn push_unreadable(&mut self) {
+        let seq = self.prev.as_ref().map(|(s, _)| s + 1).unwrap_or(0);
+        self.note_break(seq, "", "unreadable");
+        self.run_start = None;
+        self.prev = None;
+        self.started = true;
         self.entries += 1;
     }
 
@@ -221,6 +265,8 @@ impl ChainCheck {
             break_count: self.break_count,
             intact_since_seq: self.run_start.as_ref().map(|(s, _)| *s),
             intact_since: self.run_start.map(|(_, t)| t),
+            error: None,
+            unsaved: 0,
         }
     }
 }
@@ -240,18 +286,43 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
     })
 }
 
-/// Hand every stored entry to `f`, in chain order. A row that cannot be read
-/// is skipped, and so shows up as a gap when the chain is checked.
-fn for_each_stored(conn: &Connection, mut f: impl FnMut(AuditEntry)) -> rusqlite::Result<()> {
+/// Hand every stored row to `f`, in chain order, including the ones that
+/// cannot be read, so that the caller can count them.
+fn for_each_stored(
+    conn: &Connection,
+    mut f: impl FnMut(rusqlite::Result<AuditEntry>),
+) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash \
          FROM audit_entries ORDER BY seq ASC",
     )?;
     let rows = stmt.query_map([], read_entry)?;
-    for entry in rows.flatten() {
-        f(entry);
+    for row in rows {
+        f(row);
     }
     Ok(())
+}
+
+/// Stored entries after `seq`, oldest first, at most `max`.
+fn stored_since(conn: &Connection, seq: u64, max: usize) -> rusqlite::Result<Vec<AuditEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, timestamp, agent_id, action, detail, outcome, prev_hash, hash \
+         FROM audit_entries WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![seq as i64, max.min(i64::MAX as usize) as i64],
+        read_entry,
+    )?;
+    rows.collect()
+}
+
+/// An entry the database refused, waiting to be written.
+struct Unsaved {
+    timestamp: String,
+    agent_id: String,
+    action: AuditAction,
+    detail: String,
+    outcome: String,
 }
 
 /// Append one entry chained from the database's last row, in one
@@ -341,6 +412,9 @@ pub struct AuditLog {
     total: AtomicU64,
     /// Optional database connection for persistent storage.
     db: Option<Arc<Mutex<Connection>>>,
+    /// Entries the database refused, oldest first. Each is written before
+    /// the next new entry, and only then gets a sequence number.
+    unsaved: Mutex<Vec<Unsaved>>,
 }
 
 impl AuditLog {
@@ -353,6 +427,7 @@ impl AuditLog {
             tip: Mutex::new(GENESIS.to_string()),
             total: AtomicU64::new(0),
             db: None,
+            unsaved: Mutex::new(Vec::new()),
         }
     }
 
@@ -364,16 +439,22 @@ impl AuditLog {
     pub fn with_db(conn: Arc<Mutex<Connection>>) -> Self {
         let mut entries = Vec::new();
         let mut tip = GENESIS.to_string();
-        let mut check = ChainCheck::default();
+        let mut check = ChainCheck::full();
+        let mut read_failed = false;
 
-        if let Ok(db) = conn.lock() {
-            let read = for_each_stored(&db, |entry| {
-                check.push(&entry);
-                tip = entry.hash.clone();
-                entries.push(entry);
-                trim_window(&mut entries);
+        {
+            let db = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let read = for_each_stored(&db, |row| match row {
+                Ok(entry) => {
+                    check.push(&entry);
+                    tip = entry.hash.clone();
+                    entries.push(entry);
+                    trim_window(&mut entries);
+                }
+                Err(_) => check.push_unreadable(),
             });
             if let Err(e) = read {
+                read_failed = true;
                 tracing::error!("Audit trail could not be read from the database: {e}");
             }
         }
@@ -384,7 +465,7 @@ impl AuditLog {
 
         let report = check.report();
         let count = report.entries;
-        if count > 0 {
+        if count > 0 && !read_failed {
             if report.is_intact() {
                 tracing::info!("Audit trail loaded: {count} entries, chain integrity OK");
             } else {
@@ -402,14 +483,13 @@ impl AuditLog {
             tip: Mutex::new(tip),
             total: AtomicU64::new(count as u64),
             db: Some(conn),
+            unsaved: Mutex::new(Vec::new()),
         }
     }
 
-    /// Records a new auditable event and returns the SHA-256 hash of the entry.
-    ///
-    /// The entry is atomically appended to the chain with the current tip as
-    /// its `prev_hash`, and the tip is advanced to the new hash.
-    /// If a database connection is available, the entry is also persisted.
+    /// Records a new auditable event and returns the SHA-256 hash of the
+    /// entry, or an empty string when the database refused it and it is
+    /// waiting to be written (see [`record_entry`](Self::record_entry)).
     pub fn record(
         &self,
         agent_id: impl Into<String>,
@@ -417,27 +497,65 @@ impl AuditLog {
         detail: impl Into<String>,
         outcome: impl Into<String>,
     ) -> String {
-        self.record_entry(agent_id, action, detail, outcome).hash
+        self.record_entry(agent_id, action, detail, outcome)
+            .map(|e| e.hash)
+            .unwrap_or_default()
     }
 
     /// Like [`record`](Self::record), returning the whole entry, so a caller
     /// can name its sequence number without reading it back.
+    ///
+    /// `None` when the database refused the entry after three attempts. It
+    /// is not lost: it waits, and is written before the next entry, in
+    /// order. Only then does it get a sequence number.
     pub fn record_entry(
         &self,
         agent_id: impl Into<String>,
         action: AuditAction,
         detail: impl Into<String>,
         outcome: impl Into<String>,
-    ) -> AuditEntry {
-        let agent_id = agent_id.into();
-        let detail = detail.into();
-        let outcome = outcome.into();
-        let timestamp = Utc::now().to_rfc3339();
+    ) -> Option<AuditEntry> {
+        let new = Unsaved {
+            agent_id: agent_id.into(),
+            action,
+            detail: detail.into(),
+            outcome: outcome.into(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
 
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut tip = self.tip.lock().unwrap_or_else(|e| e.into_inner());
 
-        // With a database, the database decides where the entry goes: its
+        let Some(ref db) = self.db else {
+            let seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
+            let prev_hash = tip.clone();
+            let hash = compute_entry_hash(
+                seq,
+                &new.timestamp,
+                &new.agent_id,
+                &new.action,
+                &new.detail,
+                &new.outcome,
+                &prev_hash,
+            );
+            let entry = AuditEntry {
+                seq,
+                timestamp: new.timestamp,
+                agent_id: new.agent_id,
+                action: new.action,
+                detail: new.detail,
+                outcome: new.outcome,
+                prev_hash,
+                hash,
+            };
+            *tip = entry.hash.clone();
+            entries.push(entry.clone());
+            trim_window(&mut entries);
+            self.total.fetch_add(1, Ordering::Relaxed);
+            return Some(entry);
+        };
+
+        // With a database, the database decides where each entry goes: its
         // last row gives the sequence number and the hash to chain from,
         // read and written in one transaction.
         //
@@ -447,61 +565,53 @@ impl AuditLog {
         // a fork the chain can never pass again -- and a write lost to a busy
         // database left a hole, while the entry still showed in the
         // dashboard until the next restart.
-        let mut written = None;
-        if let Some(ref db) = self.db {
-            for attempt in 0..3u32 {
-                let result = match db.lock() {
-                    Ok(conn) => {
-                        append_in_db(&conn, &timestamp, &agent_id, &action, &detail, &outcome)
-                    }
-                    Err(_) => break,
-                };
-                match result {
-                    Ok(entry) => {
-                        written = Some(entry);
-                        break;
-                    }
-                    Err(e) if attempt == 2 => {
-                        tracing::error!(
-                            action = %action,
-                            detail = %detail,
-                            error = %e,
-                            "Audit entry could not be written to the database after 3 attempts; \
-                             it is kept in memory only"
-                        );
-                    }
-                    Err(_) => {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            50 * (attempt as u64 + 1),
-                        ));
-                    }
+        //
+        // Entries the database refused earlier go first, in order. An entry
+        // that waits takes no sequence number, so it cannot collide with one
+        // the database hands out meanwhile.
+        let mut unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner());
+        unsaved.push(new);
+        let mut written = 0;
+        let mut last = None;
+        for item in unsaved.iter() {
+            match append_with_retries(db, item) {
+                Ok(entry) => {
+                    *tip = entry.hash.clone();
+                    entries.push(entry.clone());
+                    trim_window(&mut entries);
+                    self.total.fetch_add(1, Ordering::Relaxed);
+                    last = Some(entry);
+                    written += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        action = %item.action,
+                        detail = %item.detail,
+                        error = %e,
+                        waiting = unsaved.len() - written,
+                        "Audit entry could not be written to the database after 3 attempts; \
+                         it waits and is written before the next entry"
+                    );
+                    break;
                 }
             }
         }
-
-        let entry = written.unwrap_or_else(|| {
-            let seq = entries.last().map(|e| e.seq + 1).unwrap_or(0);
-            let prev_hash = tip.clone();
-            let hash = compute_entry_hash(
-                seq, &timestamp, &agent_id, &action, &detail, &outcome, &prev_hash,
+        unsaved.drain(..written);
+        if unsaved.len() > MAX_UNSAVED {
+            let dropped = unsaved.len() - MAX_UNSAVED;
+            unsaved.drain(..dropped);
+            tracing::error!(
+                dropped,
+                "The database has refused audit entries for too long; the oldest waiting ones are dropped"
             );
-            AuditEntry {
-                seq,
-                timestamp,
-                agent_id,
-                action,
-                detail,
-                outcome,
-                prev_hash,
-                hash,
-            }
-        });
-
-        *tip = entry.hash.clone();
-        entries.push(entry.clone());
-        trim_window(&mut entries);
-        self.total.fetch_add(1, Ordering::Relaxed);
-        entry
+        }
+        // The new entry is the last in the queue: it was written only if the
+        // whole queue was.
+        if unsaved.is_empty() {
+            last
+        } else {
+            None
+        }
     }
 
     /// Every break in the chain, and where the unbroken run to the end
@@ -513,16 +623,23 @@ impl AuditLog {
     /// recent was touched. Each break is listed with its date, and the run
     /// after the last one is reported as intact.
     pub fn verify_report(&self) -> ChainReport {
+        let unsaved = self.unsaved.lock().unwrap_or_else(|e| e.into_inner()).len();
         if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
-                let mut check = ChainCheck::default();
-                match for_each_stored(&conn, |e| check.push(&e)) {
-                    Ok(()) => return check.report(),
-                    Err(e) => {
-                        tracing::warn!("Audit trail could not be read for checking: {e}");
-                    }
-                }
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+            let mut check = ChainCheck::full();
+            let read = for_each_stored(&conn, |row| match row {
+                Ok(e) => check.push(&e),
+                Err(_) => check.push_unreadable(),
+            });
+            let mut report = check.report();
+            // A record that cannot be read is not reported on from this
+            // process's partial copy in memory, which would say "intact".
+            if let Err(e) = read {
+                tracing::warn!("Audit trail could not be read for checking: {e}");
+                report.error = Some("the audit database could not be read".to_string());
             }
+            report.unsaved = unsaved;
+            return report;
         }
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut check = ChainCheck::default();
@@ -538,12 +655,19 @@ impl AuditLog {
     /// the first inconsistency found.
     pub fn verify_integrity(&self) -> Result<(), String> {
         let report = self.verify_report();
+        if let Some(e) = &report.error {
+            return Err(e.clone());
+        }
         match report.breaks.first() {
-            None => Ok(()),
             Some(b) => Err(format!(
                 "{} at seq {} ({} break(s) in all)",
                 b.kind, b.seq, report.break_count
             )),
+            None if report.unsaved > 0 => Err(format!(
+                "{} entries not yet written to the database",
+                report.unsaved
+            )),
+            None => Ok(()),
         }
     }
 
@@ -577,11 +701,49 @@ impl AuditLog {
     /// -- one agent turn with many tool calls -- lost the entries in between.
     /// Reading from where the feed stopped loses none: one that falls more
     /// than `max` behind catches up over the next polls.
+    ///
+    /// Read from the database when there is one, so that a feed sees
+    /// entries other processes wrote, and one that falls behind the memory
+    /// window still gets every entry.
     pub fn since(&self, seq: u64, max: usize) -> Vec<AuditEntry> {
+        if let Some(ref db) = self.db {
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+            match stored_since(&conn, seq, max) {
+                Ok(v) => return v,
+                Err(e) => tracing::warn!("Audit trail could not be read for a live feed: {e}"),
+            }
+        }
         let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let start = entries.partition_point(|e| e.seq <= seq);
         let end = start.saturating_add(max).min(entries.len());
         entries[start..end].to_vec()
+    }
+}
+
+/// Write one entry, trying three times over 150 ms: a busy database or a
+/// race with another process usually clears by then.
+fn append_with_retries(db: &Mutex<Connection>, item: &Unsaved) -> rusqlite::Result<AuditEntry> {
+    let mut attempt = 0u64;
+    loop {
+        let result = {
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+            append_in_db(
+                &conn,
+                &item.timestamp,
+                &item.agent_id,
+                &item.action,
+                &item.detail,
+                &item.outcome,
+            )
+        };
+        match result {
+            Ok(entry) => return Ok(entry),
+            Err(e) if attempt == 2 => return Err(e),
+            Err(_) => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+            }
+        }
     }
 }
 
@@ -763,19 +925,99 @@ mod tests {
         assert_eq!(report.breaks[0].kind, "altered");
     }
 
-    /// When the database refuses the write, the entry is still recorded in
-    /// memory rather than lost without a trace.
+    /// An entry the database refuses waits, takes no sequence number, and is
+    /// written in order before the next one once the database accepts writes.
     #[test]
-    fn a_failed_database_write_is_kept_in_memory() {
+    fn a_refused_entry_waits_and_is_written_before_the_next() {
         let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        let log = AuditLog::with_db(db); // no audit_entries table
-        log.record("a", AuditAction::AgentSpawn, "spawn", "ok");
-        log.record("a", AuditAction::AgentKill, "kill", "ok");
-        assert_eq!(log.len(), 2);
-        let entries = log.recent(10);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1].prev_hash, entries[0].hash);
-        assert!(log.verify_integrity().is_ok());
+        let log = AuditLog::with_db(db.clone()); // no audit_entries table yet
+        assert!(log
+            .record_entry("a", AuditAction::AgentSpawn, "spawn", "ok")
+            .is_none());
+        assert!(log
+            .record_entry("a", AuditAction::AgentKill, "kill", "ok")
+            .is_none());
+        assert_eq!(log.len(), 0);
+        let report = log.verify_report();
+        assert_eq!(report.unsaved, 2);
+        assert!(
+            report.error.is_some(),
+            "the missing table is a read failure"
+        );
+        assert!(!report.is_intact());
+
+        db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE audit_entries (seq INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, \
+                 agent_id TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL, \
+                 outcome TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL)",
+            )
+            .unwrap();
+        let third = log
+            .record_entry("a", AuditAction::ToolInvoke, "third", "ok")
+            .unwrap();
+        assert_eq!(third.seq, 2);
+        let details: Vec<String> = log.recent(10).into_iter().map(|e| e.detail).collect();
+        assert_eq!(details, vec!["spawn", "kill", "third"]);
+        assert!(log.verify_report().is_intact());
+        assert_eq!(log.len(), 3);
+    }
+
+    fn filled_db(n: u64) -> Arc<Mutex<Connection>> {
+        let db = db_with_audit_table();
+        let log = AuditLog::with_db(db.clone());
+        for i in 0..n {
+            log.record("a", AuditAction::ToolInvoke, format!("e{i}"), "ok");
+        }
+        db
+    }
+
+    /// Deleting the first rows used to leave a chain that checked out,
+    /// since a chain not starting at 0 was taken as a window.
+    #[test]
+    fn the_whole_record_must_start_at_entry_zero() {
+        let db = filled_db(4);
+        db.lock()
+            .unwrap()
+            .execute("DELETE FROM audit_entries WHERE seq < 2", [])
+            .unwrap();
+        let report = AuditLog::with_db(db).verify_report();
+        assert_eq!(report.break_count, 1);
+        assert_eq!(report.breaks[0].seq, 2);
+        assert_eq!(report.breaks[0].kind, "missing");
+        assert_eq!(report.intact_since_seq, Some(2));
+        assert!(!report.is_intact());
+    }
+
+    /// A row that cannot be read is a break, not a row silently skipped.
+    #[test]
+    fn an_unreadable_row_is_a_break() {
+        let db = filled_db(4);
+        db.lock()
+            .unwrap()
+            .execute("UPDATE audit_entries SET detail = X'00' WHERE seq = 3", [])
+            .unwrap();
+        let log = AuditLog::with_db(db);
+        let report = log.verify_report();
+        assert_eq!(report.entries, 4);
+        assert_eq!(report.break_count, 1);
+        assert_eq!(report.breaks[0].kind, "unreadable");
+        assert_eq!(report.breaks[0].seq, 3);
+        assert_eq!(report.intact_since_seq, None);
+        assert!(log.verify_integrity().is_err());
+    }
+
+    /// A feed reads the database, so it sees what another process wrote.
+    #[test]
+    fn since_reads_entries_other_processes_wrote() {
+        let db = db_with_audit_table();
+        let daemon = AuditLog::with_db(db.clone());
+        let cli = AuditLog::with_db(db);
+        daemon.record("a", AuditAction::ToolInvoke, "one", "ok");
+        cli.record("b", AuditAction::ConfigChange, "two", "ok");
+        let details: Vec<String> = daemon.since(0, 10).into_iter().map(|e| e.detail).collect();
+        assert_eq!(details, vec!["two"]);
     }
 
     /// Memory keeps only the recent entries; the count, the tip and
@@ -812,7 +1054,9 @@ mod tests {
         assert_eq!(report.entries, n);
         assert!(report.is_intact());
 
-        let next = log.record_entry("a", AuditAction::ToolInvoke, "next", "ok");
+        let next = log
+            .record_entry("a", AuditAction::ToolInvoke, "next", "ok")
+            .unwrap();
         assert_eq!(next.seq, n as u64);
         assert_eq!(log.len(), n + 1);
     }
