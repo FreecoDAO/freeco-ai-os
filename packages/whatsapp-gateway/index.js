@@ -21,6 +21,34 @@ const DEFAULT_AGENT = process.env.FREECO_AI_DEFAULT_AGENT || process.env.FREECO_
 const GATEWAY_TOKEN = process.env.WHATSAPP_GATEWAY_TOKEN || '';
 const FREECO_AI_API_KEY = process.env.FREECO_AI_API_KEY || process.env.FREECO_AI_API_KEY || '';
 
+// Who the agent answers. A WhatsApp number is in every group its owner was
+// ever added to, and the agent used to answer all of them, and anyone at all
+// who wrote to the number.
+//   WHATSAPP_ALLOWED_GROUPS  comma-separated group JIDs (…@g.us) to answer in,
+//                            or * for every group. Unset: groups are ignored.
+//   WHATSAPP_ALLOWED_NUMBERS comma-separated numbers (+41…) to answer in
+//                            direct chats. Unset: every direct chat is answered.
+function envList(name) {
+  return (process.env[name] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+const ALLOWED_GROUPS = envList('WHATSAPP_ALLOWED_GROUPS');
+const ALLOWED_NUMBERS = envList('WHATSAPP_ALLOWED_NUMBERS').map(normalizeNumber);
+
+function normalizeNumber(n) {
+  return '+' + String(n).replace(/[^0-9]/g, '');
+}
+
+function groupAllowed(jid) {
+  return ALLOWED_GROUPS.includes('*') || ALLOWED_GROUPS.includes(jid);
+}
+
+function numberAllowed(phone) {
+  return ALLOWED_NUMBERS.length === 0 || ALLOWED_NUMBERS.includes(normalizeNumber(phone));
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -150,6 +178,15 @@ async function startConnection() {
       const phone = '+' + senderJid.replace(/@.*$/, '');
       const pushName = msg.pushName || phone;
 
+      if (isGroup && !groupAllowed(remoteJid)) {
+        console.log(`[gateway] Ignored a message in group ${remoteJid}: not in WHATSAPP_ALLOWED_GROUPS`);
+        continue;
+      }
+      if (!isGroup && !numberAllowed(phone)) {
+        console.log(`[gateway] Ignored a message from ${phone}: not in WHATSAPP_ALLOWED_NUMBERS`);
+        continue;
+      }
+
       const metadata = {
         channel: 'whatsapp',
         sender: phone,
@@ -163,9 +200,13 @@ async function startConnection() {
         console.log(`[gateway] Incoming from ${pushName} (${phone}): ${text.substring(0, 80)}`);
       }
 
-      // Forward to FreEco.ai agent
+      // Forward to FreEco.ai agent, in this contact's (or group's) own
+      // conversation: one shared conversation let every guest's messages and
+      // the agent's answers to them reach every other guest's replies.
       try {
-        const response = await forwardToFreecoAi(text, phone, pushName, metadata);
+        const label = isGroup ? `WhatsApp group ${remoteJid}` : `WhatsApp ${phone}`;
+        const conversationId = await conversationFor(label);
+        const response = await forwardToFreecoAi(text, phone, pushName, metadata, conversationId);
         if (response && sock) {
           // Reply in the same context: group → group, DM → DM
           const replyJid = isGroup ? remoteJid : senderJid.replace(/@.*$/, '') + '@s.whatsapp.net';
@@ -180,12 +221,93 @@ async function startConnection() {
 }
 
 // ---------------------------------------------------------------------------
+// FreEco.ai API helpers
+// ---------------------------------------------------------------------------
+function apiRequest(method, apiPath, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? '' : JSON.stringify(body);
+    const url = new URL(`${FREECO_AI_URL}${apiPath}`);
+    const headers = { 'Content-Type': 'application/json' };
+    if (payload) headers['Content-Length'] = Buffer.byteLength(payload);
+    if (FREECO_AI_API_KEY) headers.Authorization = ['Bearer', FREECO_AI_API_KEY].join(' ');
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 4200,
+        path: url.pathname + url.search,
+        method,
+        headers,
+        timeout: 30_000,
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => (data += chunk));
+        res.on('end', () => {
+          let parsed = null;
+          try { parsed = JSON.parse(data); } catch { /* not JSON */ }
+          if (res.statusCode >= 400) {
+            reject(new Error(`${method} ${apiPath}: HTTP ${res.statusCode} ${(parsed && parsed.error) || data.slice(0, 200)}`));
+          } else {
+            resolve(parsed);
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`${method} ${apiPath}: timeout`));
+    });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// The default agent's id: conversations are opened by id, and the gateway
+// is configured with a name.
+let agentUuid = '';
+async function resolveAgentUuid() {
+  if (agentUuid) return agentUuid;
+  const list = await apiRequest('GET', '/api/agents');
+  const agents = Array.isArray(list) ? list : (list && list.agents) || [];
+  const found = agents.find((a) => a.id === DEFAULT_AGENT)
+    || agents.find((a) => String(a.name || '').toLowerCase() === DEFAULT_AGENT.toLowerCase());
+  if (!found) throw new Error(`No agent called "${DEFAULT_AGENT}"`);
+  agentUuid = found.id;
+  return agentUuid;
+}
+
+// One conversation per contact or group, found again by its label after a
+// restart. Opened with switch:false, so the dashboard's chat stays where the
+// user left it instead of jumping to whichever guest wrote last.
+const conversations = new Map();
+async function conversationFor(label) {
+  if (conversations.has(label)) return conversations.get(label);
+  const agent = await resolveAgentUuid();
+  const existing = await apiRequest('GET', `/api/agents/${encodeURIComponent(agent)}/sessions`);
+  const sessions = Array.isArray(existing) ? existing : (existing && existing.sessions) || [];
+  const match = sessions.find((s) => s.label === label);
+  let id = match && (match.session_id || match.id);
+  if (!id) {
+    const created = await apiRequest('POST', `/api/agents/${encodeURIComponent(agent)}/sessions`, { label, switch: false });
+    id = created && created.session_id;
+  }
+  if (!id) throw new Error(`Could not open a conversation for ${label}`);
+  conversations.set(label, id);
+  return id;
+}
+
+// ---------------------------------------------------------------------------
 // Forward incoming message to FreEco.ai API, return agent response
 // ---------------------------------------------------------------------------
-function forwardToFreecoAi(text, phone, pushName, metadata) {
+function forwardToFreecoAi(text, phone, pushName, metadata, conversationId) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       message: text,
+      // Who wrote, so the agent knows which guest it is answering.
+      sender_id: phone,
+      sender_name: pushName,
+      session_id: conversationId,
       metadata: metadata || {
         channel: 'whatsapp',
         sender: phone,
@@ -384,6 +506,8 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] FreEco.ai URL: ${FREECO_AI_URL}`);
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
+  console.log(`[gateway] Groups: ${ALLOWED_GROUPS.length ? (ALLOWED_GROUPS.includes('*') ? 'all' : ALLOWED_GROUPS.join(', ')) : 'ignored (set WHATSAPP_ALLOWED_GROUPS to answer in one)'}`);
+  console.log(`[gateway] Direct chats: ${ALLOWED_NUMBERS.length ? ALLOWED_NUMBERS.join(', ') : 'everyone'}`);
 
   // Auto-connect if credentials already exist from a previous session
   const credsPath = path.join(__dirname, 'auth_store', 'creds.json');
