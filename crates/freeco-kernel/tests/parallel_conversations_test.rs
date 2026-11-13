@@ -969,3 +969,89 @@ async fn a_team_run_hands_work_to_its_members() {
     // Running a team never pulls the lead out of the chat it was in.
     assert_ne!(kernel.registry.get(lead).unwrap().session_id, lead_session);
 }
+
+/// The Teams page draws a line for every hand-off, so each one must be on
+/// record with who asked whom and how it ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_hand_off_is_recorded_with_how_it_ended() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("handoffs");
+    let lead = spawn(&kernel, "lead", &url, &["agent_send"]);
+    spawn(&kernel, "worker-a", &url, &[]);
+    spawn(&kernel, "worker-b", &url, &[]);
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        kernel.send_message(lead, "split this up"),
+    )
+    .await
+    .expect("delegation finishes")
+    .expect("lead run succeeds");
+
+    let trail = kernel.recent_handoffs(10);
+    assert_eq!(trail.len(), 2, "{trail:?}");
+    for h in &trail {
+        assert_eq!(h.kind, "delegate");
+        assert_eq!(h.status, "done", "{h:?}");
+        assert_eq!(h.from_name.as_deref(), Some("lead"));
+        assert_eq!(h.from_agent.as_deref(), Some(lead.to_string().as_str()));
+        assert!(h.finished_at.is_some());
+        assert!(h.session_id.is_some(), "a task has its own conversation");
+    }
+    let mut to: Vec<&str> = trail.iter().map(|h| h.to_name.as_str()).collect();
+    to.sort();
+    assert_eq!(to, vec!["worker-a", "worker-b"]);
+    assert!(
+        kernel.busy_conversations().is_empty(),
+        "nothing is working now"
+    );
+}
+
+/// A colleague's message must not read like the user typing: the recipient
+/// is told who sent it and that it carries no approval of the user's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_from_another_agent_says_it_is_not_from_the_user() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("peer-mark");
+    let ping = spawn(&kernel, "ping", &url, &["agent_send"]);
+    let pong = spawn(&kernel, "pong", &url, &["agent_send"]);
+
+    tokio::time::timeout(Duration::from_secs(30), kernel.send_message(ping, "go"))
+        .await
+        .expect("a cycle must not hang")
+        .expect("ping run succeeds");
+
+    let pong_session = kernel.registry.get(pong).unwrap().session_id;
+    let received = user_texts(&kernel, pong_session);
+    assert!(
+        received
+            .iter()
+            .any(|t| t.contains("Message from the agent \"ping\"")
+                && t.contains("not from the user")
+                && t.contains("hello")),
+        "{received:?}"
+    );
+    // What the user typed to ping stays unmarked.
+    let ping_session = kernel.registry.get(ping).unwrap().session_id;
+    let typed = user_texts(&kernel, ping_session);
+    assert!(typed.iter().any(|t| t == "go"), "{typed:?}");
+    assert!(
+        !typed.iter().any(|t| t.contains("not from the user")),
+        "{typed:?}"
+    );
+
+    // ping -> pong finished; pong asking back up the chain was refused.
+    let trail = kernel.recent_handoffs(10);
+    let sent = trail
+        .iter()
+        .find(|h| h.from_name.as_deref() == Some("ping"))
+        .expect("ping's message is on record");
+    assert_eq!((sent.kind, sent.status), ("message", "done"));
+    let back = trail
+        .iter()
+        .find(|h| h.from_name.as_deref() == Some("pong"))
+        .expect("pong's attempt is on record");
+    assert_eq!(back.status, "failed", "{back:?}");
+}
