@@ -8,7 +8,7 @@
 use crate::session::Session;
 use chrono::Utc;
 use freeco_types::error::{FreecoError, FreecoResult};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -311,6 +311,54 @@ impl OrgStore {
         Ok(())
     }
 
+    /// A live team by its id or its name, ignoring case: `(id, name)`.
+    ///
+    /// Agents and the dashboard name teams the way people do; an id is what
+    /// gets stored. An archived team is not found, so no new work lands on a
+    /// board nobody looks at any more.
+    pub fn find_team(&self, id_or_name: &str) -> FreecoResult<Option<(String, String)>> {
+        let key = id_or_name.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let found = conn
+            .query_row(
+                "SELECT id, name FROM teams
+                 WHERE archived = 0 AND (id = ?1 OR lower(name) = lower(?1))
+                 ORDER BY (id = ?1) DESC, updated_at DESC LIMIT 1",
+                [key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(mem_err)?;
+        Ok(found)
+    }
+
+    /// The ids of every team an agent is on.
+    pub fn teams_for_agent(&self, agent_id: &str) -> FreecoResult<Vec<String>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let mut stmt = conn
+            .prepare("SELECT team_id FROM team_members WHERE agent_id = ?1")
+            .map_err(mem_err)?;
+        let rows = stmt
+            .query_map([agent_id], |r| r.get::<_, String>(0))
+            .map_err(mem_err)?;
+        rows.collect::<Result<_, _>>().map_err(mem_err)
+    }
+
+    /// Take an agent off a team. `false` when it was not on it.
+    pub fn remove_team_member(&self, team_id: &str, agent_id: &str) -> FreecoResult<bool> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let n = conn
+            .execute(
+                "DELETE FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+                rusqlite::params![team_id, agent_id],
+            )
+            .map_err(mem_err)?;
+        Ok(n > 0)
+    }
+
     // ---- Scoping -------------------------------------------------------
 
     /// Attach a session to a project and optionally a team.
@@ -555,6 +603,31 @@ mod tests {
         let visible = s.projects_for_agent("agent-1").unwrap();
         assert_eq!(visible, vec![mine.id]);
         assert!(s.projects_for_agent("agent-2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn teams_are_found_by_id_or_name_and_list_their_members() {
+        let s = store();
+        let team = s.create_team("Concierge Desk", None).unwrap();
+        assert_eq!(
+            s.find_team(&team.id).unwrap(),
+            Some((team.id.clone(), "Concierge Desk".to_string()))
+        );
+        assert_eq!(
+            s.find_team("  concierge desk ").unwrap().map(|t| t.0),
+            Some(team.id.clone())
+        );
+        assert!(s.find_team("nobody").unwrap().is_none());
+        assert!(s.find_team("").unwrap().is_none());
+
+        s.add_team_member(&team.id, "agent-1", Some("lead")).unwrap();
+        s.add_team_member(&team.id, "agent-2", None).unwrap();
+        assert_eq!(s.teams_for_agent("agent-1").unwrap(), vec![team.id.clone()]);
+        assert!(s.remove_team_member(&team.id, "agent-2").unwrap());
+        assert!(!s.remove_team_member(&team.id, "agent-2").unwrap());
+        assert!(s.teams_for_agent("agent-2").unwrap().is_empty());
+        let members = s.get_team(&team.id).unwrap().unwrap()["members"].clone();
+        assert_eq!(members.as_array().unwrap().len(), 1);
     }
 
     /// A project's conversations can be opened, its brief rewritten, and a
