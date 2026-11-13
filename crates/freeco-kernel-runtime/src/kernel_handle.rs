@@ -143,8 +143,35 @@ pub trait KernelHandle: Send + Sync {
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String>;
 
+    /// Post a task onto a team's board (named by id or name), optionally
+    /// waiting on other tasks. The assignee, when given, must be on the team.
+    async fn team_task_post(
+        &self,
+        title: &str,
+        description: &str,
+        assigned_to: Option<&str>,
+        created_by: Option<&str>,
+        team: Option<&str>,
+        blocked_by: &[String],
+    ) -> Result<String, String> {
+        let _ = (title, description, assigned_to, created_by, team, blocked_by);
+        Err("Team task boards are not available".to_string())
+    }
+
     /// Mark a task as completed with a result string.
     async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String>;
+
+    /// Complete a task on behalf of `by` (the holder or the poster only) and
+    /// return the ids of the waiting tasks this made ready.
+    async fn task_complete_by(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let _ = by;
+        self.task_complete(task_id, result).await.map(|_| Vec::new())
+    }
 
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;

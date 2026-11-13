@@ -404,7 +404,7 @@ pub async fn execute_tool(
         "agent_find" => tool_agent_find(input, kernel),
         "task_post" => tool_task_post(input, kernel, caller_agent_id).await,
         "task_claim" => tool_task_claim(kernel, caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, kernel).await,
+        "task_complete" => tool_task_complete(input, kernel, caller_agent_id).await,
         "task_list" => tool_task_list(input, kernel).await,
         "event_publish" => tool_event_publish(input, kernel).await,
 
@@ -1231,13 +1231,15 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "task_post".to_string(),
-            description: "Post a task to the shared task queue for another agent to pick up.".to_string(),
+            description: "Post a task to the shared task queue for another agent to pick up. Name a team to put it on that team's board, where only its members can claim it, and list task IDs in blocked_by to hold it until those tasks are completed.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Short task title" },
                     "description": { "type": "string", "description": "Detailed task description" },
-                    "assigned_to": { "type": "string", "description": "Agent name or ID to assign the task to (optional)" }
+                    "assigned_to": { "type": "string", "description": "Agent name or ID to assign the task to (optional; on a team board it must be a member)" },
+                    "team": { "type": "string", "description": "Team name or ID whose board the task goes on (optional)" },
+                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "IDs of tasks that must be completed before this one can be claimed (optional)" }
                 },
                 "required": ["title", "description"]
             }),
@@ -2058,15 +2060,21 @@ async fn tool_apply_patch(
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, String> {
     let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
+    // The same SSRF rules as the full fetch engine, on the first URL and on
+    // every redirect: this path had none, so an agent without the web tools
+    // context could read the cloud metadata endpoint or the LAN.
+    crate::web_fetch::check_ssrf(url, &[])?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(crate::web_fetch::ssrf_checked_redirects(Vec::new()))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+    let resp = client.get(url).send().await.map_err(|e| {
+        format!(
+            "HTTP request failed: {}",
+            crate::web_fetch::error_chain(&e)
+        )
+    })?;
     let status = resp.status();
     // Reject responses larger than 10MB to prevent memory exhaustion
     if let Some(len) = resp.content_length() {
@@ -2680,10 +2688,38 @@ async fn tool_task_post(
         .as_str()
         .ok_or("Missing 'description' parameter")?;
     let assigned_to = input["assigned_to"].as_str();
-    let task_id = kh
-        .task_post(title, description, assigned_to, caller_agent_id)
-        .await?;
-    Ok(format!("Task created with ID: {task_id}"))
+    let team = input["team"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    let blocked_by: Vec<String> = input["blocked_by"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let task_id = if team.is_some() || !blocked_by.is_empty() {
+        kh.team_task_post(
+            title,
+            description,
+            assigned_to,
+            caller_agent_id,
+            team,
+            &blocked_by,
+        )
+        .await?
+    } else {
+        kh.task_post(title, description, assigned_to, caller_agent_id)
+            .await?
+    };
+    if blocked_by.is_empty() {
+        Ok(format!("Task created with ID: {task_id}"))
+    } else {
+        Ok(format!(
+            "Task created with ID: {task_id}. It waits for {} task{} to be completed before anyone can claim it.",
+            blocked_by.len(),
+            if blocked_by.len() == 1 { "" } else { "s" }
+        ))
+    }
 }
 
 async fn tool_task_claim(
@@ -2703,6 +2739,7 @@ async fn tool_task_claim(
 async fn tool_task_complete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let task_id = input["task_id"]
@@ -2711,8 +2748,15 @@ async fn tool_task_complete(
     let result = input["result"]
         .as_str()
         .ok_or("Missing 'result' parameter")?;
-    kh.task_complete(task_id, result).await?;
-    Ok(format!("Task {task_id} marked as completed."))
+    let ready = kh.task_complete_by(task_id, result, caller_agent_id).await?;
+    if ready.is_empty() {
+        Ok(format!("Task {task_id} marked as completed."))
+    } else {
+        Ok(format!(
+            "Task {task_id} marked as completed. Now ready to claim: {}.",
+            ready.join(", ")
+        ))
+    }
 }
 
 async fn tool_task_list(
