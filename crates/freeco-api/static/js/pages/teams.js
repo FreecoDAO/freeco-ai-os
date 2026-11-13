@@ -24,11 +24,14 @@ function teamsPage() {
     posting: false,
     newMember: { agent_id: '', role: '' },
     newTeam: '',
+    goal: '',
+    running: false,
     _timer: null,
     _onResize: null,
 
     async init() {
       var self = this;
+      if (this._timer) return;
       await this.load();
       this._timer = setInterval(function () {
         if (!document.hidden) self.load(true);
@@ -69,6 +72,8 @@ function teamsPage() {
     select(t) {
       this.selectedId = t.id;
       this.newTask = { title: '', description: '', assigned_to: '', blocked_by: [] };
+      this.newMember = { agent_id: '', role: '' };
+      this.goal = '';
     },
 
     allAgents() {
@@ -232,6 +237,24 @@ function teamsPage() {
       } catch (e) {
         FreecoToast.error('Could not take the agent off the team: ' + e.message);
       }
+    },
+
+    // The lead gets the goal in a conversation of its own and hands parts to
+    // the members; the floor lights up as their runs start.
+    async runTeam() {
+      var t = this.selected();
+      var goal = this.goal.trim();
+      if (!t || !goal) return;
+      this.running = true;
+      try {
+        await FreecoAPI.post('/api/org/teams/' + encodeURIComponent(t.id) + '/run', { goal: goal });
+        this.goal = '';
+        FreecoToast.success(t.name + ' is on it.');
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not run the team: ' + e.message);
+      }
+      this.running = false;
     },
 
     async createTeam() {

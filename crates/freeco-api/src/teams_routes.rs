@@ -133,54 +133,10 @@ pub async fn floor(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
-#[derive(Deserialize)]
-pub struct AddMember {
-    pub agent_id: String,
-    /// `lead` for the agent that splits the work and hands it out; anything
-    /// else, or nothing, for a member.
-    pub role: Option<String>,
-}
-
-/// POST /api/org/teams/{id}/members — put an agent on a team.
-pub async fn add_member(
-    State(state): State<Arc<AppState>>,
-    Path(team): Path<String>,
-    Json(body): Json<AddMember>,
-) -> impl IntoResponse {
-    let org = state.kernel.memory.org();
-    let (team_id, team_name) = match org.find_team(&team) {
-        Ok(Some(t)) => t,
-        Ok(None) => return fail(StatusCode::NOT_FOUND, "No such team"),
-        Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, e),
-    };
-    let agent = match body.agent_id.trim().parse::<freeco_types::agent::AgentId>() {
-        Ok(id) => state.kernel.registry.get(id),
-        Err(_) => state.kernel.registry.find_by_name(body.agent_id.trim()),
-    };
-    let Some(agent) = agent else {
-        return fail(StatusCode::NOT_FOUND, "No such agent");
-    };
-    let role = body
-        .role
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
-    match org.add_team_member(&team_id, &agent.id.to_string(), role) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "team_id": team_id,
-                "team": team_name,
-                "agent_id": agent.id.to_string(),
-                "name": agent.name,
-                "role": role,
-            })),
-        ),
-        Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, e),
-    }
-}
-
 /// DELETE /api/org/teams/{id}/members/{agent_id} — take an agent off a team.
+///
+/// Adding one is `org_routes::add_team_member`; this is its other half, so a
+/// member put on the wrong team can be taken off again.
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Path((team, agent_id)): Path<(String, String)>,

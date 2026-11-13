@@ -668,6 +668,21 @@ pub async fn build_router(
             "/api/org/teams/{id}/run",
             axum::routing::post(crate::org_routes::run_team),
         )
+        // The Teams floor: who is on each team, who is working right now,
+        // each team's task board and the latest hand-offs between agents.
+        .route(
+            "/api/teams/floor",
+            axum::routing::get(crate::teams_routes::floor),
+        )
+        .route(
+            "/api/org/teams/{id}/members/{agent_id}",
+            axum::routing::delete(crate::teams_routes::remove_member),
+        )
+        .route(
+            "/api/org/teams/{id}/tasks",
+            axum::routing::get(crate::teams_routes::team_tasks)
+                .post(crate::teams_routes::post_team_task),
+        )
         .route(
             "/api/sessions/{id}/assign",
             axum::routing::put(crate::org_routes::assign_session),
