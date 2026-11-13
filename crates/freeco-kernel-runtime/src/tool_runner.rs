@@ -2069,12 +2069,11 @@ async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, Stri
         .redirect(crate::web_fetch::ssrf_checked_redirects(Vec::new()))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
-    let resp = client.get(url).send().await.map_err(|e| {
-        format!(
-            "HTTP request failed: {}",
-            crate::web_fetch::error_chain(&e)
-        )
-    })?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", crate::web_fetch::error_chain(&e)))?;
     let status = resp.status();
     // Reject responses larger than 10MB to prevent memory exhaustion
     if let Some(len) = resp.content_length() {
@@ -2688,7 +2687,10 @@ async fn tool_task_post(
         .as_str()
         .ok_or("Missing 'description' parameter")?;
     let assigned_to = input["assigned_to"].as_str();
-    let team = input["team"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    let team = input["team"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
     let blocked_by: Vec<String> = input["blocked_by"]
         .as_array()
         .map(|a| {
@@ -2748,7 +2750,9 @@ async fn tool_task_complete(
     let result = input["result"]
         .as_str()
         .ok_or("Missing 'result' parameter")?;
-    let ready = kh.task_complete_by(task_id, result, caller_agent_id).await?;
+    let ready = kh
+        .task_complete_by(task_id, result, caller_agent_id)
+        .await?;
     if ready.is_empty() {
         Ok(format!("Task {task_id} marked as completed."))
     } else {

@@ -93,7 +93,8 @@ pub async fn floor(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             .filter(|t| t["team_id"].as_str() == Some(team_id))
             .cloned()
             .collect();
-        let count = |pred: &dyn Fn(&serde_json::Value) -> bool| board.iter().filter(|t| pred(t)).count();
+        let count =
+            |pred: &dyn Fn(&serde_json::Value) -> bool| board.iter().filter(|t| pred(t)).count();
         out_teams.push(serde_json::json!({
             "id": team_id,
             "name": team["name"],

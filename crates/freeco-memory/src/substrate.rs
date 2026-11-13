@@ -626,7 +626,9 @@ impl MemorySubstrate {
         let agent_id = agent_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             let teams: Vec<String> = {
                 let mut stmt = db
                     .prepare("SELECT team_id FROM team_members WHERE agent_id = ?1")
@@ -695,7 +697,9 @@ impl MemorySubstrate {
 
     /// Mark a task as completed with a result string.
     pub async fn task_complete(&self, task_id: &str, result: &str) -> FreecoResult<()> {
-        self.task_complete_by(task_id, result, None).await.map(|_| ())
+        self.task_complete_by(task_id, result, None)
+            .await
+            .map(|_| ())
     }
 
     /// Complete a task, checking who is completing it, and report which

@@ -486,7 +486,10 @@ mod tests {
             ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
             ..WebFetchConfig::default()
         };
-        WebFetchEngine::new(config, Arc::new(WebCache::new(std::time::Duration::from_secs(0))))
+        WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(0))),
+        )
     }
 
     #[tokio::test]

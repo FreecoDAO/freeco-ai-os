@@ -620,7 +620,8 @@ mod tests {
         assert!(s.find_team("nobody").unwrap().is_none());
         assert!(s.find_team("").unwrap().is_none());
 
-        s.add_team_member(&team.id, "agent-1", Some("lead")).unwrap();
+        s.add_team_member(&team.id, "agent-1", Some("lead"))
+            .unwrap();
         s.add_team_member(&team.id, "agent-2", None).unwrap();
         assert_eq!(s.teams_for_agent("agent-1").unwrap(), vec![team.id.clone()]);
         assert!(s.remove_team_member(&team.id, "agent-2").unwrap());

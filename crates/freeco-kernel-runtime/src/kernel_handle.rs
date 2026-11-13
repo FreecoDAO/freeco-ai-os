@@ -154,7 +154,14 @@ pub trait KernelHandle: Send + Sync {
         team: Option<&str>,
         blocked_by: &[String],
     ) -> Result<String, String> {
-        let _ = (title, description, assigned_to, created_by, team, blocked_by);
+        let _ = (
+            title,
+            description,
+            assigned_to,
+            created_by,
+            team,
+            blocked_by,
+        );
         Err("Team task boards are not available".to_string())
     }
 
@@ -170,7 +177,9 @@ pub trait KernelHandle: Send + Sync {
         by: Option<&str>,
     ) -> Result<Vec<String>, String> {
         let _ = by;
-        self.task_complete(task_id, result).await.map(|_| Vec::new())
+        self.task_complete(task_id, result)
+            .await
+            .map(|_| Vec::new())
     }
 
     /// List tasks, optionally filtered by status.
