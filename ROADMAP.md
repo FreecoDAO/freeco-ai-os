@@ -675,6 +675,70 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+### OmniRoute as the one gateway — 2026-11-14
+
+Live now (runtime config, no build needed):
+
+- ✅ OmniRoute bound to 127.0.0.1 only (`OMNIROUTE_HOSTNAME`; `HOSTNAME` is
+  overwritten by the image's launcher). Sandboxes still reach it via pasta `-T`.
+- ✅ Connections: Claude Code subscription (`cc/`, setup token), Novita (live
+  catalog, 101 models), NVIDIA (live catalog, free-only filter off), OpenAI.
+- ✅ Claude Code (`freeco-claude`, its own container, pasta forwarding only
+  20128) runs through OmniRoute: opus/sonnet/haiku → `freeco-cc-heavy` /
+  `-main` / `-easy`, Claude first, then Novita/NVIDIA. Failover verified with
+  the Claude connection switched off.
+- ✅ FreEco agents run through OmniRoute: CEO → `freeco-agent-ceo`, worker 1 →
+  `freeco-agent-worker`, hands → `freeco-agent-hands` (each keeps its old model
+  as step 1). The `omniroute` agent stays direct so it works when the gateway
+  is down.
+- ✅ Compression: session-dedup + lite, standard above 64k; system prompt never
+  compressed. OmniRoute advertises only connected providers (allowlist,
+  blocked keyless providers, auto combos hidden).
+- ✅ OmniRoute MCP on (streamable HTTP, loopback); scoped key for the hand;
+  registered in config.toml.
+
+Open:
+
+- ⬜ **Daemon rebuild needed** to ship: fallback picker rendering nothing
+  (duplicate x-for keys across providers), `/api/models?available=true`
+  offering models that are not ready (offline keyless servers, gateway routes
+  with no provider), and to activate the `omniroute` MCP server — then attach
+  it to the `omniroute` agent (`PUT /api/agents/{id}/mcp_servers`). Fold in the
+  unmerged `claude/project-thread-*` branches first.
+- ⬜ **Security approvals have no UI.** `POST /api/security/approve/{hash}` is
+  never called by the dashboard, so a manifest with `shell_exec` can never be
+  approved by clicking. (The `containers` agent was approved through the API
+  on the owner's chat go-ahead, hash `5e6652e8…`.)
+- ⬜ **Hands cannot safely manage their own containers.** A hand that lists
+  `shell_exec` in HAND.toml gets `exec_policy` mode **Full** (any command;
+  `activate_hand`: "Hands are curated packages"). Needs a per-hand
+  `[exec_policy]` in HAND.toml (e.g. podman-only) and a container-name scope
+  checked by the kernel. Until then the `containers` agent does container
+  work. Also: hand agents are rebuilt from HAND.toml on every boot, so their
+  `agent.toml` edits are silently discarded (overrides go in
+  `~/.freeco-ai/hands/<id>/HAND.toml`; the `omniroute` hand now has one with
+  its OmniRoute MCP tools).
+- ⬜ **MCP servers are connected once at boot, with no retry.** The daemon
+  started 2 s before OmniRoute and never connected; `POST
+  /api/integrations/reload` fixed it by hand.
+- ⬜ **`capabilities.shell` is dead wiring.** It becomes `Capability::ShellExec`
+  and nothing checks it; only the agent's `[exec_policy]` limits commands.
+- 🟨 **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
+  approval on every `shell_exec` (verified live), no shell metacharacters,
+  `[exec_policy]` allowlist = `podman` only, five tools, no agent spawning.
+  Prompt-only (not enforced) — FreecoDAO images only, `freeco-*` containers
+  only, backup/rollback, 127.0.0.1 binding, never touching `freeco-daemon`.
+  `podman` with any arguments is still powerful (`run --privileged`, host
+  mounts); next: read-only podman without a click, mutating podman with one,
+  and an image/argument allowlist checked by the kernel.
+- ⬜ **OmniRoute from the FreecoDAO fork.** `FreecoDAO/OmniRoute` is on
+  `release/v3.8.50` (upstream v3.8.54) and its docker-publish run failed
+  (2026-08-27); the container still runs `docker.io/diegosouzapw/omniroute`.
+- ⬜ CEO worker 2 (`claude-opus-5-5@medium`) reaches Claude via an OmniRoute
+  alias with no fallback: `@` is not allowed in combo names.
+- ⬜ OmniRoute's dashboard has no login password; loopback binding is the only
+  thing closing it.
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase

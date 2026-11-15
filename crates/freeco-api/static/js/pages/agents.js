@@ -339,6 +339,14 @@ function agentsPage() {
       if (p && p.api_key_env) this.configForm.api_key_env = p.api_key_env;
     },
 
+    // One option per (provider, model). The same id is served by more than one
+    // provider -- nvidia and the omniroute gateway both list "nvidia/..." --
+    // and keying the x-for on the id alone repeated keys, which makes Alpine
+    // render no options at all: the fallback picker came up empty.
+    workingModelKey(m) {
+      return (m.provider || '') + '::' + m.id;
+    },
+
     // Label a model the way a person picks one: who serves it, then its name.
     workingModelLabel(m) {
       var name = m.display_name && m.display_name !== m.id ? m.display_name : m.id;
@@ -1013,8 +1021,11 @@ function agentsPage() {
       // answers to it. Splitting a typed "provider/model" on the slash could
       // not tell a provider prefix from an id that genuinely begins with the
       // vendor's name, and NVIDIA's all do.
-      var id = String(this.newFallbackValue).trim();
-      var picked = (this.workingModels || []).filter(function (m) { return m.id === id; })[0];
+      // The option value is "provider::id", so a model two providers serve
+      // keeps the provider that was actually picked.
+      var key = String(this.newFallbackValue).trim();
+      var self = this;
+      var picked = (this.workingModels || []).filter(function (m) { return self.workingModelKey(m) === key; })[0];
       if (!picked) {
         FreecoToast.error('Pick a model from the list — it must be one a configured key can call.');
         return;

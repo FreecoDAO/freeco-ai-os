@@ -33,6 +33,13 @@ pub struct ModelCatalog {
     /// and every model it lists stays offered — hiding a model that works is
     /// worse than showing one that might not.
     served: HashMap<String, std::collections::HashSet<String>>,
+    /// Last probe answer for each keyless (local or gateway) provider:
+    /// `true` if it answered, `false` if it did not. Absent = never probed.
+    ///
+    /// "No key needed" is not "ready". Ollama, vLLM and LM Studio were offered
+    /// in every model picker with nothing listening on their ports, so a
+    /// fallback chosen from the list pointed at a server that was not there.
+    local_reachable: HashMap<String, bool>,
 }
 
 impl ModelCatalog {
@@ -60,6 +67,7 @@ impl ModelCatalog {
             aliases,
             providers,
             served: HashMap::new(),
+            local_reachable: HashMap::new(),
         }
     }
 
@@ -526,6 +534,54 @@ impl ModelCatalog {
             return;
         }
         self.served.insert(provider.to_lowercase(), set);
+    }
+
+    /// Record one probe of a keyless provider: whether it answered, and the
+    /// models it listed.
+    ///
+    /// The listed models become the provider's served set, not only additions
+    /// to the catalog. Merging alone never removes anything, so a model the
+    /// server stopped offering -- or a gateway route with no provider behind
+    /// it -- stayed in every picker for good.
+    pub fn record_local_probe(&mut self, provider: &str, reachable: bool, discovered: &[String]) {
+        self.local_reachable
+            .insert(provider.to_lowercase(), reachable);
+        if reachable && !discovered.is_empty() {
+            self.merge_discovered_models(provider, discovered);
+            // Only a keyless provider's listing is the whole truth. A keyed
+            // provider probed without its key can list less than the key gets,
+            // and its entitlement is recorded by the authenticated probe.
+            let keyless = self
+                .get_provider(provider)
+                .map(|p| !p.key_required)
+                .unwrap_or(false);
+            if keyless {
+                self.set_served(provider, discovered.iter().cloned());
+            }
+        }
+    }
+
+    /// Whether a model can be used right now: its provider has a key, or is a
+    /// keyless server that answered its last probe, and the provider lists it.
+    ///
+    /// This is what a model picker should offer. A keyless provider that has
+    /// never been probed is not ready: nothing has shown it is running.
+    pub fn is_ready(&self, m: &ModelCatalogEntry) -> bool {
+        let provider = match self.get_provider(&m.provider) {
+            Some(p) => p,
+            // Models added by hand under a provider we do not know.
+            None => return m.tier == ModelTier::Custom,
+        };
+        match provider.auth_status {
+            AuthStatus::Missing => return false,
+            AuthStatus::NotRequired
+                if self.local_reachable.get(&m.provider.to_lowercase()) != Some(&true) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        self.is_served(&m.provider, &m.id) != Some(false)
     }
 
     /// Whether `model_id` is known to be served by `provider` for this key.
@@ -5391,5 +5447,44 @@ mod tests {
         let mut c = ModelCatalog::new();
         c.set_served("openai", Vec::<String>::new());
         assert_eq!(c.is_served("openai", "gpt-5.6-luna"), None);
+    }
+
+    fn model<'a>(c: &'a ModelCatalog, provider: &str, id: &str) -> &'a ModelCatalogEntry {
+        c.list_models()
+            .iter()
+            .find(|m| m.provider == provider && m.id == id)
+            .unwrap_or_else(|| panic!("{provider}/{id} not in catalog"))
+    }
+
+    /// A keyless server that is not running is not offered: "no key needed"
+    /// had put LM Studio and vLLM in every picker with nothing listening.
+    #[test]
+    fn keyless_provider_is_ready_only_after_it_answers() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        assert!(!c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "never probed");
+        c.record_local_probe("lmstudio", false, &[]);
+        assert!(!c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "offline");
+        c.record_local_probe("lmstudio", true, &["lmstudio-local".to_string()]);
+        assert!(c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "online and listed");
+    }
+
+    /// An answering keyless server offers what it listed and nothing else:
+    /// a gateway route with no provider behind it must drop out.
+    #[test]
+    fn keyless_provider_offers_only_what_it_listed() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        c.record_local_probe("vllm", true, &["served-model".to_string()]);
+        assert!(c.is_ready(model(&c, "vllm", "served-model")));
+        assert!(!c.is_ready(model(&c, "vllm", "vllm-local")), "builtin, not listed");
+    }
+
+    /// A probe without the key never narrows a keyed provider's models.
+    #[test]
+    fn unauthenticated_probe_does_not_narrow_keyed_provider() {
+        let mut c = ModelCatalog::new();
+        c.record_local_probe("openai", true, &["gpt-4o".to_string()]);
+        assert_eq!(c.is_served("openai", "gpt-4.1"), None);
     }
 }

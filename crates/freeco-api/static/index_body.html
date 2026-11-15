@@ -1494,8 +1494,12 @@
                                  when the primary is already down. -->
                             <select class="form-input" style="width:320px;font-size:12px" x-model="newFallbackValue" @focus="loadWorkingModels()">
                               <option value="">Choose a working model…</option>
-                              <template x-for="m in workingModels" :key="m.id">
-                                <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                              <!-- Keyed and valued by provider AND id: the same id
+                                   is served by more than one provider (nvidia and
+                                   omniroute both list nvidia/...), and a repeated
+                                   x-for key made Alpine render no options at all. -->
+                              <template x-for="m in workingModels" :key="workingModelKey(m)">
+                                <option :value="workingModelKey(m)" x-text="workingModelLabel(m)"></option>
                               </template>
                             </select>
                             <button class="btn btn-primary btn-sm" @click="addFallback()" style="padding:2px 10px;font-size:11px" :disabled="!newFallbackValue">Add</button>
@@ -1555,7 +1559,7 @@
                     <div class="form-group">
                       <label>Model</label>
                       <select class="form-input" x-model="configForm.model" @change="onConfigModelChange()">
-                        <template x-for="m in workingModelOptions(configForm.model)" :key="m.id">
+                        <template x-for="m in workingModelOptions(configForm.model)" :key="workingModelKey(m)">
                           <option :value="m.id" x-text="workingModelLabel(m)"></option>
                         </template>
                       </select>
@@ -1808,7 +1812,7 @@
                            broken rather than the name being a guess. -->
                       <select class="form-input" x-model="spawnForm.model" @focus="loadWorkingModels()">
                         <option value="">Default model</option>
-                        <template x-for="m in workingModelOptions(spawnForm.model)" :key="m.id">
+                        <template x-for="m in workingModelOptions(spawnForm.model)" :key="workingModelKey(m)">
                           <option :value="m.id" x-text="workingModelLabel(m)"></option>
                         </template>
                       </select>
