@@ -784,12 +784,13 @@ on Windows and takes every call that probes it down with it.
   and no dashboard tab. Nothing about this is reachable by a user. Building the
   schema first was reasonable; reporting it as a delivered feature was not.
 
-- ⚠️ **Three crates nothing links.** `freeco-learning` (569 lines, a replay /
-  scoring / promotion self-improvement loop), `freeco-runtime` (263) and
-  `freeco-budget-engine` (428, with tiers, a ledger and an enforcer) have no
-  dependents and are not binaries. They compile on every build and are reachable
-  from nothing. `agent-core/src/learning.rs` documents the self-improvement loop
-  in a comment, which reads as shipped. Decide per crate: adopt or remove.
+- ✅ **Four crates nothing linked, removed (Nov 2026).** `freeco-learning` (a
+  replay / scoring / promotion self-improvement loop), `freeco-runtime` (a
+  re-export wrapper), `freeco-budget-engine` (tiers from an old plan: Free,
+  Concierge, Business at CHF 22) and `freeco-input-parser` (listed by the
+  Shopping agent, never imported) had no callers. They are in git history if
+  wanted. Plan budgets belong in `freeco-kernel/src/metering.rs`, which is the
+  budget the daemon enforces.
 - ⚠️ **A complete OAuth PKCE flow, wired to nothing.**
   `freeco-extensions/src/oauth.rs:128` — `run_pkce_flow()` with zeroizing token
   accessors beside it. The only OAuth actually reachable is Copilot's device

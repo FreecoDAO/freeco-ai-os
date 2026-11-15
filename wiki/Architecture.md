@@ -1,6 +1,6 @@
 # Architecture
 
-FreEco.ai is a Cargo workspace containing 23 Rust crates plus `xtask`. The
+FreEco.ai is a Cargo workspace containing 19 Rust crates plus `xtask`. The
 `freeco-*` crates provide the Agent OS foundation; `freeco-*` crates provide
 FreEco-specific agents, runtime services, budget handling, and tool gateways.
 
