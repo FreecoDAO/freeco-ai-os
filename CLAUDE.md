@@ -148,7 +148,7 @@ Before concluding any part of the release pipeline is broken, read
 past releases were actually triggered:
 
 ```bash
-curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai/actions/workflows/release.yml/runs?per_page=5"
+curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai-os/actions/workflows/release.yml/runs?per_page=5"
 ```
 
 `auto-tag.yml` is a self-healing fallback, not the path. A green Auto Tag means
