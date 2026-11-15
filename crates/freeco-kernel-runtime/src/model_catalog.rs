@@ -5462,11 +5462,20 @@ mod tests {
     fn keyless_provider_is_ready_only_after_it_answers() {
         let mut c = ModelCatalog::new();
         c.detect_auth();
-        assert!(!c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "never probed");
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "never probed"
+        );
         c.record_local_probe("lmstudio", false, &[]);
-        assert!(!c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "offline");
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "offline"
+        );
         c.record_local_probe("lmstudio", true, &["lmstudio-local".to_string()]);
-        assert!(c.is_ready(model(&c, "lmstudio", "lmstudio-local")), "online and listed");
+        assert!(
+            c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "online and listed"
+        );
     }
 
     /// An answering keyless server offers what it listed and nothing else:
@@ -5477,7 +5486,10 @@ mod tests {
         c.detect_auth();
         c.record_local_probe("vllm", true, &["served-model".to_string()]);
         assert!(c.is_ready(model(&c, "vllm", "served-model")));
-        assert!(!c.is_ready(model(&c, "vllm", "vllm-local")), "builtin, not listed");
+        assert!(
+            !c.is_ready(model(&c, "vllm", "vllm-local")),
+            "builtin, not listed"
+        );
     }
 
     /// A probe without the key never narrows a keyed provider's models.

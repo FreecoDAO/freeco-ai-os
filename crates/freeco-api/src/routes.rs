@@ -7792,10 +7792,9 @@ pub async fn get_model(
         .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
         Some(m) => {
-            let available = catalog
-                .get_provider(&m.provider)
-                .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
+            // The same rule as the model list, so a model is not "available"
+            // here while /api/models?available=true leaves it out.
+            let available = catalog.is_ready(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
