@@ -33,7 +33,8 @@ Everything in this document follows from four rules:
    stored-password login or a change to a node.
 4. **Each kind of recovery has its own path.** Recovering the account does not
    recover the node's keys, and neither one recovers the user's encrypted
-   data. Only the user's Recovery Kit does that.
+   data. For a node the user runs, only the user's Recovery Kit does that. A
+   hosted cell is different, and section 11 says how.
 
 This gives Fre.Eco a privacy story Instinct cannot match: Instinct keeps your
 credentials on a cloud computer it controls, while a Fre.Eco node keeps them
@@ -112,8 +113,8 @@ The cloud uses separate keys so that one leak does not give everything:
 
 | Key | Signs | Rotation |
 |---|---|---|
-| Registry token key | Node access tokens and node certificates | 90 days, 14-day overlap |
-| Request key | Every cloud-to-node request envelope | 90 days, 14-day overlap |
+| Registry token key | Node access tokens and node certificates | Every 90 days. The retired key signs nothing new but stays in the trust document as verify-only for 31 days, longer than the longest certificate it signed (30 days) plus clock skew |
+| Request key | Every cloud-to-node request envelope and approval decision | Every 90 days, verify-only for 1 day after (envelopes live 60 s) |
 | Zitadel keys | Human ID and access tokens | Managed by Zitadel |
 | **Root key** (offline, two hardware tokens held by two people in separate places) | Only the trust document listing the keys above | Rare; used for emergency rotation |
 
@@ -122,14 +123,30 @@ Nodes pin the root public key in the binary and fetch
 is signed by the root key, so a stolen online key can be replaced without
 shipping a new app, and a forged trust document is rejected.
 
+A valid signature proves the document is genuine, not that it is current, so
+nodes also check freshness:
+
+- Every document has a `serial` that only goes up. The node stores the
+  highest serial it has accepted and refuses any document with a lower one,
+  so a relay or edge cannot replay an older document that still lists a
+  leaked key.
+- Every `kid` the node has ever seen in `revoked_kids` stays revoked locally,
+  whatever a later document says.
+- A document is valid until its `expires_at`, 7 days after issue. If the node
+  cannot fetch a newer one by then, it keeps working locally but refuses
+  cloud requests until it can (section 10).
+
 ```json
 {
   "v": 1,
+  "serial": 42,
   "issued_at": "2026-11-15T00:00:00Z",
   "next_update": "2026-11-16T00:00:00Z",
+  "expires_at": "2026-11-22T00:00:00Z",
   "keys": [
-    { "kid": "reg-2026-11", "use": "node-token", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
-    { "kid": "req-2026-11", "use": "node-request", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" }
+    { "kid": "reg-2026-11", "use": "node-token", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+    { "kid": "reg-2026-08", "use": "node-token", "status": "verify_only", "verify_until": "2026-12-16T00:00:00Z", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+    { "kid": "req-2026-11", "use": "node-request", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" }
   ],
   "revoked_kids": [],
   "sig": "<JWS by the root key over the canonical JSON above>"
@@ -146,7 +163,7 @@ shipping a new app, and a forged trust document is rejected.
 |---|---|---|
 | Account | `usr_<ULID>` | Maps to the Zitadel subject; never a display name (`tenancy.rs` explains why) |
 | Workspace | `ws_<ULID>` | The existing tenant id. One person can have several (personal, business) |
-| Node | `nod_<26 chars>` | Lower-case base32 of the SHA-256 JWK thumbprint (RFC 7638) of the node's public key. Derived from the key, so it cannot be claimed by another device |
+| Node | `nod_<26 chars>` | The first 26 characters (130 bits) of the lower-case, unpadded base32 encoding of the 32-byte SHA-256 JWK thumbprint (RFC 7638) of the node's public key; the full encoding is 52 characters, and this short form is deliberately truncated. The registry also stores the full thumbprint as `jkt` (base64url, 43 characters), refuses a registration whose short id already exists, and compares the full `jkt` in every security check. Derived from the key, so it cannot be claimed by another device |
 | Channel link | `chl_<ULID>` | One per verified WhatsApp number, Telegram id or email address |
 | Pairing | `pair_<ULID>` | Lives at most 10 minutes |
 | Request | `req_<ULID>` | Unique per cloud-to-node request; replay-checked |
@@ -161,18 +178,22 @@ list rather than BIP-39, so nobody mistakes it for a wallet seed.
 
 | Key | Type | Where | Purpose |
 |---|---|---|---|
-| **Node identity key** | P-256 (ES256) when hardware-backed; Ed25519 (EdDSA) in software | Windows TPM through CNG, macOS and iOS Secure Enclave, Android StrongBox or Keystore; otherwise the OS keyring, like the vault key | Signs DPoP proofs, token assertions and responses. Never exported |
+| **Node identity key** | P-256 (ES256) when hardware-backed; Ed25519 (EdDSA) in software | Windows TPM through CNG, macOS and iOS Secure Enclave, Android StrongBox or Keystore; otherwise the OS keyring, like the vault key | Signs DPoP proofs, the registration payload, token assertions and every frame the node sends. Never exported |
 | **Node encryption key** | X25519 | Wrapped by the vault master key | Receives sealed messages and queued jobs (HPKE, RFC 9180) |
 | Vault master key | AES-256 | OS keyring (exists today) | Protects local secrets |
 | Data keys | AES-256-GCM | Wrapped by the vault key | Encrypt databases and backup snapshots |
 | **Backup key** | AES-256 | Wrapped twice: by the vault key, and by the Recovery Key | Lets a backup be restored on a new machine |
 | **Recovery Key** | 160 bits, printed as 8 groups of 4 characters (Crockford base32) and a QR code | On paper only, generated on the node | The only way to read backups without the old node |
 
-The registry records how the identity key is protected
-(`hardware`, `os_keystore` or `software`). The device page shows it, and a
-policy can require hardware keys for Business plans. Hardware keys are P-256
-because the Secure Enclave offers only P-256, and TPM 2.0 chips rarely offer
-Ed25519.
+The registry records how the node **says** its identity key is protected
+(`hardware`, `os_keystore` or `software`). Possession of a P-256 key proves
+nothing about where it is stored, so until the registry verifies hardware
+attestation (TPM key attestation, Apple App Attest, Android Key Attestation;
+Phase F), this value is advisory: the device page shows it as "reported by
+the device", and no policy or plan may depend on it. Once attestation is
+verified, the registry records `key_protection_verified = true`, and only
+then can a policy require hardware keys. Hardware keys are P-256 because the
+Secure Enclave offers only P-256, and TPM 2.0 chips rarely offer Ed25519.
 
 Podman nodes, such as the daemon on X2, usually have no TPM inside the
 container. They use a software key stored in a mounted secrets volume,
@@ -296,6 +317,15 @@ POST /v1/node-pairing/start
 DPoP: eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Li4ufX0.…
 
 {
+  "registration": "<compact JWS, header {typ: freeco-node-reg+jwt, alg, jwk: node_key}, signed by the node key>"
+}
+```
+
+The registration JWS payload carries everything the registry will record, so
+nothing in it can be swapped on the way:
+
+```json
+{
   "node_key": { "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
   "enc_key":  { "kty": "OKP", "crv": "X25519", "x": "…" },
   "node_info": {
@@ -305,11 +335,19 @@ DPoP: eyJ0eXAiOiJkcG9wK2p3dCIsImFsZyI6IkVTMjU2IiwiandrIjp7Li4ufX0.…
     "os_version": "11 24H2",
     "app_version": "0.9.9",
     "key_protection": "hardware"
-  }
+  },
+  "aud": "https://api.freeco.ai/v1/node-pairing/start",
+  "iat": 1763235602,
+  "jti": "b1f0…"
 }
 ```
 
-The server checks that the DPoP proof's `jwk` is `node_key`, then answers:
+A DPoP proof binds only the method, the URL and the token, not the body. The
+server therefore checks three things before it registers any key: the JWS
+signature verifies with the `jwk` in its header; that `jwk` equals
+`node_key` in the payload and the DPoP proof's `jwk`; and `aud`, `iat` (±60 s)
+and `jti` (single use) are valid. An edge that terminates TLS can then
+neither replace `enc_key` nor rename the node. Then the server answers:
 
 ```json
 {
@@ -371,19 +409,38 @@ DPoP: <proof, htm=POST, htu=https://api.freeco.ai/v1/node-pairing/token>
 **B. The cloud shows a QR code** (desktop app and phone app). The web app
 calls `POST /v1/pairing/offers` and shows a QR code for
 `freeco://pair?c=7Q4M-2KXH&h=api.freeco.ai`, valid 5 minutes. The node scans
-or pastes it and calls `POST /v1/node-pairing/claim` with the same body as
-`start` plus `"offer_code"`. The web page then shows the node's details and
+or pastes it and calls `POST /v1/node-pairing/claim` with the same signed
+`registration`, whose payload also carries `"offer_code"` and the `claim`
+URL as `aud`. The web page then shows the node's details and
 fingerprint words for the user to confirm, exactly as in A, and the node polls
 the same token endpoint.
 
+**The node confirms which account it joined.** A code shown on the node's
+screen could be read by someone else, who could approve it into *their*
+account with their own passkey. So a successful token response does not
+activate anything. The response also carries `"account_display": "f***@proton.me"`
+and `"workspace_name": "Personal"`, and the node keeps the pairing in a
+`pending_local` state, connects to nothing and grants nothing, until its own
+owner confirms on the node: "This computer is joining **f***@proton.me**,
+workspace **Personal**. Is that your account?" For a headless Podman node
+the same question appears in its local dashboard, behind the owner's login,
+and in `POST /api/node/cloud/pair/confirm` on the local API. The node then
+sends a signed `POST /v1/node-pairing/confirm` (DPoP plus the node's
+assertion), and only then does the registry mark the node `active`. If the
+owner answers no, the node calls `DELETE /v1/nodes/self` and the attacker's
+account is left with a revoked entry.
+
 **What pairing can and cannot grant.** The grants in the token response are a
-proposal. A node accepts the default safe set (`node.status:read`,
-`node.chat:relay`, `node.agents:read`, `node.approvals:relay`) on its own.
-Anything wider waits until someone confirms it on the node itself. Pairing
-alone can therefore never give the cloud access to files, memory or tools.
+proposal. Once the owner has confirmed the account, a node accepts the
+default safe set (`node.status:read`, `node.chat:relay`, `node.agents:read`,
+`node.approvals:relay`) on its own. Anything wider waits until someone
+confirms it on the node itself. Pairing alone can therefore never give the
+cloud access to files, memory or tools, and those defaults themselves are
+limited by the request context rules in section 6.7.
 
 **What the registry stores:** account, workspace, node id, both public keys,
-`node_info`, kind, key protection, status (`pending`, `active`, `revoked`),
+`node_info`, kind, reported key protection, status (`pending`, `pending_local`,
+`active`, `revoked`),
 created and last-seen times, coarse last location (country and city, kept 30
 days), the cloud's view of the grants, the grants hash the node last reported,
 and `rev_epoch`. It never receives a private key.
@@ -516,17 +573,51 @@ the `chl_…` link id), `schedule` or `cloud_agent`. The node checks, in order:
 1. The signature, against the request key in the trust document.
 2. `aud` is this node, `exp` has not passed (±5 minutes of clock skew), and
    `id` has not been seen in the last 10 minutes.
-3. `scope` is in the node's **local** grants.
-4. Its local policy for `op` and `risk`: allow, ask for approval, or deny.
+3. `scope` is in the node's **local** grants, and `op` is one that this scope
+   covers.
+4. Its local policy for `op`: allow, ask for approval, or deny.
    `origin.assurance` counts here (section 8.2).
 
-Then it answers on the same socket:
+**The grants travel with the request.** Passing the outer check only starts
+the work. The node attaches a request context to the run: the origin, its
+assurance, and the effective grants (cloud grant ∩ node grant ∩ plan). That
+context follows the run through the agent loop, every tool call, memory
+access and `agent_delegate` or `agent_send` hand-off, and each of those is
+checked against agent capabilities ∩ node policy ∩ the request context. So a
+chat relayed with only the default grants can make the Concierge answer,
+research through cloud scopes, and work in its own agent workspace and the
+user's own conversation, but it cannot read files outside the workspace, use
+memory beyond that conversation, open the local browser or run anything the
+grants do not name, whatever the message asks for. The check lives where tool
+calls are already gated (`freeco-kernel-runtime/src/tool_runner.rs`) and
+next to the existing capability checks.
+
+**The node decides the risk.** The envelope's `risk` is a hint for display.
+The node classifies every operation and tool call itself (section 8.2) and
+uses the higher of its own class and the hint, so a request labelled `low`
+cannot carry a payment.
+
+Then it answers on the same socket. Every frame the node sends is a compact
+JWS signed by the node key, so the relay can forward but not change it:
 
 ```json
-{ "t": "res",    "id": "req_01JD8M…", "status": "accepted" }
-{ "t": "stream", "id": "req_01JD8M…", "seq": 1, "delta": "I found three places near the lake…" }
-{ "t": "res",    "id": "req_01JD8M…", "status": "done", "result": { "conversation": "c_7b…" } }
+{ "t": "res", "jws": "eyJ0eXAiOiJmcmVlY28tbm9kZS1mcmFtZStqd3QiLCJhbGciOiJFUzI1NiJ9.…" }
 ```
+
+Each payload binds the frame type, the relay session, the request id and a
+sequence number that counts up from 1 per request. The control plane, not
+the relay, verifies the signature against the node's registered key and
+refuses gaps, repeats or a frame from another session before it consumes or
+shows anything. Decoded, a reply looks like this:
+
+```json
+{ "t": "res",    "session": "rs_01JD…", "id": "req_01JD8M…", "seq": 1, "status": "accepted" }
+{ "t": "stream", "session": "rs_01JD…", "id": "req_01JD8M…", "seq": 2, "delta": "I found three places near the lake…" }
+{ "t": "res",    "session": "rs_01JD…", "id": "req_01JD8M…", "seq": 3, "status": "done", "result": { "conversation": "c_7b…" } }
+```
+
+The same applies to `event` and `approval_request` frames, which carry their
+own id and sequence.
 
 `status` is `accepted`, `done`, `needs_approval` (with an `approval_id`),
 `denied` (with a reason: `not_granted`, `policy`, `assurance_too_low`,
@@ -548,15 +639,38 @@ When a request needs approval, the node sends:
 ```
 
 The cloud delivers it to the user's phone app, web app or channel, according
-to the user's settings, and returns the decision:
+to the user's settings, and returns the decision. The decision is signed by
+the control plane with the request key, exactly like a request envelope, so
+the relay, which does not hold that key, cannot fabricate or alter one:
 
 ```json
-{ "t": "approval_decision", "approval_id": "a6f1…", "decision": "approve",
-  "proof": { "type": "passkey_fresh", "assurance": "a3", "auth_time": "2026-11-15T19:41:10Z" } }
+{ "t": "approval_decision", "jws": "eyJhbGciOiJFUzI1NiIsImtpZCI6InJlcS0yMDI2LTExIiwidHlwIjoiZnJlZWNvLWFwcHJvdmFsK2p3dCJ9.…" }
 ```
 
-Until Phase F, the proof is the cloud vouching for a fresh passkey sign-in.
-Phase F adds **end-to-end signed approvals**: the phone app's hardware key (or
+Decoded payload:
+
+```json
+{
+  "iss": "https://api.freeco.ai",
+  "aud": "nod_k3f9q2…",
+  "approval_id": "a6f1…",
+  "req": "req_01JD8M…",
+  "challenge": "<the challenge from the approval request>",
+  "decision": "approve",
+  "approver": { "account": "usr_01H…", "assurance": "a3", "auth_time": "2026-11-15T19:41:10Z" },
+  "iat": 1763236870,
+  "exp": 1763236930,
+  "jti": "d7c2…"
+}
+```
+
+The node verifies the signature, that `aud`, `approval_id`, `req` and
+`challenge` match a request it is still waiting on, that the approver is the
+account the node belongs to with enough assurance for the risk, and that
+`exp` has not passed, and it consumes the decision exactly once.
+
+Until Phase F, this means the control plane vouches for a fresh passkey
+sign-in. Phase F adds **end-to-end signed approvals**: the phone app's hardware key (or
 a passkey registered by the web app) signs the `challenge`, and the node
 checks that signature against an approver list it keeps itself. After that,
 not even a compromised cloud can approve a payment on the user's behalf.
@@ -568,13 +682,16 @@ GET  /v1/devices/{node_id}/grants
 PUT  /v1/devices/{node_id}/grants      { "add": ["node.files:read:~/Documents/FreEco/**"], "remove": [] }
 ```
 
-- **Narrowing** applies at once in the cloud, and is pushed to the node,
-  which applies it at once too.
-- **Widening** is pushed as a proposal:
-  `{ "t": "grants_update", "proposal": "gp_01…", "add": [ … ], "remove": [], "by": "usr_01H…", "proof": { … } }`.
-  The node applies it only if it carries an approver signature it trusts
-  (Phase F) or someone confirms it on the node's own dashboard. Before Phase
-  F, widening always needs that local confirmation.
+- **Narrowing** (removing a grant) is safe in every direction, so it is the
+  one grant change the cloud may make effective on its own: it applies at once
+  in the cloud, and the node applies it at once when it arrives in a signed
+  `{ "t": "grants_update", "remove": [ … ] }`.
+- **Widening** (adding a grant) is only ever a *proposal* from the cloud:
+  `{ "t": "grants_update", "proposal": "gp_01…", "add": [ … ], "by": "usr_01H…" }`.
+  It is a Critical operation (section 8.2), so it becomes effective only when
+  someone confirms it on the node's own dashboard. That holds in Phase F too:
+  approver signatures reach High, not Critical. Until then the proposal shows
+  as waiting on the device page.
 - The effective permission for any request is **cloud grant ∩ node grant ∩
   plan entitlement**. A compromised cloud that widens its own grants gains
   nothing the node did not agree to.
@@ -626,7 +743,9 @@ Header `{ "typ": "freeco-node-cert+jwt", "alg": "ES256", "kid": "reg-2026-11" }`
 ```
 
 `kind` is `personal_node` (runs agents), `client` (phone or desktop app with
-no agents) or `hosted_node` (a cell FreEco runs). The node renews it with
+no agents) or `hosted_node` (a cell FreEco runs). On receipt, the node checks
+that `cnf.jwk` and `enc` are its own keys and refuses a certificate that names
+anything else. The node renews it with
 `POST /v1/nodes/self/certificate` (DPoP plus assertion) from day 15.
 
 ### 7.3 Relay frames
@@ -635,11 +754,12 @@ no agents) or `hosted_node` (a cell FreEco runs). The node renews it with
 |---|---|---|
 | `hello`, `hello_ack` | both | Bind the socket to the node key (6.6) |
 | `token` | node → relay | In-band access token refresh |
-| `req` | relay → node | Signed request envelope (6.7) |
-| `res`, `stream` | node → relay | Outcome and streamed output |
-| `event` | node → relay | Unprompted output: a finished schedule, a proactive message |
-| `approval_request`, `approval_decision` | both | Section 6.8 |
-| `grants_update` | relay → node | Section 6.9 |
+| `req` | relay → node | Request envelope signed with the request key (6.7) |
+| `res`, `stream` | node → relay | Outcome and streamed output, node-signed with session, id and sequence (6.7) |
+| `event` | node → relay | Unprompted output (a finished schedule, a proactive message), node-signed |
+| `approval_request` | node → relay | Node-signed (6.8) |
+| `approval_decision` | relay → node | Signed with the request key and consumed once (6.8) |
+| `grants_update` | relay → node | Signed with the request key; removals apply, additions are proposals (6.9) |
 | `trust_update` | relay → node | Fetch the trust document now |
 | `revoked` | relay → node | Sent just before close code `4403` |
 | `sealed` | relay → node | A queued message, HPKE-sealed to the node's encryption key (section 10) |
@@ -651,8 +771,8 @@ no agents) or `hosted_node` (a cell FreEco runs). The node renews it with
   "id": "chl_01H…",
   "account_id": "usr_01H…",
   "channel": "whatsapp",
-  "provider_user_id": "41791234567",
-  "address": "+41791234567",
+  "provider_user_id": "enc:v1:Qm9…",
+  "address": "enc:v1:x7T…",
   "lookup_hash": "hmac-sha256:9c0e…",
   "verified_by": "reverse_code",
   "assurance": "a1",
@@ -661,8 +781,11 @@ no agents) or `hosted_node` (a cell FreEco runs). The node renews it with
 }
 ```
 
-`address` is encrypted at rest. Lookups use `lookup_hash`, a keyed hash, so a
-database dump does not list phone numbers in the clear. `route` is `node`,
+Both `provider_user_id` (for WhatsApp, today the number's digits) and
+`address` are encrypted at rest; the example shows them as stored. Inbound
+messages are matched by `lookup_hash`, a keyed hash (HMAC with a key kept
+outside the database) of the channel name and the normalised
+`provider_user_id`, so a database dump lists no phone numbers. `route` is `node`,
 `cloud` or `auto`. Keep `provider_user_id` separate from the phone number,
 because Meta has announced WhatsApp usernames, and the number may not always
 be delivered; check the Cloud API documentation when Phase D starts.
@@ -704,7 +827,7 @@ Risk classes, so agents and the policy speak the same language:
 | Low | Answering, research, reading the user's own conversation |
 | Medium | Sending a message to a known contact, a calendar entry, a schedule, a booking without payment |
 | High | Anything that spends money, uses a stored credential, shares personal data with a new party, or writes files outside the agent workspace |
-| Critical | Changing grants, the approver list or node policy; exporting all data; deleting data |
+| Critical | Widening grants, changing the approver list or node policy; exporting all data; deleting data. Narrowing a grant is not Critical: it only takes access away, and the cloud may do it (section 6.9) |
 
 ---
 
@@ -759,8 +882,9 @@ That matches rule 4 of the production plan's section 4.
 | `node.backup:export` | off | Push encrypted snapshots; offered once a Recovery Kit exists |
 
 **Never grantable remotely:** reading vault secrets, `shell_exec`, changing the
-approver list, changing node policy or grants, and turning off approvals.
-These exist only on the node's own dashboard.
+approver list, changing node policy, widening grants, and turning off
+approvals. These exist only on the node's own dashboard. Narrowing grants is
+the one change the cloud can make on its own (section 6.9).
 
 **Presets** keep the choice simple on the device page: "Concierge only" (the
 four defaults), "Assistant with documents" (adds reading one documents folder)
@@ -798,6 +922,10 @@ use).
 8. **Clocks.** Tokens and envelopes depend on time. The `hello` frame carries
    server time; a node more than 5 minutes off warns in its dashboard and
    uses the server offset for its own proofs.
+9. **A stale trust document stops cloud requests, not the node.** If the node
+   has not fetched a trust document newer than its stored one before that
+   document's `expires_at` (section 3.1), it refuses cloud requests and says
+   why in its dashboard, and keeps every local feature running.
 
 ---
 
@@ -808,7 +936,7 @@ use).
 | Who runs the node | FreEco.ai (a hosted cell, labelled "Hosted by FreEco.ai in Geneva") | The user (home computer, laptop, Podman server), optionally plus a hosted cell | The user |
 | Registry | FreEco.ai | FreEco.ai | The node itself (section 6.4), or the organisation's own `freeco-cloud` |
 | Human login | Zitadel | Zitadel | Local password or passkey; an organisation's own OIDC provider |
-| Who can read the data | FreEco.ai's operations can, technically: the cell vault key is wrapped by the control plane master key (production plan, section 1B). Say so on the device page | Data on the home node: only the user. Data in a hosted cell: as in cloud only | Only the user |
+| Who can read the data | FreEco.ai's operations can, technically: the cell vault key is wrapped by the control plane master key (production plan, section 1B), and the cell's backup key is wrapped by that vault key, so FreEco can also restore a hosted cell's backups without the Recovery Kit. That is also what lets FreEco restore a cell after a server failure. Say so on the device page | Data on the home node: only the user. Data in a hosted cell: as in cloud only | Only the user |
 | Channels | FreEco's shared numbers | Shared numbers routed to the node, or the node's own | The node's own |
 
 The protocol is the same in every column. Moving from cloud only to hybrid is
@@ -838,15 +966,20 @@ The protocol is the same in every column. Moving from cloud only to hybrid is
   encrypts its data to the new node's encryption key, after approval on the
   old node.
 
-**Data recovery** (the old device is gone):
+**Data recovery** (the old device is gone). These guarantees are for nodes
+the user runs; hosted cells follow section 11.
 
-- Backups uploaded to the cloud are ciphertext only. The backup key is
-  wrapped by the vault key and by the Recovery Key, and the cloud stores only
-  those wrapped copies.
+- Backups a personal node uploads to the cloud are ciphertext only. The
+  backup key is wrapped by the node's vault key and by the Recovery Key, and
+  the cloud stores only those wrapped copies.
 - With the Recovery Kit and a newly paired node, the user restores
   everything. Without both the old node and the Recovery Kit, the data cannot
   be recovered, by anyone. The app says this in plain words when it shows the
   kit: "FreEco.ai cannot reset this. That is what keeps it yours."
+- A hosted cell's backups can be restored by FreEco.ai, because the control
+  plane can unwrap the cell's keys. A later option for users who want a hosted
+  cell without that: wrap the cell's backup key to the Recovery Key only, at
+  the cost that FreEco can no longer restore the cell for them.
 - Later (Phase F), a 2-of-3 split of the Recovery Key between the paper kit, a
   trusted person and a safe place suits executive users who want no single
   point of loss.
@@ -866,8 +999,8 @@ is Phase 0.3 of the production plan.
 | Phase | What | Where in the code | Done when | Size |
 |---|---|---|---|---|
 | **A. Node identity on the node** | Node key on first boot (hardware where available); `GET /api/node/identity` (id, fingerprint words, key protection); key-based local pairing (6.4) with device certificates; DPoP accepted by the API middleware; audit actions; new columns on `paired_devices` through a migration | New `freeco-kernel/src/node_identity.rs`; `pairing.rs`; `routes.rs` pairing handlers; `middleware.rs`; `freeco-memory/src/migration.rs`; `freeco-desktop` pairing screen | A phone pairs with X2's node over the LAN, its signed request works, and after removal the same request is refused (curl test). `cargo test` and clippy green | 1 to 2 weeks |
-| **B. Accounts and the node registry** | New `freeco-cloud` crate (axum): OIDC with Zitadel through a backend-for-frontend, passkeys, accounts and workspaces, terms records; registry tables; pairing start, lookup, approve and token; node token endpoint; trust document with the offline root key; device page with list, rename and revoke; role checks on every API route (Owner, Admin, User, Kid, Viewer from `tenancy.rs`), in the cloud and in the node's API | New `crates/freeco-cloud`; the desktop app's sign-in reuses the loopback PKCE flow in `freeco-extensions/src/oauth.rs` (RFC 8252), while the web app keeps tokens server-side; shared types in a new small `freeco-identity` crate (ids, JWK thumbprint, DPoP create and verify, node certificate, envelope, scopes) used by both node and cloud | The X2 node pairs with a staging account by typed code; it shows on the device page; revoking it makes the next token request fail; a Viewer session cannot call an Owner route | 3 to 4 weeks |
-| **C. Relay and local policy** | WebSocket relay with `hello` binding; signed envelopes; the node checks grants and policy; approvals round trip; web chat to the home Concierge; sealed queue; long-poll fallback; hosted cells connect the same way | `freeco-cloud` relay module; a node-link handler in `freeco-kernel` that calls the kernel directly (never through `127.0.0.1:4200`); `approval.rs` | From `app.freeco.ai`, chat with the Concierge on X2 behind NAT with no open port. A request the cloud allows but the node did not grant is refused by the node. Revocation closes the socket within 5 s | 3 to 4 weeks |
+| **B. Accounts and the node registry** | New `freeco-cloud` crate (axum): OIDC with Zitadel through a backend-for-frontend, passkeys, accounts and workspaces, terms records; registry tables; pairing start, lookup, approve and token; node token endpoint; trust document with the offline root key; device page with list, rename and revoke; role checks on every API route (Owner, Admin, User, Kid, Viewer from `tenancy.rs`), in the cloud and in the node's API | New `crates/freeco-cloud`; the desktop app's sign-in reuses the loopback PKCE flow in `freeco-extensions/src/oauth.rs` (RFC 8252), while the web app keeps tokens server-side; shared types in a new small `freeco-identity` crate (ids, JWK thumbprint, DPoP create and verify, node certificate, envelope, scopes) used by both node and cloud | The X2 node pairs with a staging account by typed code and stays inactive until its owner confirms the account on the node; it shows on the device page; a registration with a changed `enc_key` is refused; revoking it makes the next token request fail; a Viewer session cannot call an Owner route | 3 to 4 weeks |
+| **C. Relay and local policy** | WebSocket relay with `hello` binding; signed envelopes; the node checks grants and policy; approvals round trip; web chat to the home Concierge; sealed queue; long-poll fallback; hosted cells connect the same way | `freeco-cloud` relay module; a node-link handler in `freeco-kernel` that calls the kernel directly (never through `127.0.0.1:4200`); `approval.rs` | From `app.freeco.ai`, chat with the Concierge on X2 behind NAT with no open port. A request the cloud allows but the node did not grant is refused by the node, and so is a tool call a relayed chat asks for outside its grants. A frame or approval decision altered in transit is refused. Revocation closes the socket within 5 s | 3 to 4 weeks |
 | **D. WhatsApp identity** | Cloud API webhook with signature check; channel links table; host invite codes; provisional accounts; claim link with reverse code; assurance levels enforced; routing to node or cell | `freeco-cloud` channel gateway; `freeco-channels/src/whatsapp.rs` (wire up the allowlist); `freeco-kernel/src/auth.rs` (bindings from links, with assurance) | A test guest scans a host QR code, chats, and claims the account with a passkey; a payment-class approval cannot be given from WhatsApp alone | 2 to 3 weeks, after Meta confirms eligibility |
 | **E. Recovery** | Several passkeys; recovery codes; 72-hour email recovery; recovery quarantine; Recovery Kit and encrypted cloud backups; node replacement and restore | `freeco-cloud`; `freeco-api/src/backup.rs` (encrypt snapshots with the backup key) | A node backup restores on a new machine with only the Recovery Kit; after an account recovery, nodes stay at status-only until confirmed on the node | 2 to 3 weeks |
 | **F. Hardening** | End-to-end signed approvals and approver lists; X.509 node certificates and mTLS for enterprise relays; OFP between a user's nodes with node certificates instead of the shared secret; TPM and App Attest as extra trust signals; a self-hosted registry for sovereign organisations; 2-of-3 recovery | `freeco-wire/src/peer.rs`; `freeco-identity`; `freeco-cloud` | Each item with its own live test | Later, after paid launch |
@@ -899,10 +1032,11 @@ audit status at the time.
 | Risk | Handling |
 |---|---|
 | **Device-code phishing:** someone sends the user a code from the attacker's node | The user types the code rather than clicking a link; the page shows the node's name, platform, approximate location and fingerprint words, and asks the user to compare them with their own screen; a fresh passkey is required |
+| **A code read off someone else's screen:** an attacker approves the victim's node into the attacker's account | The node activates nothing until its own owner confirms on the node which account and workspace it joined (section 6.3); answering no revokes the entry |
 | A node access token leaks | It is DPoP-bound and lasts 10 minutes, so it is useless without the node key |
 | A node key is stolen from a software keystore | Revoke on the device page; prefer hardware keys; the device page shows key protection so the user can see which devices are weaker |
-| The relay or edge is compromised | Envelopes are signed by the request key, which the relay does not hold; responses are signed by the node; the node's grants still apply |
-| The control plane is compromised | It cannot widen node grants without local confirmation, cannot read Recovery-Key-protected backups, and from Phase F cannot forge approvals. Node policy remains the last word |
+| The relay or edge is compromised | Envelopes and approval decisions are signed with the request key, which the relay does not hold; every node frame is signed by the node and checked by the control plane with session, id and sequence; the registration payload is signed by the node key; trust documents carry a serial that only goes up; the node's grants still apply |
+| The control plane is compromised | It cannot widen node grants without local confirmation and cannot read a personal node's Recovery-Key-protected backups; from Phase F it cannot forge approvals either. Node policy remains the last word. Hosted cells are exposed, as section 11 says, which is why they are labelled |
 | SIM swap or a stolen phone | Channel identity tops out at `a1`; payments, credentials and node changes need a passkey |
 | Prompt injection asks the node to act | The envelope's `origin` and the agent's taint tracking both reach the approval, which shows where the instruction came from |
 | Replay of a request or proof | `jti` and request id caches (the existing `NonceTracker`), short `exp`, socket binding in `hello_ack` |
