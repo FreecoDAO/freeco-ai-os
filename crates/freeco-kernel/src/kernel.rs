@@ -6794,32 +6794,6 @@ impl FreecoKernel {
             }
         };
 
-        // Step 1b: when the capped skill summary leaves skills out, it tells the
-        // agent to call `skill_list` to find them. Grant that read-only tool even
-        // to an agent whose declared tools or profile would leave it out, or the
-        // hidden skills could not be found at all. The other skill_* tools stay
-        // under the agent's own tool list.
-        if !all_tools.iter().any(|t| t.name == "skill_list") {
-            let overflows = match skill_snapshot {
-                Some(snapshot) => Self::skill_summary_overflows(snapshot, &skill_allowlist),
-                None => {
-                    let registry = self
-                        .skill_registry
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner());
-                    Self::skill_summary_overflows(&registry, &skill_allowlist)
-                }
-            };
-            if overflows {
-                if let Some(def) = builtin_tool_definitions()
-                    .into_iter()
-                    .find(|t| t.name == "skill_list")
-                {
-                    all_tools.push(def);
-                }
-            }
-        }
-
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
         // then by declared tools).
         // When a workspace-aware snapshot is provided, use it so that workspace
@@ -7078,16 +7052,6 @@ impl FreecoKernel {
             lines.push(line);
         }
         (lines, skills.len())
-    }
-
-    /// Whether the capped skill summary leaves out some of the agent's skills,
-    /// so the agent needs `skill_list` to find them.
-    fn skill_summary_overflows(
-        registry: &freeco_skills::registry::SkillRegistry,
-        skill_allowlist: &[String],
-    ) -> bool {
-        let (lines, total) = Self::skill_summary_lines(registry, skill_allowlist);
-        lines.len() < total
     }
 
     /// Build a compact skill summary using the provided registry (which may
@@ -10946,34 +10910,31 @@ system_prompt = "You are a test agent."
     }
 
     #[test]
-    fn restricted_agent_gets_skill_list_only_when_skills_are_hidden() {
-        // Small install: everything fits, the agent keeps exactly its own tools.
-        let tmp = tempfile::tempdir().unwrap();
-        let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), 0);
-        let names: Vec<String> = kernel
-            .available_tools(agent)
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        assert_eq!(names, vec!["file_read".to_string()]);
-        kernel.shutdown();
-
-        // Large install: the summary hides skills and points at skill_list, so
-        // the read-only skill_list is granted. Nothing else is.
-        let tmp = tempfile::tempdir().unwrap();
-        let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), 300);
-        let names: Vec<String> = kernel
-            .available_tools(agent)
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        assert!(names.contains(&"file_read".to_string()));
-        assert!(names.contains(&"skill_list".to_string()), "got {names:?}");
-        assert!(!names.contains(&"skill_describe".to_string()));
-        assert!(!names.contains(&"skill_execute".to_string()));
-        assert!(!names.contains(&"shell_exec".to_string()));
-        assert_eq!(names.len(), 2, "got {names:?}");
-        kernel.shutdown();
+    fn restricted_agent_gets_only_the_read_only_skill_tools() {
+        // Small or large install, an agent with a fixed tool list keeps its own
+        // tools and gets the two read-only skill tools the summary tells it to
+        // use (skill_describe always, skill_list for the skills the cap hides).
+        // Nothing that runs code is added.
+        for extra in [0, 300] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), extra);
+            let mut names: Vec<String> = kernel
+                .available_tools(agent)
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            names.sort();
+            assert_eq!(
+                names,
+                vec![
+                    "file_read".to_string(),
+                    "skill_describe".to_string(),
+                    "skill_list".to_string()
+                ],
+                "extra={extra}"
+            );
+            kernel.shutdown();
+        }
     }
 
     #[test]
