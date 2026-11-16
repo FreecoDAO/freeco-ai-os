@@ -318,7 +318,7 @@ pub async fn agent_ws(
     // fail-closed path for non-loopback origins (see issue #1034 B2).
     let api_key_raw = &state.kernel.config.api_key;
     let api_key = api_key_raw.trim();
-    let is_loopback = addr.ip().is_loopback();
+    let is_loopback = crate::middleware::from_this_device(addr.ip(), &headers);
     let allow_no_auth = crate::middleware::allow_no_auth_from_env();
 
     // Mirror the session_secret derivation in server.rs::AuthState so cookies

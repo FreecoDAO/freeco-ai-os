@@ -68,6 +68,27 @@ fn is_true_env_flag(value: &str) -> bool {
     matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on")
 }
 
+/// Headers a reverse proxy adds when it relays a request for someone else.
+const FORWARDING_HEADERS: &[&str] = &[
+    "forwarded",
+    "x-forwarded-for",
+    "x-real-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+];
+
+/// Whether a request was made on this machine, rather than relayed by a
+/// proxy running on it.
+///
+/// A reverse proxy on the same host (Caddy, nginx, a tunnel) connects from
+/// 127.0.0.1, so every request from the internet it passes on looked local:
+/// it skipped the API key when none was set, could turn dashboard login off
+/// and set the first password. A relayed request names who it is for in one
+/// of [`FORWARDING_HEADERS`]; such a request is not this machine's.
+pub fn from_this_device(peer: std::net::IpAddr, headers: &axum::http::HeaderMap) -> bool {
+    peer.is_loopback() && !FORWARDING_HEADERS.iter().any(|h| headers.contains_key(*h))
+}
+
 /// Bearer token authentication middleware.
 ///
 /// When `api_key` is non-empty (after trimming), requests to non-public
@@ -93,7 +114,7 @@ pub async fn auth(
     let is_loopback = request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().is_loopback())
+        .map(|ci| from_this_device(ci.0.ip(), request.headers()))
         .unwrap_or(false); // SECURITY: default-deny; unknown origin is NOT loopback
 
     // Shutdown is loopback-only (CLI on same machine). Skip token auth only
@@ -340,6 +361,25 @@ mod tests {
         let app = router(auth_state_empty());
         let resp = app.oneshot(req_from("127.0.0.1")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A reverse proxy on this machine connects from 127.0.0.1 on behalf of
+    /// someone on the internet; what it relays is not this machine's.
+    #[tokio::test]
+    async fn empty_key_blocks_a_request_relayed_by_a_local_proxy() {
+        for header in [
+            "x-forwarded-for",
+            "forwarded",
+            "x-real-ip",
+            "cf-connecting-ip",
+        ] {
+            let app = router(auth_state_empty());
+            let mut req = req_from("127.0.0.1");
+            req.headers_mut()
+                .insert(header, "203.0.113.5".parse().unwrap());
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{header}");
+        }
     }
 
     #[tokio::test]

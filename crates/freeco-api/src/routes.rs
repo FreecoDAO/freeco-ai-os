@@ -15173,7 +15173,7 @@ pub async fn auth_set_password(
         .unwrap_or("admin");
 
     if password_hash.is_empty() {
-        if !peer.ip().is_loopback() {
+        if !crate::middleware::from_this_device(peer.ip(), &headers) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -15254,8 +15254,9 @@ pub async fn auth_set_password(
 pub async fn auth_disable(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if !peer.ip().is_loopback() {
+    if !crate::middleware::from_this_device(peer.ip(), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Only available from this device"})),

@@ -15,8 +15,10 @@
 //!   conversation runs as that guest too (see [`scope`]), so asking another
 //!   agent is no way around the limits.
 //!
-//! The owner is whoever writes without a sender (the dashboard, the CLI), and
-//! any sender bound to an `owner` or `admin` account in `[[users]]`.
+//! The owner is whoever writes without a sender (the dashboard, the CLI), any
+//! sender bound to an `owner` or `admin` account in `[[users]]`, another agent
+//! (`agent:<id>`), and a tool connected through the MCP endpoint with the
+//! owner's `FREECO_MCP_TOKEN` (`mcp:<id>`).
 
 use crate::auth::{AuthManager, UserRole};
 use freeco_kernel_runtime::prompt_builder::PromptContext;
@@ -55,12 +57,16 @@ pub async fn scope<F: std::future::Future>(guest: Option<String>, fut: F) -> F::
 /// Inside a guest's call chain the answer is always that guest: a message one
 /// agent sends another (`agent:<id>`, or no sender at all) cannot widen what
 /// the chain may do.
+///
+/// `agent:` and `mcp:` senders are not people: one is an agent, the other a
+/// tool that holds the owner's MCP token and acts as one of the agents.
 pub fn guest_for(auth: &AuthManager, sender_id: Option<&str>) -> Option<String> {
     if let Some(guest) = current() {
         return Some(guest);
     }
     let sender = sender_id.map(str::trim).filter(|s| !s.is_empty())?;
-    if sender.starts_with("agent:") || is_owner_or_admin(auth, sender) {
+    if sender.starts_with("agent:") || sender.starts_with("mcp:") || is_owner_or_admin(auth, sender)
+    {
         return None;
     }
     Some(sender.to_string())
@@ -129,11 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn no_sender_and_agents_are_the_owner_everyone_else_a_guest() {
+    fn no_sender_agents_and_mcp_tools_are_the_owner_everyone_else_a_guest() {
         let auth = AuthManager::new(&[]);
         assert_eq!(guest_for(&auth, None), None);
         assert_eq!(guest_for(&auth, Some("  ")), None);
         assert_eq!(guest_for(&auth, Some("agent:1234")), None);
+        assert_eq!(guest_for(&auth, Some("mcp:1234")), None);
         assert_eq!(
             guest_for(&auth, Some("+41790000000")),
             Some("+41790000000".to_string())
