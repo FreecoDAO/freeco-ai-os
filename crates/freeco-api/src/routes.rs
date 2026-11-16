@@ -10005,6 +10005,10 @@ pub async fn set_provider_url(
 
     // Probe reachability at the new URL
     let probe = freeco_kernel_runtime::provider_health::probe_provider(&name, &base_url).await;
+    // The cache is keyed by provider, not URL. Without this, the settings
+    // page's immediate reload of /api/providers got the old URL's answer for
+    // up to a minute and recorded it over this one.
+    state.provider_probe_cache.insert(&name, probe.clone());
 
     // Record reachability and the served model list, not only additions.
     if let Ok(mut catalog) = state.kernel.model_catalog.write() {

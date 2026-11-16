@@ -66,7 +66,10 @@ case "${1:-start}" in
         echo "pull attempt $i failed, retrying"; i=$((i+1)); sleep 15
       done
     fi
+    # OMNIROUTE_HOSTNAME is also passed here, after the env file, because an
+    # env file written before the loopback fix still binds 0.0.0.0.
     $RT run -d --name "$NAME" --network host --env-file "$ENV_FILE" \
+        --env OMNIROUTE_HOSTNAME=127.0.0.1 \
         --restart unless-stopped "$IMAGE" >/dev/null
     printf "waiting for it to serve"
     i=1

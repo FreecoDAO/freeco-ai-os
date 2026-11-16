@@ -1558,9 +1558,9 @@
                          Config cannot disagree about what is running. -->
                     <div class="form-group">
                       <label>Model</label>
-                      <select class="form-input" x-model="configForm.model" @change="onConfigModelChange()">
-                        <template x-for="m in workingModelOptions(configForm.model)" :key="workingModelKey(m)">
-                          <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                      <select class="form-input" x-model="configModelChoice">
+                        <template x-for="m in workingModelOptions(configForm.model, configForm.provider)" :key="workingModelKey(m)">
+                          <option :value="workingModelKey(m)" x-text="workingModelLabel(m)" :selected="workingModelKey(m) === configModelChoice"></option>
                         </template>
                       </select>
                       <div class="text-dim" style="font-size:12px;margin-top:4px">
@@ -1810,10 +1810,10 @@
                            typed id is only discovered to be wrong on the
                            agent's first turn, which reads as the agent being
                            broken rather than the name being a guess. -->
-                      <select class="form-input" x-model="spawnForm.model" @focus="loadWorkingModels()">
+                      <select class="form-input" x-model="spawnModelChoice" @focus="loadWorkingModels()">
                         <option value="">Default model</option>
-                        <template x-for="m in workingModelOptions(spawnForm.model)" :key="workingModelKey(m)">
-                          <option :value="m.id" x-text="workingModelLabel(m)"></option>
+                        <template x-for="m in workingModelOptions(spawnForm.model, spawnForm.provider)" :key="workingModelKey(m)">
+                          <option :value="workingModelKey(m)" x-text="workingModelLabel(m)" :selected="workingModelKey(m) === spawnModelChoice"></option>
                         </template>
                       </select>
                     </div>

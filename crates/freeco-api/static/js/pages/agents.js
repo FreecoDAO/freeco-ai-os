@@ -330,13 +330,37 @@ function agentsPage() {
     // Choosing a model settles its provider and its key in the same action.
     // Leaving them as three independent fields is what let an agent end up
     // naming one provider while holding another's key.
-    onConfigModelChange() {
-      var id = this.configForm && this.configForm.model;
-      var m = (this.workingModels || []).filter(function (x) { return x.id === id; })[0];
-      if (!m || !m.provider) return;
+    //
+    // The pickers select "provider::id", not the id: nvidia and omniroute both
+    // serve "nvidia/..." ids, and matching on the id alone gave omniroute's
+    // option nvidia's provider and key.
+    workingModelByKey(key) {
+      var self = this;
+      return (this.workingModels || []).filter(function (m) { return self.workingModelKey(m) === key; })[0];
+    },
+    get configModelChoice() {
+      var f = this.configForm || {};
+      return f.model ? (f.provider || '') + '::' + f.model : '';
+    },
+    set configModelChoice(key) {
+      var m = this.workingModelByKey(key);
+      if (!m) return; // the "(current)" option: nothing changes
+      this.configForm.model = m.id;
+      if (!m.provider) return;
       this.configForm.provider = m.provider;
       var p = (this.providerIndex || {})[m.provider];
       if (p && p.api_key_env) this.configForm.api_key_env = p.api_key_env;
+    },
+    get spawnModelChoice() {
+      var f = this.spawnForm || {};
+      return f.model ? (f.provider || '') + '::' + f.model : '';
+    },
+    set spawnModelChoice(key) {
+      if (!key) { this.spawnForm.model = ''; return; } // "Default model"
+      var m = this.workingModelByKey(key);
+      if (!m) return;
+      this.spawnForm.model = m.id;
+      if (m.provider) this.spawnForm.provider = m.provider;
     },
 
     // One option per (provider, model). The same id is served by more than one
@@ -355,10 +379,12 @@ function agentsPage() {
 
     // Same guarantee as providerKeyOptions: whatever is currently set always
     // has an option, so rendering a select can never silently rewrite it.
-    workingModelOptions(current) {
+    workingModelOptions(current, provider) {
       var out = (this.workingModels || []).slice();
-      if (current && !out.some(function (m) { return m.id === current; })) {
-        out.unshift({ id: current, provider: '', display_name: current + '  (current)' });
+      var self = this;
+      var key = (provider || '') + '::' + current;
+      if (current && !out.some(function (m) { return self.workingModelKey(m) === key; })) {
+        out.unshift({ id: current, provider: provider || '', display_name: current + '  (current)' });
       }
       return out;
     },

@@ -572,14 +572,16 @@ impl ModelCatalog {
             // Models added by hand under a provider we do not know.
             None => return m.tier == ModelTier::Custom,
         };
-        match provider.auth_status {
-            AuthStatus::Missing => return false,
-            AuthStatus::NotRequired
-                if self.local_reachable.get(&m.provider.to_lowercase()) != Some(&true) =>
-            {
-                return false;
-            }
-            _ => {}
+        if provider.auth_status == AuthStatus::Missing {
+            return false;
+        }
+        // Any keyless server with a URL must have answered, whatever its auth
+        // label: an OLLAMA_HOST or LMSTUDIO_BASE_URL override marks it
+        // "configured", and it was offered while nothing listened. CLI
+        // providers (claude-code) have no URL to probe and are not held back.
+        let keyless_server = !provider.key_required && !provider.base_url.is_empty();
+        if keyless_server && self.local_reachable.get(&m.provider.to_lowercase()) != Some(&true) {
+            return false;
         }
         self.is_served(&m.provider, &m.id) != Some(false)
     }
@@ -5476,6 +5478,24 @@ mod tests {
             c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
             "online and listed"
         );
+    }
+
+    /// A URL override marks a local server "configured"; it still has to
+    /// answer before its models are offered.
+    #[test]
+    fn configured_keyless_server_still_needs_to_answer() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        if let Some(p) = c.providers.iter_mut().find(|p| p.id == "lmstudio") {
+            p.auth_status = AuthStatus::Configured;
+        }
+        c.record_local_probe("lmstudio", false, &[]);
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "configured by override, offline"
+        );
+        c.record_local_probe("lmstudio", true, &["lmstudio-local".to_string()]);
+        assert!(c.is_ready(model(&c, "lmstudio", "lmstudio-local")));
     }
 
     /// An answering keyless server offers what it listed and nothing else:
