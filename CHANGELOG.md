@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Spending limits hold in the chat. The agent's cost quota was checked only
+  on the non-streaming path, which background ticks use; the dashboard chat,
+  the popup and the OpenAI-compatible API stream, so they kept calling the
+  provider after an agent's quota was used up. The global `[budget]` cap was
+  checked on the non-streaming path only. Both paths now refuse the call once
+  either limit is reached.
+- A saved key can no longer add lines to `secrets.env`. A value containing a
+  line break was written as is, and `secrets.env` is loaded into the
+  environment at start, so one key could define other variables (such as
+  `LD_PRELOAD`) that every child process inherits. Every writer -- the
+  provider-key and channel endpoints, the agents' key tool and the vault --
+  now refuses line breaks and NUL in values and anything but letters, digits
+  and `_` in names; the API answers 400.
+- Windows ARM64 and macOS Intel builds work again. `rust-toolchain.toml`
+  pins the compiler, but the release workflow added each target to the
+  stable toolchain, so in v0.9.8 the installer and CLI for both failed with
+  "can't find crate for `core`".
+- An MCP server reached over HTTP can no longer crash the daemon by sending
+  an endless response. rmcp before 3.9 read the whole body into memory, even
+  during the first handshake (RUSTSEC-2026-0462); rmcp 3.9 caps it.
+- The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
+  stale memory when opening a database with a `-wal` file someone else wrote
+  (RUSTSEC-2026-0459).
+
+### Changed
+
+- Release images go to their own private package,
+  `ghcr.io/freecodao/freeco-ai-os`. The `freeco-ai` package is public, and the
+  release refused to push into it, so v0.9.8 shipped no image. Nothing built
+  from this repository lands in a public image.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

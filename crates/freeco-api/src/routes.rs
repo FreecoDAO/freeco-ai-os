@@ -3339,8 +3339,13 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
+                let status = if e.kind() == std::io::ErrorKind::InvalidInput {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status,
                     Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
                 );
             }
@@ -9632,6 +9637,13 @@ pub async fn set_provider_key(
             })
     };
 
+    if let Err(e) = validate_secret_env_entry(&env_var, &key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
+
     // Store in vault (best-effort — no-op if vault not initialized)
     state.kernel.store_credential(&env_var, &key);
 
@@ -10673,73 +10685,7 @@ fn atomic_write_toml(
 
 // ── Helper functions for secrets.env management ────────────────────────
 
-/// Write or update a key in the secrets.env file.
-/// File format: one `KEY=value` per line. Existing keys are overwritten.
-pub(crate) fn write_secret_env(
-    path: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> Result<(), std::io::Error> {
-    let mut lines: Vec<String> = if path.exists() {
-        std::fs::read_to_string(path)?
-            .lines()
-            .map(|l| l.to_string())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Remove existing line for this key
-    lines.retain(|l| !l.starts_with(&format!("{key}=")));
-
-    // Add new line
-    lines.push(format!("{key}={value}"));
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(path, lines.join("\n") + "\n")?;
-
-    // SECURITY (threat-model M2/M3): restrict the secrets file to the current user.
-    // Unix: set 0600 permissions. Windows: remove inherited ACEs and ensure the
-    // current user has Full Control. If hardening fails, return an error rather
-    // than leaving plaintext keys readable to other accounts.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(windows)]
-    {
-        let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-            (Ok(domain), Ok(name)) if !name.is_empty() => format!(r"{domain}\\{name}"),
-            (_, Ok(name)) if !name.is_empty() => name,
-            _ => String::new(),
-        };
-        if !user.is_empty() {
-            let system_root =
-                std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-            let icacls = std::path::PathBuf::from(system_root)
-                .join("System32")
-                .join("icacls.exe");
-            let out = std::process::Command::new(icacls)
-                .arg(path)
-                .args(["/inheritance:r", "/grant:r", &format!("{user}:F")])
-                .output()
-                .map_err(|e| std::io::Error::other(format!("icacls failed: {e}")))?;
-            if !out.status.success() {
-                return Err(std::io::Error::other(format!(
-                    "icacls failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
+use freeco_types::secrets::{validate_secret_env_entry, write_secret_env};
 
 /// Remove a key from the secrets.env file.
 fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::Error> {
@@ -15831,6 +15777,37 @@ mod role_resolution_tests {
     fn unrecognized_role_string_defaults_to_user() {
         let users = vec![user("dave", "wizard", true)];
         assert_eq!(role_for("dave", "admin", &users), "user");
+    }
+}
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_newline_injection_in_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        let err =
+            write_secret_env(&path, "GROQ_API_KEY", "sk-x\nLD_PRELOAD=/tmp/evil.so").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_invalid_key_names() {
+        for key in ["", "A=B", "A\nB", "A B", "A\0B"] {
+            assert!(validate_secret_env_entry(key, "v").is_err(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_normal_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        write_secret_env(&path, "MY_PROVIDER_API_KEY", "sk-abc=123").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "MY_PROVIDER_API_KEY=sk-abc=123\n");
     }
 }
 

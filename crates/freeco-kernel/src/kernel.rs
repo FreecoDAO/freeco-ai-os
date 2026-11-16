@@ -2155,6 +2155,8 @@ impl FreecoKernel {
         }
 
         // LLM agent: true streaming via agent loop
+        self.check_spend_limits(agent_id, &entry.manifest.resources)?;
+
         let mut session = self
             .memory
             .get_session(entry.session_id)
@@ -2733,21 +2735,12 @@ impl FreecoKernel {
         })
     }
 
-    /// Execute the default LLM-based agent loop.
-    #[allow(clippy::too_many_arguments)]
-    async fn execute_llm_agent(
-        &self,
-        entry: &AgentEntry,
-        agent_id: AgentId,
-        message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
-        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
-        sender_id: Option<String>,
-        sender_name: Option<String>,
-    ) -> KernelResult<AgentLoopResult> {
-        // Check metering quota before starting
+    /// Refuse an LLM call when the agent's cost quota or the global `[budget]`
+    /// limit has already been reached. Both the streaming and non-streaming
+    /// paths must call this before contacting the provider.
+    fn check_spend_limits(&self, agent_id: AgentId, resources: &ResourceQuota) -> KernelResult<()> {
         self.metering
-            .check_quota(agent_id, &entry.manifest.resources)
+            .check_quota(agent_id, resources)
             .map_err(KernelError::Freeco)?;
 
         // Then the whole-installation ceiling. This existed, worked, and had no
@@ -2761,7 +2754,22 @@ impl FreecoKernel {
         // the bill is the sum over all of them.
         self.metering
             .check_global_budget(&self.config.budget)
-            .map_err(KernelError::Freeco)?;
+            .map_err(KernelError::Freeco)
+    }
+
+    /// Execute the default LLM-based agent loop.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_llm_agent(
+        &self,
+        entry: &AgentEntry,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.check_spend_limits(agent_id, &entry.manifest.resources)?;
 
         let mut session = self
             .memory

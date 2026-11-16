@@ -9,7 +9,7 @@
 
 use freeco_types::tool::ToolDefinition;
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ pub struct McpConnection {
     original_names: HashMap<String, String>,
     /// The rmcp client handle — type-erased because the concrete type
     /// depends on which transport was used (stdio vs HTTP).
-    client: RunningService<RoleClient, ClientInfo>,
+    client: RunningService<RoleClient, ClientConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ pub struct McpConnection {
 impl McpConnection {
     /// Connect to an MCP server, perform handshake, and discover tools.
     pub async fn connect(config: McpServerConfig) -> Result<Self, String> {
-        let client_info = ClientInfo::new(
+        let client_info = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("freeco", env!("CARGO_PKG_VERSION")),
         );
@@ -218,8 +218,8 @@ impl McpConnection {
         command: &str,
         args: &[String],
         env_whitelist: &[String],
-        client_info: ClientInfo,
-    ) -> Result<RunningService<RoleClient, ClientInfo>, String> {
+        client_info: ClientConfig,
+    ) -> Result<RunningService<RoleClient, ClientConfig>, String> {
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use tokio::process::Command;
 
@@ -288,8 +288,8 @@ impl McpConnection {
     async fn connect_http(
         url: &str,
         headers: &[String],
-        client_info: ClientInfo,
-    ) -> Result<RunningService<RoleClient, ClientInfo>, String> {
+        client_info: ClientConfig,
+    ) -> Result<RunningService<RoleClient, ClientConfig>, String> {
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
         use rmcp::transport::StreamableHttpClientTransport;
 
