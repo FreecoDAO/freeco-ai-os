@@ -1357,6 +1357,15 @@ impl FreecoKernel {
                 }));
         }
 
+        // Every tool call an agent finishes goes to the audit trail. Both
+        // agent loops fire this hook, so no tool path is left out.
+        kernel.hooks.register(
+            HookEvent::AfterToolCall,
+            Arc::new(crate::audit_trail::ToolAuditHook::new(Arc::clone(
+                &kernel.audit_log,
+            ))),
+        );
+
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
             Ok(agents) => {
@@ -2489,17 +2498,34 @@ impl FreecoKernel {
         sender_id: Option<String>,
         sender_name: Option<String>,
     ) -> KernelResult<AgentLoopResult> {
+        // Who the message is from, for the audit entry; the originals go on
+        // to the agent's prompt.
+        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
+        // A message refused before it runs is a message too.
+        let refused = |e: KernelError| {
+            crate::audit_trail::record_message(
+                &self.audit_log,
+                agent_id,
+                audit_sender_id.as_deref(),
+                audit_sender_name.as_deref(),
+                Err(e.to_string()),
+            );
+            e
+        };
+
         // Enforce quota before running the agent loop
         self.scheduler
             .check_quota(agent_id)
-            .map_err(KernelError::Freeco)?;
+            .map_err(KernelError::Freeco)
+            .map_err(refused)?;
 
         // Read after waiting: the manifest may have changed while this queued.
         // The conversation is the one locked, whichever is current by now.
         let mut entry = self
             .registry
             .get(agent_id)
-            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))
+            .map_err(refused)?;
         entry.session_id = session_id;
 
         // Dispatch based on module type
@@ -2550,25 +2576,24 @@ impl FreecoKernel {
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
 
                 // SECURITY: Record successful message in audit trail
-                self.audit_log.record(
-                    agent_id.to_string(),
-                    freeco_kernel_runtime::audit::AuditAction::AgentMessage,
-                    format!(
-                        "tokens_in={}, tokens_out={}",
-                        result.total_usage.input_tokens, result.total_usage.output_tokens
-                    ),
-                    "ok",
+                crate::audit_trail::record_message(
+                    &self.audit_log,
+                    agent_id,
+                    audit_sender_id.as_deref(),
+                    audit_sender_name.as_deref(),
+                    Ok(&result.total_usage),
                 );
 
                 Ok(result)
             }
             Err(e) => {
                 // SECURITY: Record failed message in audit trail
-                self.audit_log.record(
-                    agent_id.to_string(),
-                    freeco_kernel_runtime::audit::AuditAction::AgentMessage,
-                    "agent loop failed",
-                    format!("error: {e}"),
+                crate::audit_trail::record_message(
+                    &self.audit_log,
+                    agent_id,
+                    audit_sender_id.as_deref(),
+                    audit_sender_name.as_deref(),
+                    Err(e.to_string()),
                 );
 
                 // Record the failure in supervisor for health reporting
@@ -2649,6 +2674,47 @@ impl FreecoKernel {
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
+        let started = self.start_message_stream(
+            agent_id,
+            pinned_session,
+            message,
+            kernel_handle,
+            sender_id,
+            sender_name,
+            content_blocks,
+        );
+        // A message refused before its run starts -- no quota left, a
+        // provider without credentials -- is recorded here. Once the run is
+        // spawned, the run records its own outcome.
+        if let Err(e) = &started {
+            crate::audit_trail::record_message(
+                &self.audit_log,
+                agent_id,
+                audit_sender_id.as_deref(),
+                audit_sender_name.as_deref(),
+                Err(e.to_string()),
+            );
+        }
+        started
+    }
+
+    /// The body of [`send_message_streaming_pinned`](Self::send_message_streaming_pinned):
+    /// checks, then spawns the run.
+    #[allow(clippy::too_many_arguments)]
+    fn start_message_stream(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        pinned_session: Option<SessionId>,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_id: Option<String>,
+        sender_name: Option<String>,
+        content_blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
         // Enforce quota before spawning the streaming task
         self.scheduler
             .check_quota(agent_id)
@@ -2661,6 +2727,10 @@ impl FreecoKernel {
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");
+
+        // Who the message is from, for the audit entry. Streamed messages --
+        // every chat in the dashboard -- were never written to the trail.
+        let (audit_sender_id, audit_sender_name) = (sender_id.clone(), sender_name.clone());
 
         // Non-LLM modules: execute non-streaming and emit results as stream events
         if is_wasm || is_python {
@@ -2700,11 +2770,25 @@ impl FreecoKernel {
                         let _ = kernel_clone
                             .registry
                             .set_state(agent_id, AgentState::Running);
+                        crate::audit_trail::record_message(
+                            &kernel_clone.audit_log,
+                            agent_id,
+                            audit_sender_id.as_deref(),
+                            audit_sender_name.as_deref(),
+                            Ok(&result.total_usage),
+                        );
                         Ok(result)
                     }
                     Err(e) => {
                         kernel_clone.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
+                        crate::audit_trail::record_message(
+                            &kernel_clone.audit_log,
+                            agent_id,
+                            audit_sender_id.as_deref(),
+                            audit_sender_name.as_deref(),
+                            Err(e.to_string()),
+                        );
                         Err(e)
                     }
                 }
@@ -3089,6 +3173,16 @@ impl FreecoKernel {
                         .registry
                         .set_state(agent_id, AgentState::Running);
 
+                    // SECURITY: Record the message in the audit trail, as the
+                    // non-streaming path does.
+                    crate::audit_trail::record_message(
+                        &kernel_clone.audit_log,
+                        agent_id,
+                        audit_sender_id.as_deref(),
+                        audit_sender_name.as_deref(),
+                        Ok(&result.total_usage),
+                    );
+
                     // Post-loop compaction check: if session now exceeds token threshold,
                     // trigger compaction in background for the next call.
                     {
@@ -3114,6 +3208,13 @@ impl FreecoKernel {
                     keep_failed_turn(&memory, agent_id, &session, messages_before);
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
+                    crate::audit_trail::record_message(
+                        &kernel_clone.audit_log,
+                        agent_id,
+                        audit_sender_id.as_deref(),
+                        audit_sender_name.as_deref(),
+                        Err(e.to_string()),
+                    );
                     Err(KernelError::Freeco(e))
                 }
             }
@@ -8486,6 +8587,66 @@ impl FreecoKernel {
             Err(_) => strip_provider_prefix(model, provider),
         }
     }
+
+    /// One agent's message to another, kept as an exchange between the two.
+    ///
+    /// It used to arrive as if from nowhere: the receiving agent was not
+    /// told who asked, its audit entry named no sender, and the Comms page
+    /// drew the turn as the receiver talking to "user". Now the receiver's
+    /// prompt names the sending agent, the audit entry carries `from=`, and
+    /// the message and the reply go on the event bus for the Comms feed and
+    /// its topology.
+    pub async fn send_agent_message(
+        &self,
+        from: AgentId,
+        to: AgentId,
+        message: &str,
+        via: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let from_name = self
+            .registry
+            .get(from)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| from.to_string());
+
+        // Straight onto the bus rather than through `publish_event`: this is
+        // a record for the Comms page, and evaluating triggers on it would
+        // let one agent's message set off others.
+        self.event_bus
+            .publish(crate::audit_trail::agent_message_event(
+                from, to, message, via,
+            ))
+            .await;
+
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        let result = self
+            .send_message_with_handle(
+                to,
+                message,
+                handle,
+                Some(format!("agent:{from}")),
+                Some(from_name),
+            )
+            .await;
+
+        if let Ok(r) = &result {
+            if !r.silent && !r.response.is_empty() {
+                self.event_bus
+                    .publish(crate::audit_trail::agent_message_event(
+                        to,
+                        from,
+                        &r.response,
+                        "reply",
+                    ))
+                    .await;
+            }
+        }
+        result
+    }
 }
 
 #[async_trait]
@@ -8632,6 +8793,33 @@ impl KernelHandle for FreecoKernel {
                 (p.id.clone(), p.api_key_env.clone(), configured)
             })
             .collect()
+    }
+
+    async fn send_to_agent_from(
+        &self,
+        from_agent_id: Option<&str>,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<String, String> {
+        let from = from_agent_id
+            .and_then(|f| f.parse::<AgentId>().ok())
+            .filter(|f| self.registry.get(*f).is_some());
+        let Some(from) = from else {
+            return self.send_to_agent(agent_id, message).await;
+        };
+        let to: AgentId = match agent_id.parse() {
+            Ok(id) => id,
+            Err(_) => self
+                .registry
+                .find_by_name(agent_id)
+                .map(|e| e.id)
+                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
+        };
+        let result = self
+            .send_agent_message(from, to, message, "agent_send")
+            .await
+            .map_err(|e| format!("Send failed: {e}"))?;
+        Ok(result.response)
     }
 
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String> {

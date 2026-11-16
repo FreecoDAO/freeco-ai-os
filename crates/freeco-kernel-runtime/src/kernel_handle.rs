@@ -45,6 +45,22 @@ pub trait KernelHandle: Send + Sync {
         parent_id: Option<&str>,
     ) -> Result<(String, String), String>;
 
+    /// Send a message to another agent on behalf of `from_agent_id`.
+    ///
+    /// The kernel uses the sender to tell the receiving agent who is asking,
+    /// to name the sender in the audit trail and to show the exchange on the
+    /// Comms page. Without a known sender this is plain
+    /// [`send_to_agent`](Self::send_to_agent).
+    async fn send_to_agent_from(
+        &self,
+        from_agent_id: Option<&str>,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<String, String> {
+        let _ = from_agent_id;
+        self.send_to_agent(agent_id, message).await
+    }
+
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
 
