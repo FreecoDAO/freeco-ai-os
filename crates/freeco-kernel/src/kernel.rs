@@ -5803,6 +5803,13 @@ impl FreecoKernel {
                         base_url,
                     )
                     .await;
+                    if let Ok(mut catalog) = kernel.model_catalog.write() {
+                        catalog.record_local_probe(
+                            provider_id,
+                            result.reachable,
+                            &result.discovered_models,
+                        );
+                    }
                     if result.reachable {
                         info!(
                             provider = %provider_id,
@@ -5810,14 +5817,6 @@ impl FreecoKernel {
                             latency_ms = result.latency_ms,
                             "Local provider online"
                         );
-                        if !result.discovered_models.is_empty() {
-                            if let Ok(mut catalog) = kernel.model_catalog.write() {
-                                catalog.merge_discovered_models(
-                                    provider_id,
-                                    &result.discovered_models,
-                                );
-                            }
-                        }
                     } else {
                         warn!(
                             provider = %provider_id,

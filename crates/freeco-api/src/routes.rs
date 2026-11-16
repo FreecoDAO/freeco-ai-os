@@ -7923,16 +7923,10 @@ pub async fn list_models(
                     return false;
                 }
             }
-            if available_only {
-                let provider = catalog.get_provider(&m.provider);
-                if let Some(p) = provider {
-                    if p.auth_status == freeco_types::model_catalog::AuthStatus::Missing {
-                        return false;
-                    }
-                }
-                if catalog.is_served(&m.provider, &m.id) == Some(false) {
-                    return false;
-                }
+            // Only models that can be used now: a keyed provider with its key,
+            // or a keyless server that answered, and listed by that provider.
+            if available_only && !catalog.is_ready(m) {
+                return false;
             }
             true
         })
@@ -7948,11 +7942,7 @@ pub async fn list_models(
             // A provider that has never been probed answers None, and its
             // models stay available: hiding a model that works is worse than
             // showing one that might not.
-            let has_key = catalog
-                .get_provider(&m.provider)
-                .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
-            let available = has_key && catalog.is_served(&m.provider, &m.id) != Some(false);
+            let available = catalog.is_ready(m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -8023,10 +8013,9 @@ pub async fn get_model(
         .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
         Some(m) => {
-            let available = catalog
-                .get_provider(&m.provider)
-                .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
+            // The same rule as the model list, so a model is not "available"
+            // here while /api/models?available=true leaves it out.
+            let available = catalog.is_ready(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -8123,12 +8112,13 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             entry["is_local"] = serde_json::json!(true);
             entry["reachable"] = serde_json::json!(probe.reachable);
             entry["latency_ms"] = serde_json::json!(probe.latency_ms);
+            // Record the answer whether or not it came: an offline server must
+            // drop out of the model pickers, not linger as "no key needed".
+            if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+                catalog.record_local_probe(&p.id, probe.reachable, &probe.discovered_models);
+            }
             if !probe.discovered_models.is_empty() {
                 entry["discovered_models"] = serde_json::json!(probe.discovered_models);
-                // Merge discovered models into the catalog so agents can use them
-                if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-                    catalog.merge_discovered_models(&p.id, &probe.discovered_models);
-                }
             }
             if let Some(err) = &probe.error {
                 entry["error"] = serde_json::json!(err);
@@ -10249,12 +10239,14 @@ pub async fn set_provider_url(
 
     // Probe reachability at the new URL
     let probe = freeco_kernel_runtime::provider_health::probe_provider(&name, &base_url).await;
+    // The cache is keyed by provider, not URL. Without this, the settings
+    // page's immediate reload of /api/providers got the old URL's answer for
+    // up to a minute and recorded it over this one.
+    state.provider_probe_cache.insert(&name, probe.clone());
 
-    // Merge discovered models into catalog
-    if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
-        }
+    // Record reachability and the served model list, not only additions.
+    if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+        catalog.record_local_probe(&name, probe.reachable, &probe.discovered_models);
     }
 
     let mut resp = serde_json::json!({
