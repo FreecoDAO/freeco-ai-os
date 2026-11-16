@@ -709,7 +709,24 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   its lead in a new conversation; the lead hands parts to members with
   `agent_delegate`, they run at once, and every member's prompt carries the
   roster. The delegated conversations are the team's task list on the Projects
-  page. There is no separate task board with dependencies yet.
+  page.
+- 🟨 **Team task boards and the Teams page.** `task_post` puts a task on a
+  team's board, where only members can claim it, and holds it until the tasks
+  it is `blocked_by` are completed; only the holder or the poster completes it.
+  The Teams page shows each team as a room: a seat is lit only while a run holds
+  one of that agent's conversations, and hand-offs (`agent_delegate`,
+  `agent_send`) are drawn between seats from the kernel's record. Verified by
+  `team_board_respects_blockers_membership_and_holder` and the hand-off tests in
+  `parallel_conversations_test.rs`. The hand-off record is in memory and starts
+  empty after a restart.
+- 🟨 **A message from another agent is marked as not from the user**, so a
+  colleague's request cannot pass as the owner's approval.
+- 🟨 **`web_fetch` checks every redirect** against the same SSRF rules as the
+  first URL; the fallback fetch now has them too.
+- 🟨 **The WhatsApp gateway answers only allowed chats** (groups off unless
+  listed, optional number allowlist) and gives each contact a conversation of
+  its own. The kernel still keys a conversation's history by agent, so a guest
+  is kept apart by the gateway choosing the conversation, not by the kernel.
 - 🟨 **Long chats keep their start in view.** What the history window drops is
   carried in the system prompt: the user's words verbatim (instructions kept
   longest when the budget is short), the agent's replies in short. Free and

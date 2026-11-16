@@ -3898,3 +3898,106 @@ html.widget-mode .freeco-x { display: none !important; }
 .messages.view-no-ts .message-time { display: none; }
 .messages.view-compact .message { margin-bottom: 4px; }
 .messages.view-compact .message-meta { display: none; }
+
+/* ---- Teams floor ----------------------------------------------------
+   Rooms are plain cards that reflow; seats are discs with initials. Only a
+   seat whose agent has a run working right now is lit, and only a hand-off
+   that is still running is drawn moving. Colour is never the only signal:
+   every lit seat also says "working" in words. */
+.teams-stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.teams-stat {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 10px 16px; border-radius: var(--radius-md);
+  background: var(--surface); border: 1px solid var(--border-subtle);
+}
+.teams-stat-num { font-size: 1.4rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.teams-stat-label { font-size: 12px; color: var(--text-dim); }
+.teams-empty { padding: 24px; text-align: center; color: var(--text-dim); }
+
+.teams-floor {
+  position: relative;
+  display: grid; gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  margin-bottom: 16px;
+}
+.teams-lanes { position: absolute; inset: 0; pointer-events: none; overflow: visible; z-index: 2; }
+.teams-lane { fill: none; stroke: var(--border-strong); stroke-width: 1.5; opacity: 0.7; }
+.teams-lane-live { stroke: var(--accent); stroke-width: 2; opacity: 1; stroke-dasharray: 6 6; animation: teams-flow 0.9s linear infinite; }
+.teams-lane-failed { stroke: var(--error); stroke-dasharray: 3 4; opacity: 0.9; }
+@keyframes teams-flow { to { stroke-dashoffset: -12; } }
+
+.teams-room {
+  position: relative; z-index: 1;
+  display: flex; flex-direction: column; gap: 12px;
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+  padding: 14px 16px; border-radius: var(--radius-lg);
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: var(--shadow-xs);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.teams-room:hover { border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.teams-room:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.teams-room-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, var(--shadow-sm); }
+.teams-room-lobby { cursor: default; background: var(--surface2); border-style: dashed; }
+.teams-room-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.teams-room-name { font-weight: 600; font-size: 14px; }
+.teams-room-project { font-size: 12px; color: var(--text-dim); }
+.teams-room-counts { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+
+.teams-seats { display: flex; flex-wrap: wrap; gap: 14px; }
+.teams-seat-wrap { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 64px; max-width: 88px; }
+.seat {
+  width: 40px; height: 40px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+  background: var(--surface2); color: var(--text-secondary);
+  border: 2px solid var(--border);
+}
+.seat-working { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); animation: teams-pulse 1.6s ease-in-out infinite; }
+.seat-fault { background: var(--error-subtle); color: var(--error); border-color: var(--error); }
+.seat-off { opacity: 0.55; border-style: dashed; }
+@keyframes teams-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 0 6px var(--accent-glow); }
+}
+.teams-seat-name { font-size: 12px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.teams-seat-role { font-size: 11px; color: var(--text-dim); }
+.teams-seat-state { font-size: 11px; font-weight: 600; color: var(--accent-ink); }
+
+.teams-new-team { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 24px; }
+.teams-new-team .form-input { flex: 1; min-width: 200px; max-width: 360px; }
+
+.teams-detail { margin-bottom: 28px; }
+.teams-detail-title { font-size: 1.1rem; margin: 0 0 12px; }
+.teams-detail-row { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-bottom: 16px; }
+.teams-card { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.teams-card-title { font-size: 13px; margin: 0; }
+.teams-members { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.teams-members li { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.teams-members li .btn { margin-left: auto; }
+.teams-inline-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.teams-inline-form .form-input { flex: 1; min-width: 140px; font-size: 13px; }
+.teams-inline-form .teams-role { flex: 0 1 130px; min-width: 100px; }
+
+.teams-board { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.teams-col { background: var(--surface2); border-radius: var(--radius-md); padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 80px; }
+.teams-col-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0; display: flex; gap: 6px; }
+.teams-col-count { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.teams-col-ready .teams-col-title { color: var(--accent-ink); }
+.teams-col-blocked .teams-col-title { color: var(--warning); }
+.teams-task { background: var(--surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; }
+.teams-task-title { font-weight: 500; }
+.teams-task-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.teams-task-wait { font-size: 11px; color: var(--warning); margin-top: 4px; }
+.teams-task-result { font-size: 12px; color: var(--text-secondary); margin-top: 6px; white-space: pre-wrap; max-height: 6em; overflow: hidden; }
+
+.teams-handoffs ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.teams-handoff { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
+.teams-handoff-status { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
+.teams-handoff-working { background: var(--accent-soft); color: var(--accent-ink); }
+.teams-handoff-done { background: var(--surface2); color: var(--text-secondary); }
+.teams-handoff-failed { background: var(--error-subtle); color: var(--error); }
+
+@media (prefers-reduced-motion: reduce) {
+  .seat-working, .teams-lane-live { animation: none; }
+}

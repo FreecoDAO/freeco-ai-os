@@ -8895,7 +8895,13 @@ pub async fn create_agent_session(
         }
     };
     let label = req.get("label").and_then(|v| v.as_str());
-    match state.kernel.create_agent_session(agent_id, label) {
+    // `"switch": false` opens the conversation without moving the agent's
+    // chat to it: what a channel gateway wants when it opens one per contact.
+    let switch_to = req.get("switch").and_then(|v| v.as_bool()).unwrap_or(true);
+    match state
+        .kernel
+        .create_agent_session_opts(agent_id, label, switch_to)
+    {
         Ok(session) => (StatusCode::OK, Json(session)),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -28,6 +28,7 @@ impl WebFetchEngine {
             .gzip(true)
             .deflate(true)
             .brotli(true)
+            .redirect(ssrf_checked_redirects(config.ssrf_allowed_hosts.clone()))
             .build()
             .unwrap_or_default();
         Self {
@@ -98,7 +99,7 @@ impl WebFetchEngine {
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("HTTP request failed: {e}"))?;
+            .map_err(|e| format!("HTTP request failed: {}", error_chain(&e)))?;
 
         let status = resp.status();
 
@@ -181,6 +182,41 @@ fn is_html(content_type: &str, body: &str) -> bool {
 // ---------------------------------------------------------------------------
 // SSRF Protection (replicates host_functions.rs logic for builtin tools)
 // ---------------------------------------------------------------------------
+
+/// A redirect policy that runs the SSRF check on every hop.
+///
+/// The check on the URL an agent asked for is not enough on its own: a
+/// public page can answer with a redirect to `http://169.254.169.254/` or a
+/// LAN address, and reqwest's default policy follows it without asking. Each
+/// hop is checked exactly as the first URL was, with the same allowlist,
+/// and the chain stops after ten.
+pub(crate) fn ssrf_checked_redirects(allowed_hosts: Vec<String>) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        match check_ssrf(attempt.url().as_str(), &allowed_hosts) {
+            Ok(()) => attempt.follow(),
+            Err(why) => attempt.error(format!("redirect refused: {why}")),
+        }
+    })
+}
+
+/// An error and every cause under it, joined. reqwest's own message for a
+/// refused redirect is only "error following redirect", which hides why.
+pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
+}
 
 /// Check if a URL targets a private/internal network resource.
 /// Blocks localhost, metadata endpoints, and private IPs.
@@ -401,6 +437,80 @@ pub(crate) fn extract_host(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::str_utils::safe_truncate_str;
+
+    /// A loopback server that answers `/final` with a page and every other
+    /// path with a redirect to `location` (`{self}` stands for its own
+    /// address). Returns its base URL.
+    async fn redirecting_server(location: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let location = location.replace("{self}", &addr.to_string());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let location = location.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf);
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let response = if path == "/final" {
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded".to_string()
+                    } else {
+                        format!(
+                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// An engine that may reach loopback, as a self-hosted install that
+    /// allowlisted it would: the first URL passes, so only the redirect
+    /// check stands between the fetch and the blocked address.
+    fn loopback_engine() -> WebFetchEngine {
+        let config = WebFetchConfig {
+            ssrf_allowed_hosts: vec!["127.0.0.0/8".to_string()],
+            ..WebFetchConfig::default()
+        };
+        WebFetchEngine::new(
+            config,
+            Arc::new(WebCache::new(std::time::Duration::from_secs(0))),
+        )
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_blocked_address_is_refused() {
+        let base = redirecting_server("http://169.254.169.254/latest/meta-data/").await;
+        let err = loopback_engine()
+            .fetch(&format!("{base}/start"))
+            .await
+            .expect_err("the redirect to the metadata endpoint must not be followed");
+        assert!(err.contains("redirect refused"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_to_an_allowed_address_is_followed() {
+        let base = redirecting_server("http://{self}/final").await;
+        let page = loopback_engine()
+            .fetch(&format!("{base}/start"))
+            .await
+            .expect("an allowed redirect is followed");
+        assert!(page.contains("landed"), "{page}");
+    }
 
     #[test]
     fn test_truncate_multibyte_no_panic() {

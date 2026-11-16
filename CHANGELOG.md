@@ -109,8 +109,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   team, who leads it and who else is on it. Members are added on the same page,
   with a role; the member whose role says lead leads, otherwise the first to
   join.
+- The Teams page. Every team is a room with its members' seats: a seat is lit
+  only while a run is working for that agent, and a line between two seats is a
+  hand-off the kernel recorded, drawn moving only while it runs. Below it, the
+  selected team's board in four columns: ready, waiting on other tasks, in
+  progress and done. Tasks and members are added there, and a team is given a
+  goal. `GET /api/teams/floor`, `GET`/`POST /api/org/teams/{id}/tasks` and
+  `DELETE /api/org/teams/{id}/members/{agent_id}` serve it.
+- Team task boards. `task_post` takes a `team` and `blocked_by`: a team's task
+  can be claimed only by the team's members, and a task waiting on others is
+  not offered to anyone until they are all completed. Completing a task says
+  which waiting tasks it made ready.
+- `POST /api/agents/{id}/sessions` takes `"switch": false` to open a
+  conversation without moving the agent's chat to it.
+
+### Changed
+
+- The WhatsApp gateway answers only where it is meant to. Groups are ignored
+  unless listed in `WHATSAPP_ALLOWED_GROUPS` (`*` for all), and
+  `WHATSAPP_ALLOWED_NUMBERS` limits direct chats to the numbers listed. Each
+  contact and each group has a conversation of its own, and the agent is told
+  who is writing.
+
+### Security
+
+- A message from another agent is marked as such in the recipient's chat, with
+  the note that it cannot approve anything on the user's behalf. It used to
+  arrive looking exactly like the user typing.
+- `web_fetch` runs its address check on every redirect, not only the first URL,
+  so a public page can no longer redirect an agent to the cloud metadata
+  endpoint or the local network. The fallback fetch used without the web tools
+  had no check at all; it has the same one now.
 
 ### Fixed
+
+- Only the agent working on a task, or the one that posted it, can mark it
+  completed, and a completed task cannot be completed again.
+- A task assigned by name can be claimed by that agent. It was stored as the
+  name and matched against the id, so it waited forever.
 
 - Messages no longer vanish when two things talk to one agent at once. The
   streaming path (dashboard chat and popup) took no lock, so a reply running

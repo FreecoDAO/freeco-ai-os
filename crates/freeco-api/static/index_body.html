@@ -130,6 +130,10 @@
             <a class="nav-item" :class="{ active: page === 'projects' }" @click="navigate('projects')" :aria-current="page === 'projects' ? 'page' : false">
               <span class="nav-icon">&#128193;</span><span class="nav-label">Projects</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'teams' }" @click="navigate('teams')" :aria-current="page === 'teams' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M15 14.5c2.8 0 6 1.8 6 5"/></svg></span>
+              <span class="nav-label">Teams</span>
+            </a>
             <a class="nav-item" :class="{ active: page === 'sessions' }" @click="navigate('sessions')" :aria-current="page === 'sessions' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="m12 2-10 5 10 5 10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg></span>
               <span class="nav-label">Sessions</span>
@@ -617,6 +621,194 @@
 
           </div>
         </div>
+      </div>
+    </template>
+
+    <!-- Page: Teams. Every team is a room with its members' seats. A lit seat
+         means a run is working for that agent now; a line between two seats
+         is a hand-off the kernel recorded. Below, the selected team's board.
+         Nothing here moves unless the daemon says work is happening. -->
+    <!-- Alpine 3 calls the component's init() and destroy() itself. -->
+    <template x-if="page === 'teams'">
+      <div x-data="teamsPage" class="page-body teams-page">
+        <div class="page-header">
+          <h1 class="page-title">Teams</h1>
+          <p class="page-subtitle">
+            Who is on each team, who is working right now, and what is ready,
+            waiting or done.
+          </p>
+        </div>
+
+        <div x-show="loadError" class="alert alert-error" role="alert" x-text="loadError"></div>
+
+        <div class="teams-stats" aria-live="polite">
+          <div class="teams-stat"><span class="teams-stat-num" x-text="workingNow()"></span><span class="teams-stat-label">working now</span></div>
+          <div class="teams-stat"><span class="teams-stat-num" x-text="readyTasks()"></span><span class="teams-stat-label">tasks ready</span></div>
+          <div class="teams-stat"><span class="teams-stat-num" x-text="liveHandoffs()"></span><span class="teams-stat-label">hand-offs running</span></div>
+        </div>
+
+        <div x-show="loading" class="text-dim">Loading...</div>
+
+        <div x-show="!loading && !teams.length && !loadError" class="teams-empty">
+          No teams yet. Create one below, then put agents on it.
+        </div>
+
+        <!-- The floor: rooms reflow like any HTML; the lines are drawn over
+             them from where the seats actually landed. -->
+        <div class="teams-floor" x-ref="floor" x-show="teams.length || unassigned.length">
+          <svg class="teams-lanes" :width="floorW" :height="floorH" :viewBox="'0 0 ' + floorW + ' ' + floorH"
+               aria-hidden="true" focusable="false">
+            <template x-for="l in lanes" :key="l.key">
+              <path :d="l.d" class="teams-lane" :class="{ 'teams-lane-live': l.live, 'teams-lane-failed': l.failed }">
+                <title x-text="l.title"></title>
+              </path>
+            </template>
+          </svg>
+
+          <template x-for="t in teams" :key="t.id">
+            <button type="button" class="teams-room" :class="{ 'teams-room-selected': t.id === selectedId }"
+                    @click="select(t)" :aria-pressed="t.id === selectedId ? 'true' : 'false'"
+                    :aria-label="'Team ' + t.name + ', ' + t.members.length + ' member' + (t.members.length === 1 ? '' : 's')">
+              <span class="teams-room-head">
+                <span class="teams-room-name" x-text="t.name"></span>
+                <span class="teams-room-project" x-show="t.project" x-text="t.project"></span>
+              </span>
+              <span class="teams-seats">
+                <template x-for="m in t.members" :key="m.agent_id">
+                  <span class="teams-seat-wrap" :title="seatTitle(m)">
+                    <span :class="seatClass(m)" :data-seat="m.agent_id" x-text="initials(m.name)"></span>
+                    <span class="teams-seat-name" x-text="m.name"></span>
+                    <span class="teams-seat-role" x-show="m.role" x-text="m.role"></span>
+                    <span class="teams-seat-state" x-show="m.working" x-text="'working' + (m.working_in > 1 ? ' x' + m.working_in : '')"></span>
+                  </span>
+                </template>
+                <span class="text-xs text-dim" x-show="!t.members.length">No one on this team yet.</span>
+              </span>
+              <span class="teams-room-counts">
+                <span x-text="t.tasks.ready + ' ready'"></span>
+                <span x-text="t.tasks.blocked + ' waiting'"></span>
+                <span x-text="t.tasks.in_progress + ' in progress'"></span>
+                <span x-text="t.tasks.completed + ' done'"></span>
+              </span>
+            </button>
+          </template>
+
+          <div class="teams-room teams-room-lobby" x-show="unassigned.length">
+            <span class="teams-room-head"><span class="teams-room-name">Not on a team</span></span>
+            <span class="teams-seats">
+              <template x-for="m in unassigned" :key="m.agent_id">
+                <span class="teams-seat-wrap" :title="seatTitle(m)">
+                  <span :class="seatClass(m)" :data-seat="m.agent_id" x-text="initials(m.name)"></span>
+                  <span class="teams-seat-name" x-text="m.name"></span>
+                  <span class="teams-seat-state" x-show="m.working" x-text="'working'"></span>
+                </span>
+              </template>
+            </span>
+          </div>
+        </div>
+
+        <div class="teams-new-team">
+          <input class="form-input" x-model="newTeam" placeholder="New team name..." aria-label="New team name"
+                 @keydown.enter="createTeam()">
+          <button class="btn btn-ghost" @click="createTeam()" :disabled="!newTeam.trim()">Create team</button>
+        </div>
+
+        <!-- The selected team: its people, its goal, its board. -->
+        <template x-if="selected()">
+          <section class="teams-detail" :aria-label="selected().name + ' board'">
+            <h2 class="teams-detail-title" x-text="selected().name"></h2>
+
+            <div class="teams-detail-row">
+              <div class="card teams-card">
+                <h3 class="teams-card-title">Members</h3>
+                <ul class="teams-members">
+                  <template x-for="m in selected().members" :key="m.agent_id">
+                    <li>
+                      <span x-text="m.name"></span>
+                      <span class="text-xs text-dim" x-show="m.role" x-text="'(' + m.role + ')'"></span>
+                      <button class="btn btn-ghost btn-sm" @click="removeMember(m)"
+                              :aria-label="'Take ' + m.name + ' off the team'">Remove</button>
+                    </li>
+                  </template>
+                </ul>
+                <div class="teams-inline-form">
+                  <select class="form-input" x-model="newMember.agent_id" aria-label="Agent to add">
+                    <option value="">Add an agent...</option>
+                    <template x-for="a in notOnTeam()" :key="a.id">
+                      <option :value="a.id" x-text="a.name"></option>
+                    </template>
+                  </select>
+                  <input class="form-input teams-role" x-model="newMember.role" placeholder="Role, e.g. lead" aria-label="Role on the team">
+                  <button class="btn btn-sm" @click="addMember()" :disabled="!newMember.agent_id">Add</button>
+                </div>
+                <p class="text-xs text-dim">The member with the role <em>lead</em> splits a goal and hands the parts out.</p>
+                <div class="teams-inline-form" x-show="selected().members.length">
+                  <input class="form-input" x-model="goal" placeholder="Give the team a goal..." aria-label="Team goal"
+                         @keydown.enter="runTeam()">
+                  <button class="btn btn-sm" @click="runTeam()" :disabled="running || !goal.trim()">Run team</button>
+                </div>
+              </div>
+
+              <div class="card teams-card">
+                <h3 class="teams-card-title">New task</h3>
+                <input class="form-input" x-model="newTask.title" placeholder="What needs doing" aria-label="Task title">
+                <textarea class="form-input" rows="2" x-model="newTask.description" placeholder="Details (optional)" aria-label="Task details"></textarea>
+                <div class="teams-inline-form">
+                  <select class="form-input" x-model="newTask.assigned_to" aria-label="Who does it">
+                    <option value="">Anyone on the team</option>
+                    <template x-for="m in selected().members" :key="m.agent_id">
+                      <option :value="m.agent_id" x-text="m.name"></option>
+                    </template>
+                  </select>
+                </div>
+                <label class="text-xs text-dim" for="teams-blocked-by" x-show="openTasks().length">Waits for (hold Ctrl or Cmd to pick several)</label>
+                <select id="teams-blocked-by" class="form-input" multiple x-model="newTask.blocked_by" x-show="openTasks().length" size="3">
+                  <template x-for="t in openTasks()" :key="t.id">
+                    <option :value="t.id" x-text="t.title"></option>
+                  </template>
+                </select>
+                <button class="btn" @click="postTask()" :disabled="posting || !newTask.title.trim()">Add to the board</button>
+              </div>
+            </div>
+
+            <div class="teams-board">
+              <template x-for="col in [['ready','Ready'],['blocked','Waiting'],['in_progress','In progress'],['completed','Done']]" :key="col[0]">
+                <div class="teams-col" :class="'teams-col-' + col[0]">
+                  <h3 class="teams-col-title"><span x-text="col[1]"></span> <span class="teams-col-count" x-text="board(col[0]).length"></span></h3>
+                  <template x-for="task in board(col[0])" :key="task.id">
+                    <div class="teams-task">
+                      <div class="teams-task-title" x-text="task.title"></div>
+                      <div class="teams-task-meta">
+                        <span x-show="task.assigned_to" x-text="nameOf(task.assigned_to)"></span>
+                        <span x-show="!task.assigned_to">anyone</span>
+                        <span x-text="ago(task.completed_at || task.created_at)"></span>
+                      </div>
+                      <div class="teams-task-wait" x-show="task.blocked">
+                        Waits for <span x-text="task.blocked_by.map(function (id) { return taskTitle(id); }).join(', ')"></span>
+                      </div>
+                      <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
+                    </div>
+                  </template>
+                  <div class="text-xs text-dim" x-show="!board(col[0]).length">Nothing here.</div>
+                </div>
+              </template>
+            </div>
+          </section>
+        </template>
+
+        <section class="teams-handoffs" x-show="handoffs.length" aria-label="Latest hand-offs">
+          <h2 class="teams-detail-title">Latest hand-offs</h2>
+          <ul>
+            <template x-for="h in handoffs" :key="h.id">
+              <li class="teams-handoff">
+                <span class="teams-handoff-status" :class="'teams-handoff-' + h.status" x-text="h.status === 'working' ? 'working' : (h.status === 'done' ? 'done' : 'failed')"></span>
+                <span><strong x-text="h.from_name || 'Someone'"></strong> to <strong x-text="h.to_name"></strong>:
+                  <span x-text="h.title"></span></span>
+                <span class="text-xs text-dim" x-text="(h.kind === 'delegate' ? 'task' : 'message') + ' · ' + ago(h.started_at)"></span>
+              </li>
+            </template>
+          </ul>
+        </section>
       </div>
     </template>
 
