@@ -423,4 +423,56 @@ pub trait KernelHandle: Send + Sync {
         let _ = parent_caps;
         self.spawn_agent(manifest_toml, parent_id).await
     }
+
+    /// One agent's full setup (model, tools it really has, skills, MCP
+    /// servers, tags), for agents that manage other agents. Accepts a UUID or
+    /// a name.
+    fn describe_agent(&self, agent: &str) -> Result<serde_json::Value, String> {
+        let _ = agent;
+        Err("Agent details not available".to_string())
+    }
+
+    /// An agent's skill allowlist and every installed skill name, as
+    /// `(assigned, installed)`. An empty `assigned` means every skill.
+    fn agent_skills(&self, agent: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let _ = agent;
+        Err("Skill assignment not available".to_string())
+    }
+
+    /// Replace an agent's skill allowlist. Empty means every skill.
+    fn set_agent_skills_by_ref(&self, agent: &str, skills: Vec<String>) -> Result<(), String> {
+        let _ = (agent, skills);
+        Err("Skill assignment not available".to_string())
+    }
+
+    /// Reload skills from disk; returns how many are installed afterwards.
+    fn reload_skills_now(&self) -> Result<usize, String> {
+        Err("Skill reload not available".to_string())
+    }
+
+    /// Every model in the catalog, with whether it can be used right now.
+    fn list_model_choices(&self) -> Vec<ModelChoice> {
+        Vec::new()
+    }
+}
+
+/// A model an agent can be pointed at, as `model_list` reports it.
+#[derive(Debug, Clone, Default)]
+pub struct ModelChoice {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    pub tier: String,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
+    pub supports_tools: bool,
+    pub input_cost_per_m: f64,
+    pub output_cost_per_m: f64,
+    /// The provider has a key (or needs none) and has not reported the model
+    /// as unavailable for that key.
+    pub usable: bool,
+    /// The provider has a key or needs none. Kept apart from `usable` so a
+    /// model the provider does not serve is not reported as a missing key,
+    /// which would send the agent to replace a working key.
+    pub provider_has_key: bool,
 }

@@ -59,6 +59,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tool time limit (two minutes by default) to answer. The approval is
   asked for first and the time limit starts once you approve.
 
+### Added
+
+- The CEO can run the installation. Whichever agent holds the CEO role (the
+  one the dashboard opens as the main chat) now gets the tools for it, whatever
+  its manifest lists: containers, agents, skills, models and providers. The
+  owner can still take any of them away with the agent's tool blocklist. Only
+  the owner gives the role: an agent spawning a child with the `ceo` tag is
+  refused.
+- Containers can be managed without a shell. `container_list` shows every
+  container on the machine, whatever started it; `container_logs` reads why
+  one fails; `container_start`, `container_stop` and `container_restart` act
+  on one and report the state it reaches. Agents could not do this before:
+  `podman` is refused by the shell policy and the sandbox has no podman.
+  FreEco's own container (`freeco-daemon`, plus any named in
+  `FREECO_PROTECTED_CONTAINERS`) cannot be stopped or restarted from a chat.
+- `agent_skills_set` switches skills on or off for any agent, through the same
+  path as the dashboard. `skill_reload` picks up skill folders added on disk.
+- `agent_describe` shows an agent's model, the tools it really has and its
+  skills, so the CEO can check its own abilities. `model_list` shows which
+  models agents can be switched to, with price and context size.
+- Agents holding these tools get a short "Running FreEco" section in their
+  prompt that says how to use them.
+
+### Changed
+
+- The shipped `freeco-ceo` template is now a model-backed agent with a job
+  description and the management tools. It was a keyword matcher that never
+  called a model, so it could not use a tool. Agents already created from the
+  old template keep it until recreated.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

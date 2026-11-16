@@ -16,6 +16,7 @@ pub mod auth_cooldown;
 pub mod browser;
 pub mod command_lane;
 pub mod compactor;
+pub mod container_admin;
 pub mod context_budget;
 pub mod context_overflow;
 pub mod copilot_oauth;
