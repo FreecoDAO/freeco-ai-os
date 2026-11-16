@@ -124,6 +124,17 @@ pub fn current_agent_depth() -> u32 {
     AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0)
 }
 
+/// Run `fut` at inter-agent call depth `depth`.
+///
+/// For a run moved onto a task of its own: task-locals do not cross
+/// `tokio::spawn`, and without this the moved run would start counting from
+/// zero, lifting the limit on how deep agents may ask each other.
+pub async fn with_agent_depth<F: std::future::Future>(depth: u32, fut: F) -> F::Output {
+    AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(depth), fut)
+        .await
+}
+
 /// The checks that refuse a call outright, before anyone is asked to approve
 /// it: the tool is outside the agent's grants, or the agent is working for
 /// another agent and the tool is one no subagent may use.

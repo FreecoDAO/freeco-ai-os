@@ -29,6 +29,8 @@ struct Script {
     calls: Mutex<Vec<Call>>,
     /// The system prompt of every request, by who sent it.
     prompts: Mutex<Vec<(String, String)>>,
+    /// Every request body, by who sent it.
+    bodies: Mutex<Vec<(String, serde_json::Value)>>,
 }
 
 impl Script {
@@ -276,6 +278,11 @@ async fn serve(script: Arc<Script>) -> String {
                     .lock()
                     .unwrap()
                     .push((who.clone(), system.clone()));
+                script
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .push((who.clone(), body.clone()));
                 let start = Instant::now();
                 // A provider that refuses the request, as a bad key, a blocked
                 // prompt or an outage does.
@@ -320,13 +327,18 @@ async fn serve(script: Arc<Script>) -> String {
 }
 
 fn boot(test: &str) -> Arc<FreecoKernel> {
+    boot_with(test, |_| {})
+}
+
+/// `boot`, with a change to the configuration first.
+fn boot_with(test: &str, change: impl FnOnce(&mut KernelConfig)) -> Arc<FreecoKernel> {
     std::env::set_var(KEY_ENV, "sk-test");
     let home = std::env::temp_dir().join(format!(
         "freeco-parallel-{test}-{}",
         uuid::Uuid::new_v4().simple()
     ));
     std::fs::create_dir_all(&home).unwrap();
-    let config = KernelConfig {
+    let mut config = KernelConfig {
         home_dir: home.clone(),
         data_dir: home.join("data"),
         default_model: DefaultModelConfig {
@@ -338,6 +350,7 @@ fn boot(test: &str) -> Arc<FreecoKernel> {
         },
         ..KernelConfig::default()
     };
+    change(&mut config);
     let kernel = Arc::new(FreecoKernel::boot_with_config(config).expect("kernel boots"));
     kernel.set_self_handle();
     kernel
@@ -1054,4 +1067,181 @@ async fn a_message_from_another_agent_says_it_is_not_from_the_user() {
         .find(|h| h.from_name.as_deref() == Some("pong"))
         .expect("pong's attempt is on record");
     assert_eq!(back.status, "failed", "{back:?}");
+}
+
+/// The tool names one request offered the model.
+fn offered_tools(body: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = body["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The requests `who` sent from position `from` in the record on.
+fn bodies_of(script: &Script, who: &str, from: usize) -> Vec<serde_json::Value> {
+    script.bodies.lock().unwrap()[from..]
+        .iter()
+        .filter(|(w, _)| w == who)
+        .map(|(_, b)| b.clone())
+        .collect()
+}
+
+/// Write one of the owner's private files into an agent's state directory.
+fn write_owner_file(kernel: &FreecoKernel, agent: AgentId, file: &str, text: &str) {
+    let dir = kernel
+        .registry
+        .get(agent)
+        .unwrap()
+        .manifest
+        .state_dir
+        .expect("agents have a state directory");
+    std::fs::write(dir.join(file), text).unwrap();
+}
+
+/// A WhatsApp guest is a different person from the owner: their own
+/// conversation, none of the owner's profile, memory or chats, and only the
+/// tools `[guests] tools` lists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_gets_their_own_conversation_and_nothing_of_the_owners() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("guest");
+    let desk = spawn(
+        &kernel,
+        "fast-desk",
+        &url,
+        &["web_fetch", "shell_exec", "file_read", "agent_send"],
+    );
+    write_owner_file(&kernel, desk, "USER.md", "OWNER-PROFILE lives in Geneva.");
+    write_owner_file(&kernel, desk, "MEMORY.md", "OWNER-MEMORY: banker is Ms X.");
+    let handle = kernel.clone() as Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle>;
+
+    kernel
+        .send_message(desk, "owner private note")
+        .await
+        .unwrap();
+    let owner = bodies_of(&script, "fast-desk", 0);
+    let owner_text = owner.last().unwrap().to_string();
+    assert!(
+        owner_text.contains("OWNER-PROFILE"),
+        "the test files are read"
+    );
+    assert!(offered_tools(owner.last().unwrap()).contains(&"shell_exec".to_string()));
+
+    let seen = script.bodies.lock().unwrap().len();
+    let reply = kernel
+        .send_message_with_handle_and_blocks(
+            desk,
+            "guest asks for a table",
+            Some(Arc::clone(&handle)),
+            None,
+            Some("+41790000000".to_string()),
+            Some("Gast".to_string()),
+        )
+        .await
+        .unwrap();
+    assert!(reply.response.contains("guest asks"), "{}", reply.response);
+
+    let guest = bodies_of(&script, "fast-desk", seen);
+    assert_eq!(guest.len(), 1);
+    let guest_text = guest[0].to_string();
+    for private in ["OWNER-PROFILE", "OWNER-MEMORY", "owner private note"] {
+        assert!(!guest_text.contains(private), "{private} reached a guest");
+    }
+    assert!(guest_text.contains("Guest conversation"), "{guest_text}");
+    // The default `[guests] tools` the agent also has: web_fetch, and the
+    // read-only skill tools every agent gets.
+    assert_eq!(
+        offered_tools(&guest[0]),
+        vec!["skill_describe", "skill_list", "web_fetch"]
+    );
+
+    // Each in their own conversation, and the owner's stays put.
+    let main = kernel.registry.get(desk).unwrap().session_id;
+    assert_eq!(user_texts(&kernel, main), vec!["owner private note"]);
+    let theirs = kernel.conversation_for(desk, "+41790000000").unwrap();
+    assert_ne!(theirs, main);
+    assert_eq!(user_texts(&kernel, theirs), vec!["guest asks for a table"]);
+
+    // And nothing the guest said comes back to the owner as "earlier".
+    let seen = script.bodies.lock().unwrap().len();
+    kernel.send_message(desk, "owner again").await.unwrap();
+    let later = bodies_of(&script, "fast-desk", seen);
+    assert!(!later[0].to_string().contains("guest asks"), "{}", later[0]);
+}
+
+/// Asking another agent is no way around the limits: the agent a guest's
+/// conversation asks runs as that guest too, in a conversation of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_stays_a_guest_through_other_agents() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot_with("guest-chain", |c| {
+        c.guests.tools = vec!["agent_send".to_string()];
+    });
+    let ping = spawn(&kernel, "ping", &url, &["agent_send", "file_read"]);
+    let pong = spawn(&kernel, "pong", &url, &["agent_send", "shell_exec"]);
+    write_owner_file(&kernel, pong, "USER.md", "PONG-OWNER-PROFILE");
+    let handle = kernel.clone() as Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle>;
+
+    // The owner talks with pong first, so its own conversation has history.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        kernel.send_message(pong, "owner private note"),
+    )
+    .await
+    .expect("the owner's run finishes")
+    .unwrap();
+
+    let seen = script.bodies.lock().unwrap().len();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        kernel.send_message_with_handle_and_blocks(
+            ping,
+            "guest says go",
+            Some(handle),
+            None,
+            Some("telegram:42".to_string()),
+            Some("Guest".to_string()),
+        ),
+    )
+    .await
+    .expect("the guest's chain finishes")
+    .unwrap();
+
+    let asked = bodies_of(&script, "pong", seen);
+    assert!(!asked.is_empty(), "ping asked pong");
+    for body in &asked {
+        let text = body.to_string();
+        assert!(text.contains("Guest conversation"), "pong ran as the owner");
+        assert!(!text.contains("PONG-OWNER-PROFILE"), "{text}");
+        assert!(!text.contains("owner private note"), "{text}");
+        assert_eq!(offered_tools(body), vec!["agent_send"]);
+    }
+    for body in bodies_of(&script, "ping", seen) {
+        assert_eq!(offered_tools(&body), vec!["agent_send"]);
+    }
+
+    // pong's own conversation with the owner was not touched (tool results
+    // are stored as user turns with no text).
+    let main = kernel.registry.get(pong).unwrap().session_id;
+    let typed: Vec<String> = user_texts(&kernel, main)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect();
+    assert_eq!(typed, vec!["owner private note"]);
+    let theirs = kernel.conversation_for(pong, "telegram:42").unwrap();
+    assert!(
+        user_texts(&kernel, theirs)
+            .iter()
+            .any(|t| t.contains("Message from the agent \"ping\"")),
+        "pong heard from ping in the guest's conversation"
+    );
 }

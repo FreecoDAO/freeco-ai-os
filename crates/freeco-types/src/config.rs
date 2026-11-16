@@ -199,6 +199,38 @@ fn default_role() -> String {
     "user".to_string()
 }
 
+/// Tools a guest's conversation may use when `[guests] tools` is not set:
+/// looking things up, nothing that reads the owner's files or memory, sends
+/// messages, spends money or changes the setup.
+pub const DEFAULT_GUEST_TOOLS: &[&str] = &[
+    "web_search",
+    "web_fetch",
+    "system_time",
+    "skill_list",
+    "skill_describe",
+];
+
+/// What a guest may do: anyone who writes to an agent through a channel or
+/// the API's `sender_id` and is not bound to an owner or admin in `[[users]]`.
+///
+/// A guest always gets a conversation of their own, never sees the owner's
+/// profile, memory or other conversations, and can only use these tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuestPolicy {
+    /// Tool names a guest's conversation may use. A trailing `*` matches a
+    /// prefix, e.g. `mcp_bookings_*` for one MCP server's tools.
+    pub tools: Vec<String>,
+}
+
+impl Default for GuestPolicy {
+    fn default() -> Self {
+        Self {
+            tools: DEFAULT_GUEST_TOOLS.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+}
+
 fn default_user_enabled() -> bool {
     true
 }
@@ -1411,6 +1443,9 @@ pub struct KernelConfig {
     /// User configurations for RBAC multi-user support.
     #[serde(default)]
     pub users: Vec<UserConfig>,
+    /// What people who write to an agent but are not its owner may do.
+    #[serde(default)]
+    pub guests: GuestPolicy,
     /// MCP server configurations for external tool integration.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfigEntry>,
@@ -1790,6 +1825,7 @@ impl Default for KernelConfig {
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
+            guests: GuestPolicy::default(),
             mcp_servers: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),

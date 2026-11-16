@@ -304,6 +304,16 @@ pub fn strip_provider_prefix_known(
     model.to_string()
 }
 
+/// Whether the kernel marked this run as a guest's (someone other than the
+/// agent's owner): `metadata.guest = true` on the run's copy of the manifest.
+fn is_guest_run(manifest: &AgentManifest) -> bool {
+    manifest
+        .metadata
+        .get("guest")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod strip_provider_prefix_tests {
     use super::{should_try_fallback, strip_provider_prefix};
@@ -488,8 +498,15 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (dims={})", query_vec.len());
@@ -968,7 +985,9 @@ pub async fn run_agent_loop(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
@@ -1959,8 +1978,15 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (streaming, dims={})", query_vec.len());
@@ -2406,7 +2432,9 @@ pub async fn run_agent_loop_streaming(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
