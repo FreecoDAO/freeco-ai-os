@@ -611,19 +611,50 @@ pub async fn send_message(
         None => req.message.clone(),
     };
 
+    let pinned_session = match req.session_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(sid) => match uuid::Uuid::parse_str(sid) {
+            Ok(u) => Some(freeco_types::agent::SessionId(u)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid session_id"})),
+                );
+            }
+        },
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle_and_blocks(
-            agent_id,
-            &message,
-            Some(kernel_handle),
-            content_blocks,
-            req.sender_id,
-            req.sender_name,
-        )
-        .await
-    {
+    let outcome = match pinned_session {
+        Some(session_id) => {
+            state
+                .kernel
+                .send_message_in_session_from(
+                    agent_id,
+                    session_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                    req.sender_id,
+                    req.sender_name,
+                )
+                .await
+        }
+        None => {
+            state
+                .kernel
+                .send_message_with_handle_and_blocks(
+                    agent_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                    req.sender_id,
+                    req.sender_name,
+                )
+                .await
+        }
+    };
+    match outcome {
         Ok(result) => {
             // Strip <think>...</think> blocks from model output
             let cleaned = crate::ws::strip_think_tags(&result.response);
@@ -677,6 +708,9 @@ pub async fn send_message(
 ///   response (intended for debugging only). Defaults to `false` so the
 ///   internal system prompt is never leaked into the Web UI conversation
 ///   history (issue #935).
+/// - `session_id` — one named conversation of this agent instead of its
+///   current one. A chat watching its own conversation asks for that one, so
+///   another window switching the agent does not change what it sees.
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -710,7 +744,25 @@ pub async fn get_agent_session(
         }
     };
 
-    match state.kernel.memory.get_session(entry.session_id) {
+    let session_id = match params.get("session_id").map(|s| s.trim()) {
+        None | Some("") => entry.session_id,
+        Some(sid) => match uuid::Uuid::parse_str(sid) {
+            Ok(u) => freeco_types::agent::SessionId(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid session_id"})),
+                );
+            }
+        },
+    };
+
+    match state.kernel.memory.get_session(session_id) {
+        // Another agent's conversation is not readable through this one.
+        Ok(Some(session)) if session.agent_id != agent_id => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No such conversation for this agent"})),
+        ),
         Ok(Some(session)) => {
             // Filter out system-role messages BEFORE any rendering / truncation
             // logic so the system prompt cannot leak into the response. The
@@ -864,17 +916,23 @@ pub async fn get_agent_session(
                     "context_window_tokens": session.context_window_tokens,
                     "label": session.label,
                     "messages": messages,
+                    // A run is still working in this conversation. Its reply
+                    // is saved when it finishes, so a chat opened mid-run --
+                    // after switching away and back, or a reload -- shows that
+                    // it is coming rather than a thread that looks ignored.
+                    "busy": state.kernel.is_conversation_busy(session.id),
                 })),
             )
         }
         Ok(None) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "session_id": entry.session_id.0.to_string(),
+                "session_id": session_id.0.to_string(),
                 "agent_id": agent_id.to_string(),
                 "message_count": 0,
                 "context_window_tokens": 0,
                 "messages": [],
+                "busy": state.kernel.is_conversation_busy(session_id),
             })),
         ),
         Err(e) => {
@@ -7284,10 +7342,13 @@ pub async fn delete_session(
     };
 
     match state.kernel.memory.delete_session(session_id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "session_id": id})),
-        ),
+        Ok(()) => {
+            state.kernel.mark_conversation_ended(session_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "deleted", "session_id": id})),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),

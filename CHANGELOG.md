@@ -89,6 +89,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called a model, so it could not use a tool. Agents already created from the
   old template keep it until recreated.
 
+### Added
+
+- Agents work in parallel. Each conversation has its own queue, so one agent
+  can answer a WhatsApp guest, a dashboard chat and a delegated task at the
+  same time, and different agents never wait for each other.
+- `agent_delegate`: a lead agent hands several tasks to several agents at once
+  (or to fresh conversations of itself) and gets every result back together.
+  Each task runs in a conversation of its own, filed under the lead's project,
+  where the user can open and follow it. Any agent allowed `agent_send` may use
+  it.
+- Projects you can work in. A project's brief is read by every agent working
+  in one of its conversations; the Projects page edits the brief, starts a
+  conversation with any agent inside the project, shows which conversations are
+  working right now, and opens each one.
+- Teams you can run. Give a team a goal on the Projects page: its lead gets it
+  in a conversation of its own, hands parts to the other members, who work at
+  the same time, and combines what comes back. Every member's prompt names the
+  team, who leads it and who else is on it. Members are added on the same page,
+  with a role; the member whose role says lead leads, otherwise the first to
+  join.
+
+### Fixed
+
+- Messages no longer vanish when two things talk to one agent at once. The
+  streaming path (dashboard chat and popup) took no lock, so a reply running
+  while a channel message or a second window arrived saved over the other's
+  messages. The agent's shared history had the same race.
+- Switching chats no longer stalls or drops messages. The dashboard had one
+  "sending" flag and one queue for every chat, so a reply running in one chat
+  queued every message typed into any other behind it, and leaving a chat
+  mid-reply could strand its queue for good. Each chat now keeps its own; what
+  was queued is still delivered after switching away, and a chat opened while
+  its agent is still working says so and shows the reply when it lands.
+- A reply can no longer be drawn into the wrong chat. Frames from the socket of
+  the chat just left were still rendered into the next one.
+- A message lands in the conversation it was typed in, even after another
+  window switched the agent to a different conversation.
+- A message waiting behind a reply goes to the new conversation when the old
+  one is reset meanwhile, instead of bringing the reset one back. A streamed
+  message in that spot is refused with a note to send it again.
+- An agent asked a question by an agent it is itself waiting on is told so,
+  instead of both waiting for each other forever.
+- Long chats no longer forget their start. The model is sent only the newest
+  messages of a conversation (20 by default, tool calls included), and what
+  dropped out was simply gone: the only summary meant to cover it was shared by
+  all of an agent's chats, cut to 500 characters, and the first thing the trim
+  removed. What drops out is now carried in the prompt instead: everything the
+  user said, word for word, and the agent's own replies in short with the tools
+  they used. It needs no extra model call.
+- A failed or stopped reply no longer takes the user's message with it. The
+  conversation was saved only once a reply finished, so a provider error, a
+  blocked request or a pressed Stop erased the message, and any tool results of
+  that turn. The message is now saved before the model is called, and what a
+  failed run did is kept.
+- Long chats no longer make a summarising call before every reply. Once a chat
+  passed 30 messages, every message waited on one, for a summary of the agent's
+  current chat rather than the one being answered.
+- `project_create` stored the description as the company id.
+- Opening an agent's chat from a link (a project's Open button, the assistant's
+  "open the chat" links) while another chat was open landed on the agent list
+  instead of the chat.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

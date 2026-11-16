@@ -259,7 +259,12 @@ impl OrgStore {
             .map_err(mem_err)?;
 
         let mut member_stmt = conn
-            .prepare("SELECT agent_id, role FROM team_members WHERE team_id = ?1")
+            // In the order they joined: with no member marked lead, the first
+            // one to join leads a team run.
+            .prepare(
+                "SELECT agent_id, role FROM team_members WHERE team_id = ?1 \
+                 ORDER BY created_at, agent_id",
+            )
             .map_err(mem_err)?;
         let mut out = Vec::with_capacity(teams.len());
         for (id, mut team) in teams {
@@ -280,6 +285,14 @@ impl OrgStore {
             out.push(team);
         }
         Ok(out)
+    }
+
+    /// One team, with its project and members, archived or not.
+    pub fn get_team(&self, team_id: &str) -> FreecoResult<Option<serde_json::Value>> {
+        Ok(self
+            .list_teams(true)?
+            .into_iter()
+            .find(|t| t["id"].as_str() == Some(team_id)))
     }
 
     pub fn add_team_member(
@@ -344,11 +357,14 @@ impl OrgStore {
     }
 
     /// Sessions belonging to a project — the team's own history.
+    ///
+    /// Each row names its agent: a conversation is opened by agent, so a list
+    /// without one is a list of things nobody can open.
     pub fn sessions_for_project(&self, project_id: &str) -> FreecoResult<Vec<serde_json::Value>> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, label, kind, archived, updated_at FROM sessions
+                "SELECT id, label, kind, archived, updated_at, agent_id FROM sessions
                  WHERE project_id = ?1 AND trashed = 0
                  ORDER BY updated_at DESC",
             )
@@ -361,10 +377,60 @@ impl OrgStore {
                     "kind": r.get::<_, String>(2)?,
                     "archived": r.get::<_, i64>(3)? != 0,
                     "updated_at": r.get::<_, String>(4)?,
+                    "agent_id": r.get::<_, String>(5)?,
                 }))
             })
             .map_err(mem_err)?;
         rows.collect::<Result<_, _>>().map_err(mem_err)
+    }
+
+    /// The project and team a session is filed under, or `None` when the
+    /// session does not exist.
+    pub fn session_scope(
+        &self,
+        session_id: &str,
+    ) -> FreecoResult<Option<(Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        match conn.query_row(
+            "SELECT project_id, team_id FROM sessions WHERE id = ?1",
+            [session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ) {
+            Ok(scope) => Ok(Some(scope)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(mem_err(e)),
+        }
+    }
+
+    /// One project by id.
+    pub fn get_project(&self, project_id: &str) -> FreecoResult<Option<Project>> {
+        Ok(self
+            .list_projects(true)?
+            .into_iter()
+            .find(|p| p.id == project_id))
+    }
+
+    /// Rename a project or rewrite its brief. `None` leaves a field as it is.
+    ///
+    /// The description is the project's brief: every agent working in one of
+    /// its conversations reads it, the way a CLAUDE.md is read in a folder.
+    pub fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> FreecoResult<Option<Project>> {
+        {
+            let conn = self.conn.lock().map_err(lock_err)?;
+            conn.execute(
+                "UPDATE projects SET name = COALESCE(?1, name),
+                        description = COALESCE(?2, description), updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![name, description, now(), project_id],
+            )
+            .map_err(mem_err)?;
+        }
+        self.get_project(project_id)
     }
 
     /// Everything the CEO-level assistant can see: one line per project with
@@ -489,6 +555,44 @@ mod tests {
         let visible = s.projects_for_agent("agent-1").unwrap();
         assert_eq!(visible, vec![mine.id]);
         assert!(s.projects_for_agent("agent-2").unwrap().is_empty());
+    }
+
+    /// A project's conversations can be opened, its brief rewritten, and a
+    /// session's place in it read back -- the three things the projects page
+    /// and `agent_delegate` rely on.
+    #[test]
+    fn a_project_lists_its_agents_and_keeps_its_brief() {
+        let s = store();
+        let p = s.create_project("Launch", None, Some("old brief")).unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at, project_id)
+                 VALUES ('s1', 'agent-1', X'90', 0, datetime('now'), datetime('now'), ?1)",
+                [&p.id],
+            )
+            .unwrap();
+        }
+
+        let rows = s.sessions_for_project(&p.id).unwrap();
+        assert_eq!(rows[0]["agent_id"], "agent-1");
+
+        assert_eq!(
+            s.session_scope("s1").unwrap(),
+            Some((Some(p.id.clone()), None))
+        );
+        assert_eq!(s.session_scope("missing").unwrap(), None);
+
+        let renamed = s
+            .update_project(&p.id, None, Some("new brief"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "Launch", "an absent name is left alone");
+        assert_eq!(renamed.description.as_deref(), Some("new brief"));
+        assert!(s
+            .update_project("missing", Some("x"), None)
+            .unwrap()
+            .is_none());
     }
 
     /// Archive and trash are different states, and neither destroys anything.

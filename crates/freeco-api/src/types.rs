@@ -48,6 +48,11 @@ pub struct MessageRequest {
     /// Sender display name.
     #[serde(default)]
     pub sender_name: Option<String>,
+    /// The conversation this message belongs to. Without it the message goes
+    /// to the agent's current conversation, which is whichever any window last
+    /// switched to -- not necessarily the one the sender is looking at.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Response from sending a message.

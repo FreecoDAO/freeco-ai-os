@@ -20,6 +20,17 @@ pub struct AgentInfo {
     pub tools: Vec<String>,
 }
 
+/// What came back from one task handed to an agent with `agent_delegate`.
+#[derive(Debug, Clone)]
+pub struct DelegatedTask {
+    pub agent_id: String,
+    pub agent_name: String,
+    /// The fresh conversation the task ran in. It stays, so the user can open
+    /// it and the lead agent can follow up in it with `agent_send`.
+    pub session_id: String,
+    pub reply: String,
+}
+
 /// Handle to kernel operations, passed into the agent loop so agents
 /// can interact with each other via tools.
 #[allow(clippy::too_many_arguments)]
@@ -36,6 +47,24 @@ pub trait KernelHandle: Send + Sync {
 
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
+
+    /// Run one task in a fresh conversation of `agent` (the caller itself when
+    /// `None`) and wait for its reply.
+    ///
+    /// A fresh conversation is what lets several of these run at once, even
+    /// on one agent, without waiting for or disturbing any chat that agent is
+    /// already in. It is filed under the same project as the conversation that
+    /// asked, so the project shows the whole piece of work.
+    async fn delegate_task(
+        &self,
+        caller_id: Option<&str>,
+        agent: Option<&str>,
+        title: &str,
+        task: &str,
+    ) -> Result<DelegatedTask, String> {
+        let _ = (caller_id, agent, title, task);
+        Err("Delegation is not available".to_string())
+    }
 
     /// List all running agents.
     /// Store an API key for a provider, and report whether it now works.

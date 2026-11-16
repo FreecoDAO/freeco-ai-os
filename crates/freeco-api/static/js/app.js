@@ -699,6 +699,11 @@ window.FreecoVoiceCfg = {
 // delivered: they are told it was sent and have no way to see it. The chat page
 // already opens whatever `pendingAgent` names, so this points that at the agent
 // and switches to the chat.
+//
+// It goes to `agents` itself, not the `chat` alias: the alias is a page that
+// does not exist, so going through it unmounts an open chat for a moment and
+// the pending agent is spent on the chat being torn down. The user then lands
+// on the agent list instead of the chat they asked for.
 window.addEventListener('freeco-open-agent', function (ev) {
   var id = ev && ev.detail;
   if (!id || typeof Alpine === 'undefined') return;
@@ -706,7 +711,7 @@ window.addEventListener('freeco-open-agent', function (ev) {
   if (!store) return;
   var agent = (store.agents || []).filter(function (a) { return a.id === id; })[0];
   if (agent) store.pendingAgent = agent;
-  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'chat' }));
+  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'agents' }));
 });
 
 // Deep links: /?ask=...&agent=...
