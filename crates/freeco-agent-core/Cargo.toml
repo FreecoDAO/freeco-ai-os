@@ -3,7 +3,7 @@ name = "freeco-agent-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository = "https://github.com/FreecoDAO/freeco"
+repository.workspace = true
 
 # cdylib: WASM dynamic library target (wasm-pack / wasm-bindgen)
 # rlib:   normal Rust library used by freeco-kernel-runtime and agent crates
