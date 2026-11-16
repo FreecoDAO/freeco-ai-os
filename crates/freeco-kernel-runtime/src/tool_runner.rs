@@ -678,7 +678,7 @@ pub async fn execute_tool(
         },
 
         // Skill introspection tools (issue #1038)
-        "skill_list" => tool_skill_list(skill_registry),
+        "skill_list" => tool_skill_list(input, skill_registry),
         "skill_describe" => tool_skill_describe(input, skill_registry),
         "skill_execute" => tool_skill_execute(input, skill_registry).await,
 
@@ -1791,10 +1791,12 @@ them.".to_string(),
         // which is outside the workspace sandbox — file_read cannot reach them.
         ToolDefinition {
             name: "skill_list".to_string(),
-            description: "List all installed skills available to this agent. Returns name, version, description, runtime type, and provided tool names. Use this instead of file_list on the skills directory.".to_string(),
+            description: "List all installed skills available to this agent. Returns name, version, description, runtime type, and provided tool names. Pass `query` to return only skills whose name or description contains every word of it. Use this instead of file_list on the skills directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "query": { "type": "string", "description": "Optional words to search for in skill names and descriptions (case-insensitive, all words must match)" }
+                }
             }),
         },
         ToolDefinition {
@@ -4385,14 +4387,33 @@ async fn tool_canvas_present(
 // ---------------------------------------------------------------------------
 
 /// List all skills available to this agent, with their provided tool names.
-fn tool_skill_list(skill_registry: Option<&SkillRegistry>) -> Result<String, String> {
+fn tool_skill_list(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
     let registry = match skill_registry {
         Some(r) => r,
         None => return Ok("No skill registry available.".to_string()),
     };
-    let skills = registry.list();
+    let mut skills = registry.list();
     if skills.is_empty() {
         return Ok("No skills installed. Install skills via the dashboard or `freeco-ai skill install <name>`.".to_string());
+    }
+    skills.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+    let query = input["query"].as_str().unwrap_or("").to_lowercase();
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if !words.is_empty() {
+        skills.retain(|s| {
+            let text = format!("{} {}", s.manifest.skill.name, s.manifest.skill.description)
+                .to_lowercase();
+            words.iter().all(|w| text.contains(w))
+        });
+        if skills.is_empty() {
+            return Ok(format!(
+                "No installed skill matches \"{}\". Call skill_list without a query to see all skills.",
+                query.trim()
+            ));
+        }
     }
     let entries: Vec<serde_json::Value> = skills
         .iter()
@@ -4637,7 +4658,7 @@ mod tests {
         assert_eq!(registry.count(), 1);
 
         // skill_list returns the global skill without any filesystem call
-        let list_out = tool_skill_list(Some(&registry)).unwrap();
+        let list_out = tool_skill_list(&serde_json::json!({}), Some(&registry)).unwrap();
         assert!(list_out.contains("daily-journal"));
         assert!(list_out.contains("Keep a daily journal"));
 
@@ -4667,6 +4688,64 @@ mod tests {
         );
         assert!(missing.is_err());
         assert!(missing.unwrap_err().contains("not found"));
+    }
+
+    /// skill_list's optional `query` narrows a large install to the skills
+    /// whose name or description contains every word of the query.
+    #[test]
+    fn test_skill_list_query_filters() {
+        use freeco_skills::registry::SkillRegistry;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        for (name, desc) in [
+            ("pdf-tools", "Convert PDF files to Markdown"),
+            ("daily-journal", "Keep a daily journal"),
+            ("web-scraper", "Fetch web pages and convert them to text"),
+        ] {
+            let skill_dir = dir.path().join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n---\n# {name}\n\nBody."),
+            )
+            .unwrap();
+        }
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        assert_eq!(registry.count(), 3);
+
+        let all = tool_skill_list(&serde_json::json!({}), Some(&registry)).unwrap();
+        assert!(all.contains("\"count\": 3"));
+
+        // One word, matched case-insensitively in the description.
+        let out =
+            tool_skill_list(&serde_json::json!({ "query": "CONVERT" }), Some(&registry)).unwrap();
+        assert!(out.contains("\"count\": 2"));
+        assert!(out.contains("pdf-tools"));
+        assert!(out.contains("web-scraper"));
+        assert!(!out.contains("daily-journal"));
+
+        // Every word must match, across name and description.
+        let out = tool_skill_list(
+            &serde_json::json!({ "query": "pdf markdown" }),
+            Some(&registry),
+        )
+        .unwrap();
+        assert!(out.contains("\"count\": 1"));
+        assert!(out.contains("pdf-tools"));
+
+        // No match gives a plain hint instead of an empty list.
+        let out = tool_skill_list(
+            &serde_json::json!({ "query": "kubernetes" }),
+            Some(&registry),
+        )
+        .unwrap();
+        assert!(out.contains("No installed skill matches"));
+
+        // A blank query lists everything.
+        let out = tool_skill_list(&serde_json::json!({ "query": "  " }), Some(&registry)).unwrap();
+        assert!(out.contains("\"count\": 3"));
     }
 
     #[test]

@@ -7,6 +7,16 @@ function skillsPage() {
     skills: [],
     loading: true,
     loadError: '',
+    skillFilter: '',
+
+    // Per-agent skill switches (GET/PUT /api/agents/{id}/skills).
+    // An empty allowlist means the agent gets every skill, including ones
+    // installed later; a non-empty one means only the listed skills.
+    agentsList: [],
+    skillAgentId: '',
+    agentSkills: null,          // { assigned: [], available: [], mode: 'all' | 'allowlist' }
+    agentSkillsSaving: false,
+    agentSkillsError: '',
 
     // ClawHub state
     clawhubSearch: '',
@@ -120,6 +130,95 @@ function skillsPage() {
         this.loadError = e.message || 'Could not load skills.';
       }
       this.loading = false;
+    },
+
+    get filteredSkills() {
+      var words = this.skillFilter.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return this.skills;
+      return this.skills.filter(function(s) {
+        var text = (s.name + ' ' + s.description).toLowerCase();
+        return words.every(function(w) { return text.indexOf(w) !== -1; });
+      });
+    },
+
+    // ── Per-agent skill switches ────────────────────────────────────────
+    async loadAgentsForSkills() {
+      try {
+        var data = await FreecoAPI.get('/api/agents');
+        var list = Array.isArray(data) ? data : (data.agents || []);
+        this.agentsList = list.map(function(a) { return { id: a.id, name: a.name }; });
+      } catch(e) {
+        this.agentsList = [];
+      }
+    },
+
+    async loadAgentSkills() {
+      this.agentSkills = null;
+      this.agentSkillsError = '';
+      if (!this.skillAgentId) return;
+      var id = this.skillAgentId;
+      try {
+        var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(id) + '/skills');
+        if (id !== this.skillAgentId) return;  // the user picked another agent meanwhile
+        this.agentSkills = {
+          assigned: data.assigned || [],
+          available: data.available || [],
+          mode: data.mode === 'allowlist' ? 'allowlist' : 'all'
+        };
+      } catch(e) {
+        this.agentSkillsError = e.message || 'Could not load this agent\u2019s skills.';
+      }
+    },
+
+    agentSkillsSummary() {
+      var s = this.agentSkills;
+      if (!s) return '';
+      if (s.mode === 'all') return 'Uses every skill, including ones you install later.';
+      return 'Uses ' + s.assigned.length + ' of ' + s.available.length + ' skills.';
+    },
+
+    isSkillOnForAgent(name) {
+      var s = this.agentSkills;
+      if (!s) return false;
+      return s.mode === 'all' || s.assigned.indexOf(name) !== -1;
+    },
+
+    async toggleSkillForAgent(name) {
+      var s = this.agentSkills;
+      if (!s || this.agentSkillsSaving) return;
+      var next;
+      if (this.isSkillOnForAgent(name)) {
+        var current = s.mode === 'all' ? s.available : s.assigned;
+        next = current.filter(function(n) { return n !== name; });
+        if (!next.length) {
+          // An empty list would mean "every skill", the opposite of what was asked.
+          FreecoToast.error('An agent keeps at least one skill. Switch another one on first.');
+          return;
+        }
+      } else {
+        next = s.assigned.concat([name]);
+        // Every skill on again: go back to "all", which also covers later installs.
+        var allOn = s.available.length && s.available.every(function(n) { return next.indexOf(n) !== -1; });
+        if (allOn) next = [];
+      }
+      await this.saveAgentSkills(next);
+    },
+
+    async useAllSkills() {
+      await this.saveAgentSkills([]);
+    },
+
+    async saveAgentSkills(list) {
+      var id = this.skillAgentId;
+      if (!id) return;
+      this.agentSkillsSaving = true;
+      try {
+        await FreecoAPI.put('/api/agents/' + encodeURIComponent(id) + '/skills', { skills: list });
+        await this.loadAgentSkills();
+      } catch(e) {
+        FreecoToast.error('Could not save: ' + (e.message || 'unknown error'));
+      }
+      this.agentSkillsSaving = false;
     },
 
     // ── Skill config editing ────────────────────────────────────────────
