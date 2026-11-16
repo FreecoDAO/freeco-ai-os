@@ -2102,7 +2102,6 @@ version = "0.9.8"
 dependencies = [
  "async-trait",
  "freeco-agent-core",
- "freeco-input-parser",
  "freeco-tool-gateway",
  "mockito",
  "serde",
@@ -2185,19 +2184,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "freeco-budget-engine"
-version = "0.9.8"
-dependencies = [
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2331,20 +2317,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "freeco-input-parser"
-version = "0.9.8"
-dependencies = [
- "base64 0.22.1",
- "mockito",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "freeco-kernel"
 version = "0.9.8"
 dependencies = [
@@ -2428,24 +2400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "freeco-learning"
-version = "0.9.8"
-dependencies = [
- "anyhow",
- "chrono",
- "freeco-memory",
- "freeco-types",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "freeco-memory"
 version = "0.9.8"
 dependencies = [
@@ -2482,23 +2436,6 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "freeco-runtime"
-version = "0.9.8"
-dependencies = [
- "async-trait",
- "freeco-agent-core",
- "freeco-budget-engine",
- "freeco-kernel-runtime",
- "freeco-tool-gateway",
- "mockito",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
 ]
 
 [[package]]

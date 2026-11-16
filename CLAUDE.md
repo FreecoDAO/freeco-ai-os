@@ -1,7 +1,7 @@
 # FreEco.ai — Agent Instructions
 
 ## Project Overview
-FreEco.ai is an open-source Agent Operating System written in Rust (23 crates).
+FreEco.ai is an open-source Agent Operating System written in Rust (19 crates).
 - Config: `~/.freeco-ai/config.toml`
 - Default API: `http://127.0.0.1:4200`
 - CLI binary: `target/release/freeco-ai.exe` (or `target/debug/freeco-ai.exe`)
