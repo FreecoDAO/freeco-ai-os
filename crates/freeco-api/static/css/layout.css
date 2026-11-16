@@ -382,3 +382,192 @@
 .app-layout.focus-mode .sidebar-overlay { display: none; }
 .app-layout.focus-mode .main-content { max-width: 100%; margin-left: 0; }
 .app-layout.focus-mode .mobile-menu-btn { display: none !important; }
+
+/* Second sidebar: New, chats, projects, teams and companies, tasks.
+   Glass like the main menu, beside it. On a phone it is its own drawer. */
+.sidebar2 {
+  width: var(--sidebar2-width, 284px);
+  margin: 12px 0 12px 12px;
+  border-radius: var(--radius-panel);
+  background: var(--glass);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 1px 0 var(--glass-hi) inset, var(--glass-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px 10px;
+  flex-shrink: 0;
+  min-height: 0;
+  position: relative;
+  z-index: 90;
+}
+.sidebar2.sn-hidden { display: none; }
+.app-layout.focus-mode .sidebar2 { display: none; }
+
+.sn-top { display: flex; gap: 6px; }
+.sn-new-wrap { position: relative; flex: 1; }
+.sn-new {
+  width: 100%;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+}
+.sn-new span { flex: 1; text-align: left; }
+.sn-new:hover { filter: brightness(1.06); }
+.sn-ic { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.sn-ic.sn-small { width: 13px; height: 13px; transition: transform var(--transition-fast); }
+.sn-chev { width: 15px; height: 15px; }
+.sn-iconbtn, .sn-plus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: var(--fill);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.sn-iconbtn { width: 40px; height: 40px; border-radius: var(--radius-md); }
+.sn-plus { width: 24px; height: 24px; border-radius: 7px; background: transparent; }
+.sn-iconbtn:hover, .sn-plus:hover { color: var(--text); background: var(--fill); }
+
+.sn-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 300px;
+  z-index: 200;
+  padding: 6px;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 18px 48px rgba(10, 30, 20, 0.22);
+}
+.sn-mi {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 50px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.sn-mi:hover, .sn-mi:focus-visible { background: var(--fill); }
+.sn-mi-ic { width: 32px; height: 32px; border-radius: 9px; flex: none; display: flex; align-items: center; justify-content: center; background: var(--surface2); color: var(--text-dim); }
+.sn-mi-text { display: flex; flex-direction: column; min-width: 0; }
+.sn-mi-title { font-weight: 600; font-size: 14px; }
+.sn-mi-hint { font-size: 12px; color: var(--text-muted); }
+
+.sn-search { position: relative; display: flex; align-items: center; }
+.sn-search .sn-ic { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--text-muted); pointer-events: none; }
+.sn-search input {
+  width: 100%;
+  height: 34px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--fill);
+  padding: 0 10px 0 32px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+}
+.sn-search input::placeholder { color: var(--text-muted); }
+
+.sn-links { display: flex; flex-direction: column; gap: 1px; }
+.sn-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; margin: 0 -4px; padding: 0 4px; }
+.sn-sec { display: flex; align-items: center; justify-content: space-between; padding: 10px 10px 3px; font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.sn-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.sn-row:hover { background: var(--fill); }
+.sn-row .sn-ic { color: var(--text-muted); }
+.sn-row.active { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
+.sn-row.active .sn-ic { color: var(--accent-ink); }
+.sn-row.sn-two { min-height: 42px; }
+.sn-row.sn-muted { color: var(--accent-ink); font-weight: 500; }
+.sn-grow { flex: 1; min-width: 0; }
+.sn-trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-stack { display: flex; flex-direction: column; line-height: 1.25; }
+.sn-sub { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-count { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sn-pill { font-family: var(--font-mono); font-size: 11px; padding: 1px 7px; border-radius: 6px; background: var(--accent-soft); color: var(--accent-ink); }
+.sn-nest { margin-left: 18px; padding-left: 6px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 1px; }
+.sn-empty { font-size: 12px; color: var(--text-muted); padding: 2px 10px 6px; }
+.sn-dot { width: 7px; height: 7px; border-radius: 4px; flex: none; background: var(--text-muted); opacity: 0.5; }
+.sn-dot-live { background: var(--accent); opacity: 1; animation: snPulse 1.6s ease-in-out infinite; }
+.sn-dot-wait { background: transparent; border: 1.5px solid var(--text-muted); opacity: 1; }
+.sn-av { width: 20px; height: 20px; border-radius: 6px; flex: none; display: flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 700; background: var(--accent-soft); color: var(--accent-ink); }
+@keyframes snPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .sn-dot-live { animation: none; } }
+
+.sn-form-backdrop { position: fixed; inset: 0; z-index: 9000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.45); padding: 16px; }
+.sn-form { width: 100%; max-width: 420px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.sn-form h3 { font-size: 18px; font-weight: 700; }
+.sn-form-body { display: flex; flex-direction: column; gap: 6px; }
+.sn-form-body > div { display: flex; flex-direction: column; gap: 6px; }
+.sn-form .form-input, .sn-form .form-textarea, .sn-form .form-select { width: 100%; }
+.sn-label { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-top: 4px; }
+.sn-error { color: var(--error); font-size: 13px; }
+.sn-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* The button that brings the second sidebar back: only when it is hidden on a
+   wide screen, and always on a phone, where it opens the drawer. */
+.sn-show-btn { display: none !important; }
+.sn-show-btn.sn-show-wide { display: flex !important; position: fixed !important; top: 16px; left: calc(var(--sidebar-collapsed) + 22px); z-index: 98; padding: 6px 10px !important; }
+.sidebar.collapsed ~ .main-content .sn-show-btn.sn-show-wide { left: calc(var(--sidebar-collapsed) + 22px); }
+.sidebar:not(.collapsed) ~ .main-content .sn-show-btn.sn-show-wide { left: calc(var(--sidebar-width) + 22px); }
+.sidebar2-overlay { display: none; }
+
+@media (max-width: 1100px) {
+  .sidebar2 { --sidebar2-width: 248px; }
+}
+
+@media (max-width: 768px) {
+  .sidebar2 {
+    position: fixed;
+    left: -320px;
+    top: 0;
+    bottom: 0;
+    margin: 0;
+    width: min(300px, 86vw);
+    border-radius: 0 var(--radius-panel) var(--radius-panel) 0;
+    background: var(--glass-solid);
+    transition: left var(--transition-normal);
+    z-index: 101;
+  }
+  .sidebar2.sn-hidden { display: flex; }
+  .sidebar2.mobile-open { left: 0; }
+  .sidebar2-overlay { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 100; }
+  .sn-show-btn, .sn-show-btn.sn-show-wide { display: flex !important; position: fixed !important; top: 12px; left: 64px !important; z-index: 98; padding: 6px 10px !important; }
+  .page-header > :first-child { margin-left: 100px; }
+  .sn-menu { width: calc(min(300px, 86vw) - 16px); }
+}

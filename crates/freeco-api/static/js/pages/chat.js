@@ -521,6 +521,7 @@ function chatPage() {
       if (store.pendingAgent) {
         self.selectAgent(store.pendingAgent);
         store.pendingAgent = null;
+        self._takePendingSession();
       } else {
         // Restore previously active agent after page refresh (#1179).
         // The agent list may not be loaded yet, so resolve once it appears.
@@ -532,6 +533,7 @@ function chatPage() {
         if (agent) {
           self.selectAgent(agent);
           Alpine.store('app').pendingAgent = null;
+          self._takePendingSession();
         }
       });
 
@@ -1349,6 +1351,23 @@ function chatPage() {
         var data = await FreecoAPI.get('/api/agents/' + agentId + '/sessions');
         this.sessions = data.sessions || [];
       } catch(e) { this.sessions = []; }
+      // The sidebar marks the open conversation and refreshes its list.
+      var active = this.sessions.filter(function(s) { return s.active; })[0];
+      window.dispatchEvent(new CustomEvent('freeco-chat-changed', {
+        detail: { agentId: agentId, sessionId: active ? active.session_id : null }
+      }));
+    },
+
+    // A conversation picked in the sidebar: the agent is selected first, then
+    // this switches to the conversation itself unless it is already open.
+    async _takePendingSession() {
+      var store = Alpine.store('app');
+      var sid = store.pendingSession;
+      store.pendingSession = null;
+      if (!sid || !this.currentAgent) return;
+      await this.loadSessions(this.currentAgent.id);
+      var target = this.sessions.filter(function(s) { return s.session_id === sid; })[0];
+      if (target && !target.active) await this.switchSession(sid);
     },
 
     // Multi-session: create a new session

@@ -8,6 +8,7 @@
 pub const USER_AGENT: &str = "freeco/0.3.48";
 
 pub mod a2a;
+pub mod activity;
 pub mod agent_context;
 pub mod agent_loop;
 pub mod apply_patch;

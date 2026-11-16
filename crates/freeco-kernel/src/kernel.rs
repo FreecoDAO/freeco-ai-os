@@ -206,6 +206,9 @@ pub struct FreecoKernel {
     pub auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Plugin lifecycle hook registry.
     pub hooks: freeco_kernel_runtime::hooks::HookRegistry,
+    /// What every agent is doing right now, fed by `hooks`. Read by the
+    /// dashboard's Live view through `/api/activity`.
+    pub activity: Arc<freeco_kernel_runtime::activity::ActivityTracker>,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub process_manager: Arc<freeco_kernel_runtime::process_manager::ProcessManager>,
     /// OFP peer registry — tracks connected peers (OnceLock for safe init after Arc creation).
@@ -1334,6 +1337,7 @@ impl FreecoKernel {
             broadcast: initial_broadcast,
             auto_reply_engine,
             hooks: freeco_kernel_runtime::hooks::HookRegistry::new(),
+            activity: Arc::new(freeco_kernel_runtime::activity::ActivityTracker::new()),
             process_manager: Arc::new(freeco_kernel_runtime::process_manager::ProcessManager::new(
                 5,
             )),
@@ -1393,6 +1397,12 @@ impl FreecoKernel {
                 &kernel.audit_log,
             ))),
         );
+
+        // Live view: the tracker hears every turn start, tool start, tool end
+        // and turn end, in both agent loops, without the loops knowing it.
+        for event in freeco_kernel_runtime::activity::ActivityTracker::EVENTS {
+            kernel.hooks.register(event, kernel.activity.clone());
+        }
 
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {

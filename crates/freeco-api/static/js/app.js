@@ -159,6 +159,16 @@ document.addEventListener('alpine:init', function() {
     pendingApprovalCount: 0,
     lastPendingApprovalSignature: '',
     pendingAgent: null,
+    // A conversation picked in the sidebar, opened once its agent's chat is.
+    pendingSession: null,
+    // The second sidebar (chats, projects, tasks). Shown unless hidden, and
+    // a drawer of its own on a phone.
+    sideNavHidden: localStorage.getItem('freeco-sidenav') === 'hidden',
+    sideNavMobile: false,
+    toggleSideNav() {
+      this.sideNavHidden = !this.sideNavHidden;
+      try { localStorage.setItem('freeco-sidenav', this.sideNavHidden ? 'hidden' : 'shown'); } catch (e) { /* private window */ }
+    },
     focusMode: localStorage.getItem('freeco-focus') === 'true',
     showOnboarding: false,
     showAuthPrompt: false,
@@ -468,7 +478,10 @@ function app() {
       if (mode === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       return mode;
     })(),
-    sidebarCollapsed: localStorage.getItem('freeco-sidebar') === 'collapsed',
+    // The main menu is an icon rail unless the user widened it: the second
+    // sidebar beside it holds the chats, so both at full width would leave the
+    // chat itself too narrow.
+    sidebarCollapsed: localStorage.getItem('freeco-sidebar') !== 'expanded',
     mobileMenuOpen: false,
     connected: false,
     wsConnected: false,
@@ -488,7 +501,7 @@ function app() {
       });
 
       // Hash routing
-      var validPages = ['overview','agents','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
+      var validPages = ['overview','agents','live','artifacts','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
       var pageRedirects = {
         'chat': 'agents',
         'templates': 'agents',

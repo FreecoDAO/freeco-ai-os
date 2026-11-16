@@ -638,6 +638,19 @@ pub async fn build_router(
         // Companies, projects and teams. Without a surface the structure is
         // invisible, and a conversation that belongs to a project the user
         // cannot see is the same as one that belongs nowhere.
+        // The sidebar's chat and task lists and the Live view.
+        .route(
+            "/api/activity",
+            axum::routing::get(crate::live_routes::activity),
+        )
+        .route(
+            "/api/org/chats",
+            axum::routing::get(crate::live_routes::recent_chats),
+        )
+        .route(
+            "/api/tasks",
+            axum::routing::get(crate::live_routes::list_tasks),
+        )
         .route(
             "/api/org/overview",
             axum::routing::get(crate::org_routes::overview),
