@@ -5,6 +5,16 @@
    processes the nested x-data scopes for nav sections. */
 [x-cloak] { display: none !important; }
 
+/* The display of an element Alpine shows and hides. x-show hides with an
+   inline `display: none` and shows again by removing the inline display, so
+   a `display: flex` written inline was lost after the first hide and the
+   element came back as a block: the first-run password box sat in the top
+   left corner instead of the middle. Set the display here instead. */
+.x-show-flex { display: flex; }
+.x-show-inline-flex { display: inline-flex; }
+.x-show-inline-block { display: inline-block; }
+.x-show-block { display: block; }
+
 .app-layout {
   display: flex;
   height: 100vh;

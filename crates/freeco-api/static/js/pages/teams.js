@@ -167,6 +167,25 @@ function teamsPage() {
         });
       }
       this.lanes = lanes;
+      this.paintLanes();
+    },
+
+    // Put the lanes into the SVG. Built here rather than with x-for, which
+    // cannot loop inside an <svg>; the title is set as text, never as markup.
+    paintLanes() {
+      var svg = this.$refs && this.$refs.lanesSvg;
+      if (!svg) return;
+      var ns = 'http://www.w3.org/2000/svg';
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      this.lanes.forEach(function (l) {
+        var path = document.createElementNS(ns, 'path');
+        path.setAttribute('d', l.d);
+        path.setAttribute('class', 'teams-lane' + (l.live ? ' teams-lane-live' : '') + (l.failed ? ' teams-lane-failed' : ''));
+        var title = document.createElementNS(ns, 'title');
+        title.textContent = l.title;
+        path.appendChild(title);
+        svg.appendChild(path);
+      });
     },
 
     board(column) {

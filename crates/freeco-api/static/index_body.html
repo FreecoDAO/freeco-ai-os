@@ -31,7 +31,7 @@
 </button>
 
 <!-- Auth Prompt (API Key or Username/Password) -->
-<div x-show="$store.app.showAuthPrompt" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" x-data="{ apiKeyInput: '', loginUser: '', loginPass: '' }">
+<div class="x-show-flex" x-show="$store.app.showAuthPrompt" style="position:fixed;inset:0;z-index:9999;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" x-data="{ apiKeyInput: '', loginUser: '', loginPass: '' }">
   <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:2rem;max-width:400px;width:90%">
     <!-- Session login mode -->
     <template x-if="$store.app.authMode === 'session'">
@@ -59,7 +59,7 @@
 </div>
 
 <!-- First-run password setup (skippable) -->
-<div x-show="$store.app.showPasswordSetup" x-cloak @click.self="$store.app.skipPasswordSetup()" @keydown.escape.window="$store.app.skipPasswordSetup()" style="position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" x-data="{ password: '', confirmation: '' }">
+<div class="x-show-flex" x-show="$store.app.showPasswordSetup" x-cloak @click.self="$store.app.skipPasswordSetup()" @keydown.escape.window="$store.app.skipPasswordSetup()" style="position:fixed;inset:0;z-index:10000;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px)" x-data="{ password: '', confirmation: '' }">
   <div style="background:var(--bg-card,#1e1e2e);border:1px solid var(--border,#333);border-radius:12px;padding:2rem;max-width:400px;width:90%">
     <h3 style="margin:0 0 0.5rem;font-size:1.1rem">Protect your dashboard <span style="color:var(--text-dim,#888);font-weight:400;font-size:0.85rem">(optional)</span></h3>
     <p style="color:var(--text-dim,#888);font-size:0.85rem;margin:0 0 1rem">This is <strong>not a login</strong> — you're setting a <strong>new</strong> admin password to protect settings and secrets. It's optional: skip it and use FreEco.ai right away, or set it later in Settings → Security.</p>
@@ -83,10 +83,10 @@
             <h1>FreEco.ai<svg class="swiss-mark" viewBox="0 0 32 32" role="img" aria-label="Swiss"><rect width="32" height="32" rx="5" style="fill:var(--swiss)"/><path d="M13 6h6v7h7v6h-7v7h-6v-7H6v-6h7z" fill="#FFFFFF"/></svg></h1>
             <div class="sidebar-tagline">Ethical Executive AI Assistant</div>
             <div class="version" x-text="'v' + version"></div>
-            <a x-show="$store.app.updateAvailable" x-cloak href="#settings"
+            <a class="x-show-inline-block" x-show="$store.app.updateAvailable" x-cloak href="#settings"
                @click="navigate('settings')"
                :title="'Version ' + $store.app.updateLatest + ' is available — open Settings › System'"
-               style="display:inline-block;font-size:10px;font-weight:700;color:var(--text-on-accent);background:var(--success);border-radius:99px;padding:1px 8px;margin-top:3px;text-decoration:none;cursor:pointer">update available</a>
+               style="font-size:10px;font-weight:700;color:var(--text-on-accent);background:var(--success);border-radius:99px;padding:1px 8px;margin-top:3px;text-decoration:none;cursor:pointer">update available</a>
           </div>
         </div>
       </div>
@@ -232,7 +232,7 @@
     </div>
 
     <div class="sidebar-footer">
-      <div x-show="$store.app.sessionUser" style="padding:4px 16px;display:flex;align-items:center;justify-content:space-between">
+      <div class="x-show-flex" x-show="$store.app.sessionUser" style="padding:4px 16px;align-items:center;justify-content:space-between">
         <span class="text-xs text-dim" x-text="$store.app.sessionUser" style="letter-spacing:0.5px"></span>
         <button @click="$store.app.sessionLogout()" class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;opacity:0.7" title="Sign out">Logout</button>
       </div>
@@ -668,7 +668,7 @@
                     <span x-show="item.done">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="20 6 9 17 4 12"/></svg>
                     </span>
-                    <span x-show="!item.done" style="width:10px;height:10px;border-radius:50%;border:1.5px solid var(--border);display:block"></span>
+                    <span class="x-show-block" x-show="!item.done" style="width:10px;height:10px;border-radius:50%;border:1.5px solid var(--border)"></span>
                   </div>
                   <span style="flex:1" :style="item.done ? 'text-decoration:line-through;opacity:0.6' : ''" x-text="item.label"></span>
                   <a x-show="!item.done" :href="item.action" class="btn btn-ghost btn-sm" style="font-size:10px;padding:3px 8px">Go</a>
@@ -812,7 +812,7 @@
             <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">
               <template x-for="p in providers" :key="p.id">
                 <div class="badge" :class="providerBadgeClass(p)" :title="providerTooltip(p)" style="cursor:pointer;transition:all 0.15s var(--ease-spring);padding:4px 10px" @click="location.hash='settings'" @mouseenter="$el.style.transform='translateY(-1px)'" @mouseleave="$el.style.transform=''">
-                  <span x-show="p.auth_status === 'configured'" style="display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:4px" :style="p.health === 'cooldown' || p.health === 'open' ? 'background:var(--warning);animation:pulse-ring 1.5s infinite' : 'background:var(--success)'"></span>
+                  <span class="x-show-inline-block" x-show="p.auth_status === 'configured'" style="width:6px;height:6px;border-radius:50%;margin-right:4px" :style="p.health === 'cooldown' || p.health === 'open' ? 'background:var(--warning);animation:pulse-ring 1.5s infinite' : 'background:var(--success)'"></span>
                   <span x-text="p.display_name"></span>
                 </div>
               </template>
@@ -1021,14 +1021,10 @@
         <!-- The floor: rooms reflow like any HTML; the lines are drawn over
              them from where the seats actually landed. -->
         <div class="teams-floor" x-ref="floor" x-show="teams.length || unassigned.length">
-          <svg class="teams-lanes" :width="floorW" :height="floorH" :viewBox="'0 0 ' + floorW + ' ' + floorH"
-               aria-hidden="true" focusable="false">
-            <template x-for="l in lanes" :key="l.key">
-              <path :d="l.d" class="teams-lane" :class="{ 'teams-lane-live': l.live, 'teams-lane-failed': l.failed }">
-                <title x-text="l.title"></title>
-              </path>
-            </template>
-          </svg>
+          <!-- Paths are drawn by drawLanes(): a <template> inside <svg> is
+               not an HTML template, so Alpine's x-for cannot loop there. -->
+          <svg class="teams-lanes" x-ref="lanesSvg" :width="floorW" :height="floorH" :viewBox="'0 0 ' + floorW + ' ' + floorH"
+               aria-hidden="true" focusable="false"></svg>
 
           <template x-for="t in teams" :key="t.id">
             <button type="button" class="teams-room" :class="{ 'teams-room-selected': t.id === selectedId }"
@@ -1660,7 +1656,7 @@
                               <span class="tool-expand-chevron" :style="tool.expanded ? 'transform:rotate(90deg)' : ''" style="transition:transform 0.15s">&#9654;</span>
                             </div>
                             <!-- Render generated images above the raw result -->
-                            <div x-show="tool._imageUrls && tool._imageUrls.length" style="padding:8px 12px;display:flex;flex-wrap:wrap;gap:8px">
+                            <div class="x-show-flex" x-show="tool._imageUrls && tool._imageUrls.length" style="padding:8px 12px;flex-wrap:wrap;gap:8px">
                               <template x-for="iurl in (tool._imageUrls || [])" :key="iurl">
                                 <a :href="iurl" target="_blank" style="display:block">
                                   <img :src="iurl" alt="Generated image" style="max-width:320px;max-height:320px;border-radius:8px;border:1px solid var(--border);cursor:pointer" loading="lazy">
@@ -1699,7 +1695,7 @@
               </template>
 
               <!-- Drop zone overlay -->
-              <div x-show="dragOver" style="position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:var(--surface);opacity:0.92;border:2px dashed var(--accent);border-radius:8px;pointer-events:none">
+              <div class="x-show-flex" x-show="dragOver" style="position:absolute;inset:0;z-index:50;align-items:center;justify-content:center;background:var(--surface);opacity:0.92;border:2px dashed var(--accent);border-radius:8px;pointer-events:none">
                 <span style="font-size:16px;color:var(--accent);font-weight:600">Drop files here</span>
               </div>
             </div>
@@ -1714,7 +1710,7 @@
                 ↓ New messages
               </button>
               <!-- Attachment previews -->
-              <div x-show="attachments.length > 0" style="display:flex;gap:8px;flex-wrap:wrap;padding:0 0 8px 0">
+              <div class="x-show-flex" x-show="attachments.length > 0" style="gap:8px;flex-wrap:wrap;padding:0 0 8px 0">
                 <template x-for="(att, aidx) in attachments" :key="aidx">
                   <div style="position:relative;border:1px solid var(--border);border-radius:6px;padding:4px;display:flex;align-items:center;gap:6px;background:var(--surface2);max-width:180px">
                     <img x-show="att.preview" :src="att.preview" style="width:32px;height:32px;object-fit:cover;border-radius:4px">
@@ -1797,7 +1793,7 @@
                   <span x-show="voiceOut">&#128266;</span>
                   <span x-show="!voiceOut" x-cloak>&#128263;</span>
                 </button>
-                <span x-show="currentAgent" style="flex-shrink:0;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:0 4px"
+                <span class="x-show-inline-flex" x-show="currentAgent" style="flex-shrink:0;align-items:center;gap:4px;font-size:11px;padding:0 4px"
                       :style="{ color: $store.app.wsConnected ? 'var(--success, #18B810)' : 'var(--warning, #d98a00)' }"
                       :title="$store.app.wsConnected ? 'Live: replies stream as they are written' : 'Not live: replies arrive all at once when the turn finishes. Reload to reconnect.'">
                   <span style="width:7px;height:7px;border-radius:50%;display:inline-block"
@@ -1859,7 +1855,7 @@
                           </template>
                         </select>
                       </div>
-                      <div x-show="modelSwitching" style="display:flex;align-items:center;justify-content:center;padding:12px;gap:8px">
+                      <div class="x-show-flex" x-show="modelSwitching" style="align-items:center;justify-content:center;padding:12px;gap:8px">
                         <div class="tool-card-spinner"></div>
                         <span class="text-xs text-dim">Switching...</span>
                       </div>
@@ -1930,7 +1926,7 @@
                     <div class="font-bold" style="font-size:13px">
                       <span x-text="agent.name"></span>
                       <!-- Issue #1026: live inferencing indicator -->
-                      <span x-show="agent.is_inferencing" class="agent-inferencing-dot" title="Agent is calling the LLM right now" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-left:6px;vertical-align:middle;animation:agent-inferencing-pulse 1.2s ease-in-out infinite"></span>
+                      <span x-show="agent.is_inferencing" class="agent-inferencing-dot x-show-inline-block" title="Agent is calling the LLM right now" style="width:8px;height:8px;border-radius:50%;background:var(--accent);margin-left:6px;vertical-align:middle;animation:agent-inferencing-pulse 1.2s ease-in-out infinite"></span>
                     </div>
                     <div class="text-xs text-dim font-mono" style="font-size:11px">
                       <span x-show="!agent.is_inferencing" x-text="agent.model_name"></span>
@@ -2216,7 +2212,7 @@
                         <label><span x-text="providerForKeyEnv().display_name"></span> key needed</label>
                         <div class="text-xs text-dim" style="margin-bottom:6px" x-text="providerForKeyEnv().signup_hint || 'Paste the key from this provider.'"></div>
                         <a x-show="providerForKeyEnv().signup_url" :href="providerForKeyEnv().signup_url" target="_blank" rel="noopener"
-                           class="btn btn-ghost btn-sm" style="text-decoration:none;margin-bottom:6px;display:inline-block"
+                           class="btn btn-ghost btn-sm x-show-inline-block" style="text-decoration:none;margin-bottom:6px"
                            x-text="'Get a ' + providerForKeyEnv().display_name + ' key →'"></a>
                         <div class="flex gap-1" style="align-items:center">
                           <input type="password" class="form-input" style="flex:1" x-model="inlineKey"
@@ -2577,14 +2573,14 @@
                                without ever saying what the agent was trying to
                                achieve -- which is the half that lets someone
                                decide rather than just be alarmed. -->
-                          <span x-show="c.aim" style="display:block;font-weight:600;margin-bottom:2px">
+                          <span class="x-show-block" x-show="c.aim" style="font-weight:600;margin-bottom:2px">
                             Wants to: <span x-text="c.aim"></span>
                           </span>
                           <span x-text="c.text"></span>
-                          <span x-show="c.reversible === false" style="display:block;margin-top:2px;font-weight:600">
+                          <span class="x-show-block" x-show="c.reversible === false" style="margin-top:2px;font-weight:600">
                             This cannot be undone.
                           </span>
-                          <span x-show="c.reversible === null || c.reversible === undefined" class="text-dim" style="display:block;margin-top:2px">
+                          <span x-show="c.reversible === null || c.reversible === undefined" class="text-dim x-show-block" style="margin-top:2px">
                             Whether this can be undone depends on the command.
                           </span>
                         </span>
@@ -4120,7 +4116,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span class="badge badge-info">ClawHub</span>
                         <span class="text-xs text-dim" x-show="skillDetail.version" x-text="'v' + skillDetail.version"></span>
                         <span class="text-xs" x-show="skillDetail.author_name || skillDetail.author" style="color:var(--text-dim)">
-                          <span x-show="skillDetail.author_image" style="display:inline-block;vertical-align:middle;margin-right:4px"><img :src="skillDetail.author_image" style="width:16px;height:16px;border-radius:50%"></span>
+                          <span class="x-show-inline-block" x-show="skillDetail.author_image" style="vertical-align:middle;margin-right:4px"><img :src="skillDetail.author_image" style="width:16px;height:16px;border-radius:50%"></span>
                           <span x-text="'by ' + (skillDetail.author_name || skillDetail.author)"></span>
                         </span>
                       </div>
@@ -4520,7 +4516,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                                 <div style="margin-bottom:10px">
                                   <label class="text-xs text-dim" style="display:block;margin-bottom:4px" x-text="'Paste your ' + req.label + ':'"></label>
                                   <input type="password" class="form-input" x-model="apiKeyInputs[req.key]" :placeholder="req.label" style="width:100%;font-family:var(--font-mono);font-size:12px">
-                                  <div class="text-xs" style="margin-top:4px;color:var(--green);display:flex;align-items:center;gap:4px" x-show="apiKeyInputs[req.key] && apiKeyInputs[req.key].trim() !== ''">
+                                  <div class="text-xs x-show-flex" style="margin-top:4px;color:var(--green);align-items:center;gap:4px" x-show="apiKeyInputs[req.key] && apiKeyInputs[req.key].trim() !== ''">
                                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                                     <span>Token entered</span>
                                   </div>
@@ -5075,7 +5071,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <!-- Pair a new device -->
               <div style="border-top:1px solid var(--border-subtle);padding-top:14px">
                 <button class="btn btn-sm" style="background:var(--accent);color:var(--text-on-accent)" @click="requestPairing()" :disabled="pairingBusy">Pair a new device</button>
-                <div x-show="pairing.token" x-cloak style="margin-top:12px;display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+                <div class="x-show-flex" x-show="pairing.token" x-cloak style="margin-top:12px;gap:16px;align-items:center;flex-wrap:wrap">
                   <img x-show="pairing.qr_img" :src="pairing.qr_img" alt="Pairing QR" style="width:160px;height:160px;border:1px solid var(--border);border-radius:8px;background:#fff">
                   <div class="text-xs">
                     <div class="text-dim">Enter this code in the mobile app:</div>
@@ -5160,7 +5156,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       </div>
                       <div class="text-xs" x-show="s.manual_step" style="margin-top:4px;color:var(--text-secondary)" x-text="s.manual_step"></div>
                       <!-- Key-connected services (the CRM): the key goes to the vault, checked first. -->
-                      <div x-show="s.connect_with_key && s.running" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                      <div class="x-show-flex" x-show="s.connect_with_key && s.running" style="margin-top:8px;gap:6px;flex-wrap:wrap;align-items:center">
                         <input type="password" class="form-input" autocomplete="off" style="flex:1;min-width:200px;max-width:360px"
                                :placeholder="s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat'"
                                x-model="svcKeys[s.id]" @keydown.enter="connectService(s.id)">
@@ -5269,7 +5265,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <span class="text-xs text-dim" x-show="localAiRecommendation && !localAi.running">
                   Installs <strong x-text="localAiRecommendation && localAiRecommendation.recommended_model"></strong>,
                   sized to this machine<span x-show="localAiRecommendation && localAiRecommendation.hardware && localAiRecommendation.hardware.ram_gb">
-                  (<span x-text="localAiRecommendation.hardware.ram_gb"></span> GB RAM)</span>, then makes it your everyday model.
+                  (<span x-text="localAiRecommendation && localAiRecommendation.hardware ? localAiRecommendation.hardware.ram_gb : ''"></span> GB RAM)</span>, then makes it your everyday model.
                 </span>
               </div>
 
