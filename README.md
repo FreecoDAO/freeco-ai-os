@@ -579,7 +579,7 @@ freeco-api         140+ REST/WS/SSE endpoints, OpenAI-compatible API, dashboard
 freeco-channels    40 messaging adapters with rate limiting, DM/group policies
 freeco-memory      SQLite persistence, vector embeddings, canonical sessions, compaction
 freeco-types       Core types, taint tracking, Ed25519 manifest signing, model catalog
-freeco-skills      61 bundled skills, SKILL.md parser, FangHub marketplace
+freeco-skills      66 bundled skills, SKILL.md parser, FangHub marketplace
 freeco-hands       7 autonomous Hands, HAND.toml parser, lifecycle management
 freeco-extensions  25 MCP templates, AES-256-GCM credential vault, OAuth2 PKCE
 freeco-wire        OFP P2P protocol with HMAC-SHA256 mutual authentication

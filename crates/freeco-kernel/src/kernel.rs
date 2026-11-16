@@ -6738,6 +6738,17 @@ impl FreecoKernel {
         let tools_unrestricted =
             declared_tools.is_empty() || declared_tools.iter().any(|t| t == "*");
 
+        // The skill summary in the system prompt tells every agent to read a
+        // skill's instructions with skill_describe, so an agent that can see
+        // skills must be able to call it even when it declares a fixed tool
+        // list or a narrow profile. Only the two read-only tools: skill_execute
+        // runs skill code and stays opt-in.
+        let skill_read_tools: Vec<ToolDefinition> = all_builtins
+            .iter()
+            .filter(|t| t.name == "skill_list" || t.name == "skill_describe")
+            .cloned()
+            .collect();
+
         // Step 1: Filter builtin tools.
         // Priority: declared tools > ToolProfile > all builtins.
         let has_tool_all = entry.as_ref().is_some_and(|_| {
@@ -6813,23 +6824,32 @@ impl FreecoKernel {
         // then by declared tools).
         // When a workspace-aware snapshot is provided, use it so that workspace
         // skill overrides are reflected in the tool list sent to the LLM.
-        let skill_tools = if let Some(snapshot) = skill_snapshot {
-            if skill_allowlist.is_empty() {
+        let (skill_tools, has_visible_skills) = if let Some(snapshot) = skill_snapshot {
+            let tools = if skill_allowlist.is_empty() {
                 snapshot.all_tool_definitions()
             } else {
                 snapshot.tool_definitions_for_skills(&skill_allowlist)
-            }
+            };
+            (tools, Self::has_visible_skills(snapshot, &skill_allowlist))
         } else {
             let registry = self
                 .skill_registry
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
-            if skill_allowlist.is_empty() {
+            let tools = if skill_allowlist.is_empty() {
                 registry.all_tool_definitions()
             } else {
                 registry.tool_definitions_for_skills(&skill_allowlist)
-            }
+            };
+            (tools, Self::has_visible_skills(&registry, &skill_allowlist))
         };
+        if has_visible_skills {
+            for t in skill_read_tools {
+                if !all_tools.iter().any(|x| x.name == t.name) {
+                    all_tools.push(t);
+                }
+            }
+        }
         for skill_tool in skill_tools {
             // If agent declares specific tools, only include matching skill tools
             if !tools_unrestricted && !declared_tools.iter().any(|d| d == &skill_tool.name) {
@@ -7108,6 +7128,18 @@ impl FreecoKernel {
         summary
     }
 
+    /// Whether any enabled skill passes the agent's skill allowlist
+    /// (an empty allowlist means every skill).
+    fn has_visible_skills(
+        registry: &freeco_skills::registry::SkillRegistry,
+        skill_allowlist: &[String],
+    ) -> bool {
+        registry.list().into_iter().any(|s| {
+            s.enabled
+                && (skill_allowlist.is_empty() || skill_allowlist.contains(&s.manifest.skill.name))
+        })
+    }
+
     /// Build a compact MCP server/tool summary for the system prompt so the
     /// agent knows what external tool servers are connected.
     fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
@@ -7193,16 +7225,19 @@ impl FreecoKernel {
 
     /// Collect prompt context using the provided registry (which may include
     /// workspace skill overrides).
+    ///
+    /// Only skills the agent names in its `skills` allowlist are injected, in
+    /// the order listed. An agent with no allowlist sees every skill in the
+    /// summary and loads the one it needs with skill_describe: injecting the
+    /// bodies of all of them would not fit, and the prompt cap then kept the
+    /// first part of whichever skill the HashMap happened to yield first.
     fn collect_prompt_context_from(
         registry: &freeco_skills::registry::SkillRegistry,
         skill_allowlist: &[String],
     ) -> String {
         let mut context_parts = Vec::new();
-        for skill in registry.list() {
-            if skill.enabled
-                && (skill_allowlist.is_empty()
-                    || skill_allowlist.contains(&skill.manifest.skill.name))
-            {
+        for skill in skill_allowlist.iter().filter_map(|name| registry.get(name)) {
+            if skill.enabled {
                 if let Some(ref ctx) = skill.manifest.prompt_context {
                     if !ctx.is_empty() {
                         let is_bundled = matches!(
@@ -10951,5 +10986,77 @@ system_prompt = "You are a test agent."
         assert!(summary.contains("--- Available Skills (2) ---"));
         assert_eq!(skill_lines(&summary).len(), 2);
         assert!(!summary.contains("more installed skills"));
+    }
+
+    fn bundled_skill_registry() -> freeco_skills::registry::SkillRegistry {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut registry = freeco_skills::registry::SkillRegistry::new(tmp.path().join("skills"));
+        assert!(registry.load_bundled() > 0);
+        registry
+    }
+
+    #[test]
+    fn test_skill_prompt_context_only_for_allowlisted_skills() {
+        let registry = bundled_skill_registry();
+
+        // No allowlist: every skill is in the summary, no bodies are injected.
+        assert!(FreecoKernel::collect_prompt_context_from(&registry, &[]).is_empty());
+
+        // Allowlisted skills are injected whole, in the order the agent lists them.
+        let allow = vec!["slides".to_string(), "freeco-design".to_string()];
+        let ctx = FreecoKernel::collect_prompt_context_from(&registry, &allow);
+        let slides = ctx.find("--- Skill: slides ---").expect("slides injected");
+        let design = ctx
+            .find("--- Skill: freeco-design ---")
+            .expect("freeco-design injected");
+        assert!(slides < design, "allowlist order must be kept");
+        assert!(!ctx.contains("--- Skill: kubernetes ---"));
+    }
+
+    #[test]
+    fn test_skill_summary_is_sorted_by_name() {
+        let registry = bundled_skill_registry();
+        let summary = FreecoKernel::build_skill_summary_from(&registry, &[]);
+        let names: Vec<&str> = summary
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .filter_map(|l| l.split(':').next())
+            .collect();
+        assert!(names.len() > 60);
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn test_agent_with_fixed_tools_can_read_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-kernel-skill-tools-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+
+        let mut manifest = test_manifest("fixed-tools", "declares its tools", vec![]);
+        manifest.capabilities.tools = vec!["file_read".to_string()];
+        let agent_id = kernel.spawn_agent(manifest).expect("agent spawns");
+
+        let names: Vec<String> = kernel
+            .available_tools(agent_id)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(names.contains(&"file_read".to_string()));
+        assert!(names.contains(&"skill_describe".to_string()));
+        assert!(names.contains(&"skill_list".to_string()));
+        assert!(
+            !names.contains(&"skill_execute".to_string()),
+            "skill_execute runs code and must stay opt-in"
+        );
+
+        kernel.shutdown();
     }
 }

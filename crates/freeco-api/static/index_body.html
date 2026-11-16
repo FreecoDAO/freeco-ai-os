@@ -1,5 +1,21 @@
 <body x-data="app" :data-theme="theme">
 
+<!-- Alpine backdrop: sky, two ridges, a lake (stars show only at night).
+     Colours come from the theme tokens; see .app-backdrop in layout.css. -->
+<svg class="app-backdrop" aria-hidden="true" focusable="false" viewBox="0 0 1440 560" preserveAspectRatio="xMidYMin slice">
+  <defs>
+    <linearGradient id="feSky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--sky-1)"/><stop offset="1" style="stop-color:var(--sky-2)"/></linearGradient>
+    <linearGradient id="feLake" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--lake-1)"/><stop offset="1" style="stop-color:var(--lake-2)"/></linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1440" height="560" fill="url(#feSky)"/>
+  <g style="fill:var(--star)"><circle cx="96" cy="48" r="1.3"/><circle cx="268" cy="92" r="1"/><circle cx="430" cy="36" r="1.4"/><circle cx="612" cy="84" r="1"/><circle cx="866" cy="42" r="1.2"/><circle cx="1010" cy="70" r="1"/><circle cx="1188" cy="30" r="1.4"/><circle cx="1350" cy="86" r="1.1"/><circle cx="742" cy="22" r="0.9"/><circle cx="1262" cy="58" r="0.9"/></g>
+  <path d="M0 250 L140 170 L230 215 L360 120 L470 190 L560 150 L700 60 L820 160 L930 110 L1060 190 L1180 130 L1300 200 L1440 150 L1440 330 L0 330 Z" style="fill:var(--ridge-far)"/>
+  <path d="M690 70 L700 60 L712 74 L704 72 Z M350 128 L360 120 L371 131 Z" style="fill:var(--snow)"/>
+  <path d="M0 300 L120 240 L250 285 L390 220 L520 270 L640 230 L780 280 L900 240 L1040 290 L1170 250 L1300 285 L1440 255 L1440 360 L0 360 Z" style="fill:var(--ridge-near)"/>
+  <rect x="0" y="352" width="1440" height="208" fill="url(#feLake)"/>
+  <path d="M0 352 C 240 344, 480 360, 720 350 S 1200 346, 1440 354 L1440 358 L0 358 Z" style="fill:var(--shore)"/>
+</svg>
+
 <!-- Available on every page: pauses all agent dispatch until explicitly released.
      Octagonal like a road STOP sign, same footprint as the Freeco button, so it
      reads instantly and never covers the chat input. -->
@@ -64,7 +80,7 @@
                @click="window.dispatchEvent(new CustomEvent('freeco-open'))"
                title="Ask Freeco — your Ethical Executive AI Assistant" style="cursor:pointer">
           <div>
-            <h1>FreEco.ai</h1>
+            <h1>FreEco.ai<svg class="swiss-mark" viewBox="0 0 32 32" role="img" aria-label="Swiss"><rect width="32" height="32" rx="5" style="fill:var(--swiss)"/><path d="M13 6h6v7h7v6h-7v7h-6v-7H6v-6h7z" fill="#FFFFFF"/></svg></h1>
             <div class="sidebar-tagline">Ethical Executive AI Assistant</div>
             <div class="version" x-text="'v' + version"></div>
             <a x-show="$store.app.updateAvailable" x-cloak href="#settings"
@@ -77,9 +93,9 @@
       <button class="sidebar-collapse-btn" @click="toggleSidebar()" :title="sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" aria-label="Collapse sidebar"
               x-text="sidebarCollapsed ? '»' : '«'"></button>
       <div class="theme-switcher">
-        <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" title="Light">&#9788;</button>
-        <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" title="System">&#9675;</button>
-        <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" title="Dark">&#9790;</button>
+        <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" title="Day" aria-label="Day" :aria-pressed="themeMode === 'light'">&#9788;</button>
+        <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" title="Follow system" aria-label="Follow system" :aria-pressed="themeMode === 'system'">&#9675;</button>
+        <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" title="Night" aria-label="Night" :aria-pressed="themeMode === 'dark'">&#9790;</button>
       </div>
     </div>
 
@@ -121,7 +137,7 @@
             <a class="nav-item" :class="{ active: page === 'approvals' }" @click="navigate('approvals')" :aria-current="page === 'approvals' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg></span>
               <span class="nav-label">Approvals</span>
-              <span class="badge badge-warn" x-show="$store.app.pendingApprovalCount > 0" x-text="$store.app.pendingApprovalCount"></span>
+              <span class="badge badge-swiss" x-show="$store.app.pendingApprovalCount > 0" x-text="$store.app.pendingApprovalCount" :aria-label="$store.app.pendingApprovalCount + ' waiting'"></span>
             </a>
             <a class="nav-item" :class="{ active: page === 'comms' }" @click="navigate('comms')" :aria-current="page === 'comms' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg></span>
@@ -310,7 +326,7 @@
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px">
               <template x-for="ed in editions" :key="ed.id">
                 <div class="card" style="cursor:pointer;padding:16px" @click="spawnEdition(ed)"
-                     @mouseenter="$el.style.borderColor='var(--accent)'" @mouseleave="$el.style.borderColor='var(--border)'">
+                     @mouseenter="$el.style.borderColor='var(--accent)'" @mouseleave="$el.style.borderColor=''">
                   <div style="display:flex;align-items:center;gap:10px">
                     <span style="font-size:1.6rem" x-text="ed.emoji"></span>
                     <div>
@@ -334,6 +350,17 @@
 
           <!-- Primary stats row with icons + stagger animation -->
           <div class="stats-row stats-row-lg">
+            <div class="stat-card stat-card-lg animate-entry stagger-1" @click="location.hash='approvals'" style="cursor:pointer">
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="width:36px;height:36px;border-radius:var(--radius-md);background:var(--swiss-soft);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--swiss-ink)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>
+                </div>
+                <div>
+                  <div class="stat-value" :class="$store.app.pendingApprovalCount > 0 ? 'stat-waiting' : ''" x-text="$store.app.pendingApprovalCount || 0"></div>
+                  <div class="stat-label">Waiting for you</div>
+                </div>
+              </div>
+            </div>
             <div class="stat-card stat-card-lg animate-entry stagger-1" @click="location.hash='agents'" style="cursor:pointer">
               <div style="display:flex;align-items:center;gap:8px">
                 <div style="width:36px;height:36px;border-radius:var(--radius-md);background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;flex-shrink:0">
@@ -1302,7 +1329,7 @@
             <div class="text-sm font-bold mb-2" style="color:var(--text-dim);letter-spacing:0.5px;font-size:11px;text-transform:uppercase">Your Agents</div>
             <div style="display:flex;flex-wrap:wrap;gap:10px">
               <template x-for="agent in agents" :key="agent.id">
-                <div class="agent-chip" @click="chatWithAgent(agent)" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);transition:all 0.2s var(--ease-spring, ease);min-width:200px;box-shadow:var(--shadow-xs)" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.transform='translateY(-2px)';$el.style.boxShadow='var(--shadow-md)'" @mouseleave="$el.style.borderColor='var(--border)';$el.style.transform='';$el.style.boxShadow='var(--shadow-xs)'">
+                <div class="agent-chip" @click="chatWithAgent(agent)" style="cursor:pointer;display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);transition:all 0.2s var(--ease-spring, ease);min-width:200px;box-shadow:var(--shadow-xs)" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.transform='translateY(-2px)';$el.style.boxShadow='var(--shadow-md)'" @mouseleave="$el.style.borderColor='';$el.style.transform='';$el.style.boxShadow='var(--shadow-xs)'">
                   <div style="width:36px;height:36px;border-radius:50%;background:var(--accent-subtle);display:flex;align-items:center;justify-content:center;flex-shrink:0">
                     <span x-show="agent.identity && agent.identity.emoji" x-text="agent.identity && agent.identity.emoji" style="font-size:18px"></span>
                     <svg x-show="!agent.identity || !agent.identity.emoji" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -1319,7 +1346,7 @@
                     </div>
                   </div>
                   <span class="badge" :class="'badge-' + agent.state.toLowerCase()" x-text="agent.state" style="font-size:10px"></span>
-                  <button class="agent-chip-config-btn" @click.stop="showDetail(agent)" title="Agent settings" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--text-dim);transition:all 0.15s;flex-shrink:0" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.color='var(--accent)';$el.style.background='var(--surface2)'" @mouseleave="$el.style.borderColor='var(--border)';$el.style.color='var(--text-dim)';$el.style.background='transparent'">
+                  <button class="agent-chip-config-btn" @click.stop="showDetail(agent)" title="Agent settings" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--text-dim);transition:all 0.15s;flex-shrink:0" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.color='var(--accent)';$el.style.background='var(--surface2)'" @mouseleave="$el.style.borderColor='';$el.style.color='var(--text-dim)';$el.style.background='transparent'">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                   </button>
                 </div>
@@ -3182,7 +3209,7 @@
                     </div>
                     <div class="flex gap-2">
                       <button class="btn btn-ghost btn-sm" x-show="skill.config_declared_count > 0" @click="openSkillConfig(skill)" title="Configure skill variables">&#9881; Configure</button>
-                      <button class="btn btn-danger btn-sm" @click="uninstallSkill(skill.name)">Uninstall</button>
+                      <button class="btn btn-danger btn-sm" x-show="skill.source.type !== 'bundled'" @click="uninstallSkill(skill.name)">Uninstall</button>
                     </div>
                   </div>
                 </div>

@@ -2320,7 +2320,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | DELETE | `/api/providers/{name}/key` | Remove provider API key |
 | POST | `/api/providers/{name}/test` | Test provider connectivity |
 | **Skills & Marketplace** | | |
-| GET | `/api/skills` | List installed skills (60 bundled) |
+| GET | `/api/skills` | List installed skills (66 bundled) |
 | POST | `/api/skills/install` | Install skill |
 | POST | `/api/skills/uninstall` | Uninstall skill |
 | POST | `/api/skills/create` | Create new skill |

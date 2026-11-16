@@ -467,6 +467,11 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
     out
 }
 
+/// Characters of skill instructions injected into the system prompt. Only
+/// skills an agent names in its `skills` allowlist are injected; this fits
+/// about two whole bundled skills.
+const SKILL_CONTEXT_CAP: usize = 8000;
+
 fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     let mut out = String::from("## Skills\n");
     if !skill_summary.is_empty() {
@@ -477,7 +482,12 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     }
     if !prompt_context.is_empty() {
         out.push('\n');
-        out.push_str(&cap_str(prompt_context, 2000));
+        out.push_str(&cap_str(prompt_context, SKILL_CONTEXT_CAP));
+        if prompt_context.chars().count() > SKILL_CONTEXT_CAP {
+            out.push_str(
+                "\n(Skill instructions cut for length. Call skill_describe with the skill name for the full text.)",
+            );
+        }
     }
     out
 }
@@ -1013,6 +1023,24 @@ mod tests {
         let prompt = build_system_prompt(&ctx);
         assert!(prompt.contains("## Skills"));
         assert!(prompt.contains("web-search"));
+    }
+
+    #[test]
+    fn test_skills_section_keeps_whole_skill_context() {
+        let mut ctx = basic_ctx();
+        ctx.skill_prompt_context = format!("--- Skill: a ---\n{}END", "x".repeat(3500));
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("END"), "a 3.5 KB skill must not be cut");
+        assert!(!prompt.contains("cut for length"));
+    }
+
+    #[test]
+    fn test_skills_section_points_to_skill_describe_when_cut() {
+        let mut ctx = basic_ctx();
+        ctx.skill_prompt_context = "x".repeat(SKILL_CONTEXT_CAP + 100);
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("cut for length"));
+        assert!(prompt.contains("skill_describe"));
     }
 
     #[test]

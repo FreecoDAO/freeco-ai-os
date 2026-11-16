@@ -187,6 +187,19 @@ most on this codebase, judging by what has actually gone wrong: make the
 change surgical rather than sweeping, say the assumption out loud instead of
 picking silently, and define what "working" means before claiming it.
 
+### Design skills (cloud sessions only)
+
+`.claude/hooks/session-start.sh` installs four design skills into
+`~/.claude/skills/` when a Claude Code cloud session starts: `apple-design`
+(reviews against Apple's Human Interface Guidelines), `ui-ux-pro-max`
+(searchable styles, palettes, font pairings and UX rules), `slides` and
+`design-system`. Local sessions are skipped.
+
+Each one is pinned to an upstream commit that was reviewed, and nothing fetched
+is run. They are installed rather than committed because `apple-design` carries
+Apple's HIG text with no licence to redistribute it. To update one, read the
+upstream diff since its pin, then move the pin.
+
 ## Architecture Notes
 - **Don't touch `freeco-cli`** — user is actively building the interactive CLI
 - `KernelHandle` trait avoids circular deps between runtime and kernel
