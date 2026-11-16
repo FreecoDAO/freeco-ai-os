@@ -1144,31 +1144,48 @@ pub async fn run_agent_loop(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -1182,7 +1199,7 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook
@@ -2536,31 +2553,48 @@ pub async fn run_agent_loop_streaming(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -2574,7 +2608,7 @@ pub async fn run_agent_loop_streaming(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook

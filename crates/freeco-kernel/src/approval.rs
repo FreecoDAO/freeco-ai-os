@@ -161,7 +161,7 @@ impl ApprovalManager {
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
             "shell_exec" => RiskLevel::Critical,
-            "file_write" | "file_delete" => RiskLevel::High,
+            "file_write" | "file_delete" | "skill_install_github" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
         }
@@ -259,6 +259,10 @@ mod tests {
         );
         assert_eq!(
             ApprovalManager::classify_risk("file_delete"),
+            RiskLevel::High
+        );
+        assert_eq!(
+            ApprovalManager::classify_risk("skill_install_github"),
             RiskLevel::High
         );
         assert_eq!(

@@ -6903,6 +6903,16 @@ impl FreecoKernel {
             all_tools.retain(|t| t.name != "shell_exec");
         }
 
+        // Step 6: An agent working inside another agent's call (agent_send)
+        // is not offered the tools subagents may never use. execute_tool
+        // refuses them too; this keeps them out of the model's choices.
+        if freeco_kernel_runtime::tool_runner::current_agent_depth() > 0 {
+            all_tools.retain(|t| {
+                !freeco_kernel_runtime::tool_policy::SUBAGENT_DENY_ENFORCED
+                    .contains(&t.name.as_str())
+            });
+        }
+
         all_tools
     }
 
@@ -6939,6 +6949,55 @@ impl FreecoKernel {
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;
+    }
+
+    /// Scan skills in a GitHub repository without installing anything.
+    ///
+    /// `source` is `owner/repo[/path][@ref]` or a github.com URL. The result
+    /// names the exact commit scanned; pass it to
+    /// [`Self::github_skill_install`] so the install matches the preview.
+    pub async fn github_skill_preview(
+        &self,
+        source: &str,
+    ) -> Result<freeco_skills::github::GitHubPreview, freeco_skills::SkillError> {
+        let spec = freeco_skills::github::GitHubSkillSpec::parse(source)?;
+        let skills_dir = self.config.home_dir.join("skills");
+        freeco_skills::github::GitHubSkillClient::new()
+            .preview(&spec, &skills_dir)
+            .await
+    }
+
+    /// Install skills from a GitHub repository, pinned to `commit`, then
+    /// hot-reload the registry so agents and the dashboard see them at once.
+    ///
+    /// Refused while the registry is frozen (Stable mode).
+    pub async fn github_skill_install(
+        &self,
+        source: &str,
+        commit: Option<&str>,
+        only: &[String],
+        overwrite: bool,
+        opts: &freeco_skills::installer::InstallOptions,
+    ) -> Result<freeco_skills::github::GitHubInstallOutcome, freeco_skills::SkillError> {
+        let frozen = self
+            .skill_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_frozen();
+        if frozen {
+            return Err(freeco_skills::SkillError::SecurityBlocked(
+                "skills are frozen (Stable mode) — installs are disabled".to_string(),
+            ));
+        }
+        let spec = freeco_skills::github::GitHubSkillSpec::parse(source)?;
+        let skills_dir = self.config.home_dir.join("skills");
+        let outcome = freeco_skills::github::GitHubSkillClient::new()
+            .install(&spec, commit, only, overwrite, &skills_dir, opts)
+            .await?;
+        if !outcome.installed.is_empty() {
+            self.reload_skills();
+        }
+        Ok(outcome)
     }
 
     /// Update the live per-skill config override map and reload skills.
@@ -8364,6 +8423,41 @@ impl KernelHandle for FreecoKernel {
         }))
     }
 
+    async fn skill_github_preview(&self, source: &str) -> Result<serde_json::Value, String> {
+        let preview = self
+            .github_skill_preview(source)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        serde_json::to_value(&preview).map_err(|e| format!("{e}"))
+    }
+
+    async fn skill_github_install(
+        &self,
+        source: &str,
+        commit: &str,
+        skills: &[String],
+        overwrite: bool,
+    ) -> Result<serde_json::Value, String> {
+        // Agents must install exactly what was previewed: a full SHA, never
+        // a moving branch name.
+        if !freeco_skills::github::is_full_sha(commit) {
+            return Err(
+                "commit must be the full 40-character SHA from skill_github_preview".to_string(),
+            );
+        }
+        let outcome = self
+            .github_skill_install(
+                source,
+                Some(commit),
+                skills,
+                overwrite,
+                &freeco_skills::installer::InstallOptions::default(),
+            )
+            .await
+            .map_err(|e| format!("{e}"))?;
+        serde_json::to_value(&outcome).map_err(|e| format!("{e}"))
+    }
+
     async fn hand_activate(
         &self,
         hand_id: &str,
@@ -8714,7 +8808,9 @@ impl KernelHandle for FreecoKernel {
 
         // Hand agents are curated trusted packages — auto-approve tool execution.
         // Check if this agent has a "hand:" tag indicating it was spawned by activate_hand().
-        if let Ok(aid) = agent_id.parse::<AgentId>() {
+        // Tools that change what every agent can do (skill installs) still ask.
+        let always_ask = freeco_kernel_runtime::tool_runner::ALWAYS_ASK_TOOLS.contains(&tool_name);
+        if let Some(aid) = agent_id.parse::<AgentId>().ok().filter(|_| !always_ask) {
             if let Some(entry) = self.registry.get(aid) {
                 if entry.tags.iter().any(|t| t.starts_with("hand:")) {
                     info!(agent_id, tool_name, "Auto-approved for hand agent");
@@ -9100,6 +9196,7 @@ fn describe_tool_intent(tool_name: &str) -> String {
         "agent_spawn" => "create a new agent that will act on your behalf",
         "agent_kill" => "stop a running agent",
         "email_send" | "channel_send" => "send a message on your behalf",
+        "skill_install_github" => "install new skills from a GitHub repository",
         _ => return format!("use the {tool_name} tool"),
     }
     .to_string()
@@ -9135,6 +9232,12 @@ fn describe_tool_consequences(tool_name: &str) -> String {
         }
         "agent_kill" => "The agent stops; work in progress is lost.",
         "email_send" | "channel_send" => "The message is delivered and cannot be recalled.",
+        "skill_install_github" => {
+            "The skills' instructions are added to every agent that uses them, and their \
+             scripts can run wherever an agent has shell access. Only the scanned commit is \
+             installed. A new skill can be uninstalled from the Skills page; with overwrite, \
+             the skill it replaces is deleted and cannot be restored."
+        }
         _ => return format!("Effects of {tool_name} are not described; treat as irreversible."),
     }
     .to_string()
@@ -9195,6 +9298,9 @@ fn tool_is_reversible(tool_name: &str) -> Option<bool> {
         // Deliberately unknown rather than guessed. A shell command may do
         // anything, and claiming it is reversible would be a lie the user acts on.
         "shell_exec" => None,
+        // A new skill can be uninstalled, but with overwrite the skill it
+        // replaces is gone, and this answer cannot see which one it is.
+        "skill_install_github" => None,
         _ => None,
     }
 }

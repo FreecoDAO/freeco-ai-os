@@ -489,6 +489,15 @@ pub async fn build_router(
             "/api/marketplace/search",
             axum::routing::get(routes::marketplace_search),
         )
+        // GitHub skill install (pinned to a commit, scanned before install)
+        .route(
+            "/api/skills/github/preview",
+            axum::routing::post(routes::github_skill_preview),
+        )
+        .route(
+            "/api/skills/github/install",
+            axum::routing::post(routes::github_skill_install),
+        )
         // ClawHub (OpenClaw ecosystem) endpoints
         .route(
             "/api/clawhub/search",

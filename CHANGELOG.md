@@ -40,6 +40,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release refused to push into it, so v0.9.8 shipped no image. Nothing built
   from this repository lands in a public image.
 
+### Added
+
+- Skills install straight from GitHub. The Skills page has a GitHub tab:
+  paste `owner/repo/skills` or a link, preview, tick the skills, install.
+  Every install is pinned to the commit that was previewed, and every skill
+  folder is scanned first (prompt injection, scripts that download and run
+  code, hidden Unicode, compiled binaries); a Critical finding blocks it.
+  Installed skills show their repo and commit on the Installed tab.
+- Two agent tools for the same thing: `skill_github_preview`, which only
+  reads, and `skill_install_github`, which always asks you first, even for
+  hand agents and even with approvals turned off. An agent working for
+  another agent cannot use it.
+
+### Fixed
+
+- A tool that needs your approval no longer fails when you take longer than
+  the tool time limit (two minutes by default) to answer. The approval is
+  asked for first and the time limit starts once you approve.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

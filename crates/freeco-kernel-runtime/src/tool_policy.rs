@@ -241,7 +241,15 @@ const SUBAGENT_DENY_ALWAYS: &[&str] = &[
     "hand_activate",
     "hand_deactivate",
     "process_start",
+    "skill_install_github",
 ];
+
+/// Tools refused to any agent running inside another agent's call (depth > 0),
+/// both when its tool list is built and when a call executes. Such an agent
+/// takes orders from another model, not from the user, so it may not change
+/// what every agent is told and can run. `SUBAGENT_DENY_ALWAYS` names more
+/// tools, but only `filter_tools_by_depth` applies it, and nothing calls that.
+pub const SUBAGENT_DENY_ENFORCED: &[&str] = &["skill_install_github"];
 
 /// Tools denied to leaf subagents (depth >= max_depth - 1). Prevents deep spawn chains.
 const SUBAGENT_DENY_LEAF: &[&str] = &["agent_spawn", "agent_kill"];
