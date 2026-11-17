@@ -159,6 +159,16 @@ document.addEventListener('alpine:init', function() {
     pendingApprovalCount: 0,
     lastPendingApprovalSignature: '',
     pendingAgent: null,
+    // A conversation picked in the sidebar, opened once its agent's chat is.
+    pendingSession: null,
+    // The second sidebar (chats, projects, tasks). Shown unless hidden, and
+    // a drawer of its own on a phone.
+    sideNavHidden: localStorage.getItem('freeco-sidenav') === 'hidden',
+    sideNavMobile: false,
+    toggleSideNav() {
+      this.sideNavHidden = !this.sideNavHidden;
+      try { localStorage.setItem('freeco-sidenav', this.sideNavHidden ? 'hidden' : 'shown'); } catch (e) { /* private window */ }
+    },
     focusMode: localStorage.getItem('freeco-focus') === 'true',
     showOnboarding: false,
     showAuthPrompt: false,
@@ -468,7 +478,10 @@ function app() {
       if (mode === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       return mode;
     })(),
-    sidebarCollapsed: localStorage.getItem('freeco-sidebar') === 'collapsed',
+    // The main menu is an icon rail unless the user widened it: the second
+    // sidebar beside it holds the chats, so both at full width would leave the
+    // chat itself too narrow.
+    sidebarCollapsed: localStorage.getItem('freeco-sidebar') !== 'expanded',
     mobileMenuOpen: false,
     connected: false,
     wsConnected: false,
@@ -488,7 +501,7 @@ function app() {
       });
 
       // Hash routing
-      var validPages = ['overview','agents','projects','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
+      var validPages = ['overview','agents','live','artifacts','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
       var pageRedirects = {
         'chat': 'agents',
         'templates': 'agents',
@@ -699,6 +712,11 @@ window.FreecoVoiceCfg = {
 // delivered: they are told it was sent and have no way to see it. The chat page
 // already opens whatever `pendingAgent` names, so this points that at the agent
 // and switches to the chat.
+//
+// It goes to `agents` itself, not the `chat` alias: the alias is a page that
+// does not exist, so going through it unmounts an open chat for a moment and
+// the pending agent is spent on the chat being torn down. The user then lands
+// on the agent list instead of the chat they asked for.
 window.addEventListener('freeco-open-agent', function (ev) {
   var id = ev && ev.detail;
   if (!id || typeof Alpine === 'undefined') return;
@@ -706,7 +724,7 @@ window.addEventListener('freeco-open-agent', function (ev) {
   if (!store) return;
   var agent = (store.agents || []).filter(function (a) { return a.id === id; })[0];
   if (agent) store.pendingAgent = agent;
-  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'chat' }));
+  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'agents' }));
 });
 
 // Deep links: /?ask=...&agent=...

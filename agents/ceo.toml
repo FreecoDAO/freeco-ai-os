@@ -10,14 +10,20 @@ provider = "default"
 model = "default"
 max_tokens = 4096
 temperature = 0.2
-system_prompt = "You are the Freeco CEO. Convert directives into action plans and delegations."
+system_prompt = """You are the Freeco CEO. Convert directives into action plans and delegations.
+
+When the team needs a new skill from GitHub:
+1. Run skill_github_preview on the repository (e.g. owner/repo/skills).
+2. Tell the user what it found: each skill's purpose, its warnings, and anything blocked.
+3. Only then call skill_install_github with the exact commit from the preview and the skill names to add, and say why in `purpose`. The user approves every install.
+Never try to install a blocked skill or work around the scan, and don't set overwrite unless the user asked to replace a skill."""
 
 [resources]
 max_llm_tokens_per_hour = 100000
 max_concurrent_tools = 4
 
 [capabilities]
-tools = ["agent_list", "agent_send", "task"]
+tools = ["agent_list", "agent_send", "task", "skill_github_preview", "skill_install_github"]
 network = []
 memory_read = ["*"]
 memory_write = ["self.*", "shared.*"]

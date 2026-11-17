@@ -140,9 +140,11 @@ pub(crate) fn valid_secret_name(name: &str) -> bool {
 /// `secrets.env` (which survives a vault problem), and this process's
 /// environment, so it works now rather than after a restart.
 pub(crate) fn store_secret(state: &AppState, name: &str, value: &str) -> Result<(), String> {
+    // Before the vault, so a value secrets.env would refuse is not half-stored.
+    freeco_types::secrets::validate_secret_env_entry(name, value)?;
     state.kernel.store_credential(name, value);
     let secrets_path = state.kernel.config.home_dir.join("secrets.env");
-    crate::routes::write_secret_env(&secrets_path, name, value)
+    freeco_types::secrets::write_secret_env(&secrets_path, name, value)
         .map_err(|e| format!("could not write secrets.env: {e}"))?;
     std::env::set_var(name, value);
     // The name may be a provider's key variable; let the model list notice.
@@ -176,6 +178,13 @@ pub async fn save_secret(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Nothing to save."})),
+        );
+    }
+    // A line break or NUL is the caller's mistake, not a storage failure.
+    if let Err(e) = freeco_types::secrets::validate_secret_env_entry(&name, &value) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
         );
     }
     match store_secret(&state, &name, &value) {

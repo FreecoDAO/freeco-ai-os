@@ -79,7 +79,7 @@ fn env_timeout_secs_with_legacy(current: &str, legacy: &str) -> Option<u64> {
 /// say that, and say what to do instead of waiting again.
 fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
     match tool_name {
-        "agent_send" | "agent_spawn" => format!(
+        "agent_send" | "agent_delegate" | "agent_spawn" => format!(
             "Tool '{tool_name}' timed out after {timeout_secs}s: the other agent did not \
              reply in time. The usual cause is that its model is not answering - an \
              exhausted provider balance, or a fallback model that does not exist. Do not \
@@ -92,7 +92,7 @@ fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
 
 fn tool_timeout_for(tool_name: &str) -> Option<Duration> {
     let secs = match tool_name {
-        "agent_send" | "agent_spawn" => env_timeout_secs_with_legacy(
+        "agent_send" | "agent_delegate" | "agent_spawn" => env_timeout_secs_with_legacy(
             "FREECO_AI_AGENT_TOOL_TIMEOUT_SECS",
             "OPENFANG_AGENT_TOOL_TIMEOUT_SECS",
         )
@@ -304,6 +304,16 @@ pub fn strip_provider_prefix_known(
     model.to_string()
 }
 
+/// Whether the kernel marked this run as a guest's (someone other than the
+/// agent's owner): `metadata.guest = true` on the run's copy of the manifest.
+fn is_guest_run(manifest: &AgentManifest) -> bool {
+    manifest
+        .metadata
+        .get("guest")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod strip_provider_prefix_tests {
     use super::{should_try_fallback, strip_provider_prefix};
@@ -488,8 +498,15 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (dims={})", query_vec.len());
@@ -599,20 +616,16 @@ pub async fn run_agent_loop(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -650,7 +663,17 @@ pub async fn run_agent_loop(
             max_history = max_history,
             "Trimming old messages to prevent context overflow"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -659,6 +682,22 @@ pub async fn run_agent_loop(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default
@@ -946,7 +985,9 @@ pub async fn run_agent_loop(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
@@ -1144,31 +1185,48 @@ pub async fn run_agent_loop(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -1182,7 +1240,7 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook
@@ -1920,8 +1978,15 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (streaming, dims={})", query_vec.len());
@@ -2027,20 +2092,16 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -2058,7 +2119,17 @@ pub async fn run_agent_loop_streaming(
             max_history = max_history,
             "Trimming old messages to prevent context overflow (streaming)"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -2067,6 +2138,22 @@ pub async fn run_agent_loop_streaming(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default
@@ -2345,7 +2432,9 @@ pub async fn run_agent_loop_streaming(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
@@ -2536,31 +2625,48 @@ pub async fn run_agent_loop_streaming(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -2574,7 +2680,7 @@ pub async fn run_agent_loop_streaming(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook

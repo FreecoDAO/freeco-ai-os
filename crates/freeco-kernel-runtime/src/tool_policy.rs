@@ -241,7 +241,15 @@ const SUBAGENT_DENY_ALWAYS: &[&str] = &[
     "hand_activate",
     "hand_deactivate",
     "process_start",
+    "skill_install_github",
 ];
+
+/// Tools refused to any agent running inside another agent's call (depth > 0),
+/// both when its tool list is built and when a call executes. Such an agent
+/// takes orders from another model, not from the user, so it may not change
+/// what every agent is told and can run. `SUBAGENT_DENY_ALWAYS` names more
+/// tools, but only `filter_tools_by_depth` applies it, and nothing calls that.
+pub const SUBAGENT_DENY_ENFORCED: &[&str] = &["skill_install_github"];
 
 /// Tools denied to leaf subagents (depth >= max_depth - 1). Prevents deep spawn chains.
 const SUBAGENT_DENY_LEAF: &[&str] = &["agent_spawn", "agent_kill"];
@@ -274,9 +282,93 @@ pub fn filter_tools_by_depth(tools: &[String], depth: u32, max_depth: u32) -> Ve
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// The CEO role
+// ---------------------------------------------------------------------------
+
+/// Tools the agent holding the CEO role always gets, whatever its manifest
+/// lists: what it takes to run the installation the way an operator would.
+///
+/// The CEO is whichever agent carries the `ceo` tag; the dashboard gives the
+/// tag to the agent it opens as the main chat. That agent's manifest was
+/// written for its other job (concierge, assistant), so it listed none of
+/// these, and the CEO could not see a container, switch a skill or change a
+/// model however it was asked. Granting by role means the CEO can do its job
+/// on every install without anyone editing a manifest. The owner can still
+/// take any of these away with the agent's tool blocklist.
+///
+/// Deliberately absent: `agent_kill` (a stopped agent cannot be revived),
+/// `shell_exec` and `sandbox_exec` (the container tools above need neither).
+pub const CEO_MANAGEMENT_TOOLS: &[&str] = &[
+    // Agents
+    "agent_list",
+    "agent_describe",
+    "agent_find",
+    "agent_send",
+    "agent_spawn",
+    "agent_activate",
+    "agent_set_model",
+    "agent_skills_set",
+    // Models and providers
+    "provider_list",
+    "provider_key_set",
+    "model_list",
+    // Skills
+    "skill_list",
+    "skill_describe",
+    "skill_reload",
+    // Containers and the services that run in them
+    "container_list",
+    "container_logs",
+    "container_start",
+    "container_stop",
+    "container_restart",
+    "hand_list",
+    "hand_status",
+    "hand_activate",
+    "hand_deactivate",
+    // The organisation
+    "org_overview",
+    "system_audit",
+];
+
+/// Whether an agent with these tags holds the CEO role.
+pub fn holds_ceo_role(tags: &[String]) -> bool {
+    tags.iter().any(|t| t.trim().eq_ignore_ascii_case("ceo"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ceo_role_is_read_from_the_tag_in_any_case() {
+        assert!(holds_ceo_role(&["freeco".into(), "ceo".into()]));
+        assert!(holds_ceo_role(&["CEO".into()]));
+        assert!(!holds_ceo_role(&[
+            "executive".into(),
+            "ceo-assistant".into()
+        ]));
+        assert!(!holds_ceo_role(&[]));
+    }
+
+    #[test]
+    fn every_ceo_tool_is_a_real_builtin_tool() {
+        let builtin: Vec<String> = crate::tool_runner::builtin_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for name in CEO_MANAGEMENT_TOOLS {
+            assert!(
+                builtin.iter().any(|b| b == name),
+                "{name} is granted to the CEO but is not a built-in tool"
+            );
+        }
+        // Nothing irreversible or unconfined comes with the role.
+        for absent in ["agent_kill", "shell_exec", "sandbox_exec", "file_delete"] {
+            assert!(!CEO_MANAGEMENT_TOOLS.contains(&absent), "{absent}");
+        }
+    }
 
     #[test]
     fn test_glob_match_exact() {

@@ -40,7 +40,10 @@ function commsPage() {
       if (this.sseSource) this.sseSource.close();
       var self = this;
       var url = '/api/comms/events/stream';
-      if (FreecoAPI.apiKey) url += '?token=' + encodeURIComponent(FreecoAPI.apiKey);
+      // FreecoAPI has no apiKey property: the feed connected without its
+      // token, and with a login set it was refused and showed nothing new.
+      var token = FreecoAPI.getToken();
+      if (token) url += '?token=' + encodeURIComponent(token);
       this.sseSource = new EventSource(url);
       this.sseSource.onmessage = function(ev) {
         if (ev.data === 'ping') return;

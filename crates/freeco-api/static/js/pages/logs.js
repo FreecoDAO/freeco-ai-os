@@ -23,6 +23,7 @@ function logsPage() {
     auditEntries: [],
     tipHash: '',
     chainValid: null,
+    chainDetail: '',
     filterAction: '',
     auditLoading: false,
     auditLoadError: '',
@@ -143,11 +144,14 @@ function logsPage() {
       this.entries = [];
     },
 
-    classifyLevel: function(action) {
-      if (!action) return 'info';
-      var a = action.toLowerCase();
-      if (a.indexOf('error') !== -1 || a.indexOf('fail') !== -1 || a.indexOf('crash') !== -1) return 'error';
-      if (a.indexOf('warn') !== -1 || a.indexOf('deny') !== -1 || a.indexOf('block') !== -1) return 'warn';
+    // By the outcome as well as the action: no action is named "error", so
+    // a failed message or tool call used to show as INFO.
+    classifyLevel: function(entry) {
+      if (!entry) return 'info';
+      var a = (entry.action || '').toLowerCase();
+      var o = (entry.outcome || '').toLowerCase();
+      if (o.indexOf('error') === 0 || o.indexOf('fail') !== -1 || a.indexOf('error') !== -1 || a.indexOf('fail') !== -1 || a.indexOf('crash') !== -1) return 'error';
+      if (o.indexOf('denied') === 0 || a.indexOf('warn') !== -1 || a.indexOf('deny') !== -1 || a.indexOf('block') !== -1 || a.indexOf('kill') !== -1) return 'warn';
       return 'info';
     },
 
@@ -156,9 +160,9 @@ function logsPage() {
       var levelF = this.levelFilter;
       var textF = this.textFilter.toLowerCase();
       return this.entries.filter(function(e) {
-        if (levelF && self.classifyLevel(e.action) !== levelF) return false;
+        if (levelF && self.classifyLevel(e) !== levelF) return false;
         if (textF) {
-          var haystack = ((e.action || '') + ' ' + (e.detail || '') + ' ' + (e.agent_id || '')).toLowerCase();
+          var haystack = ((e.action || '') + ' ' + (e.detail || '') + ' ' + (e.outcome || '') + ' ' + (e.agent_id || '') + ' ' + self.auditAgentName(e.agent_id)).toLowerCase();
           if (haystack.indexOf(textF) === -1) return false;
         }
         return true;
@@ -181,7 +185,7 @@ function logsPage() {
 
     exportLogs: function() {
       var lines = this.filteredEntries.map(function(e) {
-        return new Date(e.timestamp).toISOString() + ' [' + e.action + '] ' + (e.detail || '');
+        return new Date(e.timestamp).toISOString() + ' [' + e.action + '] ' + (e.agent_id || '-') + ' ' + (e.detail || '') + ' => ' + (e.outcome || '');
       });
       var blob = new Blob([lines.join('\n')], { type: 'text/plain' });
       var url = URL.createObjectURL(blob);
@@ -236,13 +240,16 @@ function logsPage() {
       try {
         var data = await FreecoAPI.get('/api/audit/verify');
         this.chainValid = data.valid === true;
+        this.chainDetail = data.error || '';
         if (this.chainValid) {
           FreecoToast.success('Audit chain verified — ' + (data.entries || 0) + ' entries valid');
         } else {
-          FreecoToast.error('Audit chain broken!');
+          // Say where and since when, not just "broken".
+          FreecoToast.error('Audit chain: ' + (data.error || 'broken'), 15000);
         }
       } catch(e) {
         this.chainValid = false;
+        this.chainDetail = '';
         FreecoToast.error('Chain verification failed: ' + e.message);
       }
     },

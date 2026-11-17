@@ -36,6 +36,12 @@ API_KEY_SECRET = "secret:OMNIROUTE_API_KEY_SECRET"
 STORAGE_ENCRYPTION_KEY = "secret:OMNIROUTE_STORAGE_KEY"
 STORAGE_ENCRYPTION_KEY_VERSION = "v1"
 PORT = "20128"
+# Loopback only. The image's launcher sets HOSTNAME from OMNIROUTE_HOSTNAME and
+# falls back to 0.0.0.0, so setting HOSTNAME has no effect. With host networking
+# and REQUIRE_API_KEY off, 0.0.0.0 lets anyone on the network spend the owner's
+# model credits through /v1. The daemon's health check, Windows' localhost
+# forwarding and the sandboxes' pasta -T forwards all reach 127.0.0.1.
+OMNIROUTE_HOSTNAME = "127.0.0.1"
 NODE_ENV = "production"
 AUTH_COOKIE_SECURE = "false"
 REQUIRE_API_KEY = "false"

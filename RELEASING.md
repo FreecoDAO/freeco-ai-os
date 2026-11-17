@@ -27,7 +27,7 @@ No `gh`? The REST API works and needs only a token with `repo` scope:
 ```bash
 python3 - <<'EOF'
 import os,json,urllib.request
-tok=os.environ["GITHUB_TOKEN"]; B="https://api.github.com/repos/FreecoDAO/freeco-ai"
+tok=os.environ["GITHUB_TOKEN"]; B="https://api.github.com/repos/FreecoDAO/freeco-ai-os"
 H={"Authorization":"Bearer "+tok,"Accept":"application/vnd.github+json","Content-Type":"application/json"}
 def call(p,m="GET",b=None):
     return json.load(urllib.request.urlopen(urllib.request.Request(B+p,method=m,headers=H,
@@ -43,7 +43,7 @@ EOF
 #    fail anyway and you will have burned a version number.
 # 5. Merge it. That is the last manual step; everything after is automatic.
 # 6. Confirm the release actually built (a tag alone proves nothing):
-curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai/actions/workflows/release.yml/runs?per_page=3"
+curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai-os/actions/workflows/release.yml/runs?per_page=3"
 ```
 
 If step 6 shows no run for the new tag, the tag did not trigger the build —
@@ -202,7 +202,7 @@ tags by hand, and do not substitute a broader-scoped token: a release needs
 ## Checking a release actually built
 
 ```bash
-curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai/actions/workflows/release.yml/runs?per_page=3"
+curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai-os/actions/workflows/release.yml/runs?per_page=3"
 ```
 
 A tag with no run at all means the tag never triggered the build — check the

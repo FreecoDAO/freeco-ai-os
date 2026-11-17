@@ -7,6 +7,186 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Spending limits hold in the chat. The agent's cost quota was checked only
+  on the non-streaming path, which background ticks use; the dashboard chat,
+  the popup and the OpenAI-compatible API stream, so they kept calling the
+  provider after an agent's quota was used up. The global `[budget]` cap was
+  checked on the non-streaming path only. Both paths now refuse the call once
+  either limit is reached.
+- A saved key can no longer add lines to `secrets.env`. A value containing a
+  line break was written as is, and `secrets.env` is loaded into the
+  environment at start, so one key could define other variables (such as
+  `LD_PRELOAD`) that every child process inherits. Every writer -- the
+  provider-key and channel endpoints, the agents' key tool and the vault --
+  now refuses line breaks and NUL in values and anything but letters, digits
+  and `_` in names; the API answers 400.
+- Windows ARM64 and macOS Intel builds work again. `rust-toolchain.toml`
+  pins the compiler, but the release workflow added each target to the
+  stable toolchain, so in v0.9.8 the installer and CLI for both failed with
+  "can't find crate for `core`".
+- An MCP server reached over HTTP can no longer crash the daemon by sending
+  an endless response. rmcp before 3.9 read the whole body into memory, even
+  during the first handshake (RUSTSEC-2026-0462); rmcp 3.9 caps it.
+- The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
+  stale memory when opening a database with a `-wal` file someone else wrote
+  (RUSTSEC-2026-0459).
+
+### Changed
+
+- Release images go to their own private package,
+  `ghcr.io/freecodao/freeco-ai-os`. The `freeco-ai` package is public, and the
+  release refused to push into it, so v0.9.8 shipped no image. Nothing built
+  from this repository lands in a public image.
+
+### Added
+
+- Skills install straight from GitHub. The Skills page has a GitHub tab:
+  paste `owner/repo/skills` or a link, preview, tick the skills, install.
+  Every install is pinned to the commit that was previewed, and every skill
+  folder is scanned first (prompt injection, scripts that download and run
+  code, hidden Unicode, compiled binaries); a Critical finding blocks it.
+  Installed skills show their repo and commit on the Installed tab.
+- Two agent tools for the same thing: `skill_github_preview`, which only
+  reads, and `skill_install_github`, which always asks you first, even for
+  hand agents and even with approvals turned off. An agent working for
+  another agent cannot use it.
+
+### Fixed
+
+- A tool that needs your approval no longer fails when you take longer than
+  the tool time limit (two minutes by default) to answer. The approval is
+  asked for first and the time limit starts once you approve.
+
+### Added
+
+- The CEO can run the installation. Whichever agent holds the CEO role (the
+  one the dashboard opens as the main chat) now gets the tools for it, whatever
+  its manifest lists: containers, agents, skills, models and providers. The
+  owner can still take any of them away with the agent's tool blocklist. Only
+  the owner gives the role: an agent spawning a child with the `ceo` tag is
+  refused.
+- Containers can be managed without a shell. `container_list` shows every
+  container on the machine, whatever started it; `container_logs` reads why
+  one fails; `container_start`, `container_stop` and `container_restart` act
+  on one and report the state it reaches. Agents could not do this before:
+  `podman` is refused by the shell policy and the sandbox has no podman.
+  FreEco's own container (`freeco-daemon`, plus any named in
+  `FREECO_PROTECTED_CONTAINERS`) cannot be stopped or restarted from a chat.
+- `agent_skills_set` switches skills on or off for any agent, through the same
+  path as the dashboard. `skill_reload` picks up skill folders added on disk.
+- `agent_describe` shows an agent's model, the tools it really has and its
+  skills, so the CEO can check its own abilities. `model_list` shows which
+  models agents can be switched to, with price and context size.
+- Agents holding these tools get a short "Running FreEco" section in their
+  prompt that says how to use them.
+
+### Changed
+
+- The shipped `freeco-ceo` template is now a model-backed agent with a job
+  description and the management tools. It was a keyword matcher that never
+  called a model, so it could not use a tool. Agents already created from the
+  old template keep it until recreated.
+
+### Added
+
+- Agents work in parallel. Each conversation has its own queue, so one agent
+  can answer a WhatsApp guest, a dashboard chat and a delegated task at the
+  same time, and different agents never wait for each other.
+- `agent_delegate`: a lead agent hands several tasks to several agents at once
+  (or to fresh conversations of itself) and gets every result back together.
+  Each task runs in a conversation of its own, filed under the lead's project,
+  where the user can open and follow it. Any agent allowed `agent_send` may use
+  it.
+- Projects you can work in. A project's brief is read by every agent working
+  in one of its conversations; the Projects page edits the brief, starts a
+  conversation with any agent inside the project, shows which conversations are
+  working right now, and opens each one.
+- Teams you can run. Give a team a goal on the Projects page: its lead gets it
+  in a conversation of its own, hands parts to the other members, who work at
+  the same time, and combines what comes back. Every member's prompt names the
+  team, who leads it and who else is on it. Members are added on the same page,
+  with a role; the member whose role says lead leads, otherwise the first to
+  join.
+- The Teams page. Every team is a room with its members' seats: a seat is lit
+  only while a run is working for that agent, and a line between two seats is a
+  hand-off the kernel recorded, drawn moving only while it runs. Below it, the
+  selected team's board in four columns: ready, waiting on other tasks, in
+  progress and done. Tasks and members are added there, and a team is given a
+  goal. `GET /api/teams/floor`, `GET`/`POST /api/org/teams/{id}/tasks` and
+  `DELETE /api/org/teams/{id}/members/{agent_id}` serve it.
+- Team task boards. `task_post` takes a `team` and `blocked_by`: a team's task
+  can be claimed only by the team's members, and a task waiting on others is
+  not offered to anyone until they are all completed. Completing a task says
+  which waiting tasks it made ready.
+- `POST /api/agents/{id}/sessions` takes `"switch": false` to open a
+  conversation without moving the agent's chat to it.
+
+### Changed
+
+- The WhatsApp gateway answers only where it is meant to. Groups are ignored
+  unless listed in `WHATSAPP_ALLOWED_GROUPS` (`*` for all), and
+  `WHATSAPP_ALLOWED_NUMBERS` limits direct chats to the numbers listed. Each
+  contact and each group has a conversation of its own, and the agent is told
+  who is writing.
+
+### Security
+
+- A message from another agent is marked as such in the recipient's chat, with
+  the note that it cannot approve anything on the user's behalf. It used to
+  arrive looking exactly like the user typing.
+- `web_fetch` runs its address check on every redirect, not only the first URL,
+  so a public page can no longer redirect an agent to the cloud metadata
+  endpoint or the local network. The fallback fetch used without the web tools
+  had no check at all; it has the same one now.
+
+### Fixed
+
+- Only the agent working on a task, or the one that posted it, can mark it
+  completed, and a completed task cannot be completed again.
+- A task assigned by name can be claimed by that agent. It was stored as the
+  name and matched against the id, so it waited forever.
+
+- Messages no longer vanish when two things talk to one agent at once. The
+  streaming path (dashboard chat and popup) took no lock, so a reply running
+  while a channel message or a second window arrived saved over the other's
+  messages. The agent's shared history had the same race.
+- Switching chats no longer stalls or drops messages. The dashboard had one
+  "sending" flag and one queue for every chat, so a reply running in one chat
+  queued every message typed into any other behind it, and leaving a chat
+  mid-reply could strand its queue for good. Each chat now keeps its own; what
+  was queued is still delivered after switching away, and a chat opened while
+  its agent is still working says so and shows the reply when it lands.
+- A reply can no longer be drawn into the wrong chat. Frames from the socket of
+  the chat just left were still rendered into the next one.
+- A message lands in the conversation it was typed in, even after another
+  window switched the agent to a different conversation.
+- A message waiting behind a reply goes to the new conversation when the old
+  one is reset meanwhile, instead of bringing the reset one back. A streamed
+  message in that spot is refused with a note to send it again.
+- An agent asked a question by an agent it is itself waiting on is told so,
+  instead of both waiting for each other forever.
+- Long chats no longer forget their start. The model is sent only the newest
+  messages of a conversation (20 by default, tool calls included), and what
+  dropped out was simply gone: the only summary meant to cover it was shared by
+  all of an agent's chats, cut to 500 characters, and the first thing the trim
+  removed. What drops out is now carried in the prompt instead: everything the
+  user said, word for word, and the agent's own replies in short with the tools
+  they used. It needs no extra model call.
+- A failed or stopped reply no longer takes the user's message with it. The
+  conversation was saved only once a reply finished, so a provider error, a
+  blocked request or a pressed Stop erased the message, and any tool results of
+  that turn. The message is now saved before the model is called, and what a
+  failed run did is kept.
+- Long chats no longer make a summarising call before every reply. Once a chat
+  passed 30 messages, every message waited on one, for a summary of the agent's
+  current chat rather than the one being answered.
+- `project_create` stored the description as the company id.
+- Opening an agent's chat from a link (a project's Open button, the assistant's
+  "open the chat" links) while another chat was open landed on the agent list
+  instead of the chat.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

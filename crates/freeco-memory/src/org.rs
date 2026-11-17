@@ -8,7 +8,7 @@
 use crate::session::Session;
 use chrono::Utc;
 use freeco_types::error::{FreecoError, FreecoResult};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -259,7 +259,12 @@ impl OrgStore {
             .map_err(mem_err)?;
 
         let mut member_stmt = conn
-            .prepare("SELECT agent_id, role FROM team_members WHERE team_id = ?1")
+            // In the order they joined: with no member marked lead, the first
+            // one to join leads a team run.
+            .prepare(
+                "SELECT agent_id, role FROM team_members WHERE team_id = ?1 \
+                 ORDER BY created_at, agent_id",
+            )
             .map_err(mem_err)?;
         let mut out = Vec::with_capacity(teams.len());
         for (id, mut team) in teams {
@@ -282,6 +287,14 @@ impl OrgStore {
         Ok(out)
     }
 
+    /// One team, with its project and members, archived or not.
+    pub fn get_team(&self, team_id: &str) -> FreecoResult<Option<serde_json::Value>> {
+        Ok(self
+            .list_teams(true)?
+            .into_iter()
+            .find(|t| t["id"].as_str() == Some(team_id)))
+    }
+
     pub fn add_team_member(
         &self,
         team_id: &str,
@@ -296,6 +309,54 @@ impl OrgStore {
         )
         .map_err(mem_err)?;
         Ok(())
+    }
+
+    /// A live team by its id or its name, ignoring case: `(id, name)`.
+    ///
+    /// Agents and the dashboard name teams the way people do; an id is what
+    /// gets stored. An archived team is not found, so no new work lands on a
+    /// board nobody looks at any more.
+    pub fn find_team(&self, id_or_name: &str) -> FreecoResult<Option<(String, String)>> {
+        let key = id_or_name.trim();
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let found = conn
+            .query_row(
+                "SELECT id, name FROM teams
+                 WHERE archived = 0 AND (id = ?1 OR lower(name) = lower(?1))
+                 ORDER BY (id = ?1) DESC, updated_at DESC LIMIT 1",
+                [key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(mem_err)?;
+        Ok(found)
+    }
+
+    /// The ids of every team an agent is on.
+    pub fn teams_for_agent(&self, agent_id: &str) -> FreecoResult<Vec<String>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let mut stmt = conn
+            .prepare("SELECT team_id FROM team_members WHERE agent_id = ?1")
+            .map_err(mem_err)?;
+        let rows = stmt
+            .query_map([agent_id], |r| r.get::<_, String>(0))
+            .map_err(mem_err)?;
+        rows.collect::<Result<_, _>>().map_err(mem_err)
+    }
+
+    /// Take an agent off a team. `false` when it was not on it.
+    pub fn remove_team_member(&self, team_id: &str, agent_id: &str) -> FreecoResult<bool> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let n = conn
+            .execute(
+                "DELETE FROM team_members WHERE team_id = ?1 AND agent_id = ?2",
+                rusqlite::params![team_id, agent_id],
+            )
+            .map_err(mem_err)?;
+        Ok(n > 0)
     }
 
     // ---- Scoping -------------------------------------------------------
@@ -344,11 +405,14 @@ impl OrgStore {
     }
 
     /// Sessions belonging to a project — the team's own history.
+    ///
+    /// Each row names its agent: a conversation is opened by agent, so a list
+    /// without one is a list of things nobody can open.
     pub fn sessions_for_project(&self, project_id: &str) -> FreecoResult<Vec<serde_json::Value>> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, label, kind, archived, updated_at FROM sessions
+                "SELECT id, label, kind, archived, updated_at, agent_id FROM sessions
                  WHERE project_id = ?1 AND trashed = 0
                  ORDER BY updated_at DESC",
             )
@@ -361,10 +425,89 @@ impl OrgStore {
                     "kind": r.get::<_, String>(2)?,
                     "archived": r.get::<_, i64>(3)? != 0,
                     "updated_at": r.get::<_, String>(4)?,
+                    "agent_id": r.get::<_, String>(5)?,
                 }))
             })
             .map_err(mem_err)?;
         rows.collect::<Result<_, _>>().map_err(mem_err)
+    }
+
+    /// The most recent conversations of every agent, newest first: the chat
+    /// list in the dashboard's sidebar. Archived and trashed conversations
+    /// are left out; they have their own views.
+    pub fn recent_sessions(&self, limit: usize) -> FreecoResult<Vec<serde_json::Value>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, label, kind, updated_at, agent_id, project_id, team_id FROM sessions
+                 WHERE trashed = 0 AND archived = 0
+                 ORDER BY updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(mem_err)?;
+        let rows = stmt
+            .query_map([limit as i64], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "label": r.get::<_, Option<String>>(1)?,
+                    "kind": r.get::<_, String>(2)?,
+                    "updated_at": r.get::<_, String>(3)?,
+                    "agent_id": r.get::<_, String>(4)?,
+                    "project_id": r.get::<_, Option<String>>(5)?,
+                    "team_id": r.get::<_, Option<String>>(6)?,
+                }))
+            })
+            .map_err(mem_err)?;
+        rows.collect::<Result<_, _>>().map_err(mem_err)
+    }
+
+    /// The project and team a session is filed under, or `None` when the
+    /// session does not exist.
+    pub fn session_scope(
+        &self,
+        session_id: &str,
+    ) -> FreecoResult<Option<(Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().map_err(lock_err)?;
+        match conn.query_row(
+            "SELECT project_id, team_id FROM sessions WHERE id = ?1",
+            [session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ) {
+            Ok(scope) => Ok(Some(scope)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(mem_err(e)),
+        }
+    }
+
+    /// One project by id.
+    pub fn get_project(&self, project_id: &str) -> FreecoResult<Option<Project>> {
+        Ok(self
+            .list_projects(true)?
+            .into_iter()
+            .find(|p| p.id == project_id))
+    }
+
+    /// Rename a project or rewrite its brief. `None` leaves a field as it is.
+    ///
+    /// The description is the project's brief: every agent working in one of
+    /// its conversations reads it, the way a CLAUDE.md is read in a folder.
+    pub fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+    ) -> FreecoResult<Option<Project>> {
+        {
+            let conn = self.conn.lock().map_err(lock_err)?;
+            conn.execute(
+                "UPDATE projects SET name = COALESCE(?1, name),
+                        description = COALESCE(?2, description), updated_at = ?3
+                 WHERE id = ?4",
+                rusqlite::params![name, description, now(), project_id],
+            )
+            .map_err(mem_err)?;
+        }
+        self.get_project(project_id)
     }
 
     /// Everything the CEO-level assistant can see: one line per project with
@@ -489,6 +632,103 @@ mod tests {
         let visible = s.projects_for_agent("agent-1").unwrap();
         assert_eq!(visible, vec![mine.id]);
         assert!(s.projects_for_agent("agent-2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn teams_are_found_by_id_or_name_and_list_their_members() {
+        let s = store();
+        let team = s.create_team("Concierge Desk", None).unwrap();
+        assert_eq!(
+            s.find_team(&team.id).unwrap(),
+            Some((team.id.clone(), "Concierge Desk".to_string()))
+        );
+        assert_eq!(
+            s.find_team("  concierge desk ").unwrap().map(|t| t.0),
+            Some(team.id.clone())
+        );
+        assert!(s.find_team("nobody").unwrap().is_none());
+        assert!(s.find_team("").unwrap().is_none());
+
+        s.add_team_member(&team.id, "agent-1", Some("lead"))
+            .unwrap();
+        s.add_team_member(&team.id, "agent-2", None).unwrap();
+        assert_eq!(s.teams_for_agent("agent-1").unwrap(), vec![team.id.clone()]);
+        assert!(s.remove_team_member(&team.id, "agent-2").unwrap());
+        assert!(!s.remove_team_member(&team.id, "agent-2").unwrap());
+        assert!(s.teams_for_agent("agent-2").unwrap().is_empty());
+        let members = s.get_team(&team.id).unwrap().unwrap()["members"].clone();
+        assert_eq!(members.as_array().unwrap().len(), 1);
+    }
+
+    /// The sidebar's chat list: newest first, every agent, nothing archived
+    /// or trashed, and each row says which project it is filed under.
+    #[test]
+    fn recent_sessions_are_newest_first_without_archived_or_trashed() {
+        let s = store();
+        let p = s.create_project("Move", None, None).unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            for (id, agent, at) in [
+                ("old", "agent-1", "2026-11-01T10:00:00Z"),
+                ("new", "agent-2", "2026-11-12T10:00:00Z"),
+                ("gone", "agent-1", "2026-11-12T11:00:00Z"),
+                ("hidden", "agent-1", "2026-11-12T12:00:00Z"),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
+                     VALUES (?1, ?2, X'90', 0, ?3, ?3)",
+                    rusqlite::params![id, agent, at],
+                )
+                .unwrap();
+            }
+        }
+        s.assign_session("new", Some(&p.id), None).unwrap();
+        s.set_session_trashed("gone", true).unwrap();
+        s.set_session_archived("hidden", true).unwrap();
+
+        let rows = s.recent_sessions(10).unwrap();
+        let ids: Vec<_> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["new", "old"]);
+        assert_eq!(rows[0]["project_id"].as_str(), Some(p.id.as_str()));
+        assert_eq!(s.recent_sessions(1).unwrap().len(), 1);
+    }
+
+    /// A project's conversations can be opened, its brief rewritten, and a
+    /// session's place in it read back -- the three things the projects page
+    /// and `agent_delegate` rely on.
+    #[test]
+    fn a_project_lists_its_agents_and_keeps_its_brief() {
+        let s = store();
+        let p = s.create_project("Launch", None, Some("old brief")).unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at, project_id)
+                 VALUES ('s1', 'agent-1', X'90', 0, datetime('now'), datetime('now'), ?1)",
+                [&p.id],
+            )
+            .unwrap();
+        }
+
+        let rows = s.sessions_for_project(&p.id).unwrap();
+        assert_eq!(rows[0]["agent_id"], "agent-1");
+
+        assert_eq!(
+            s.session_scope("s1").unwrap(),
+            Some((Some(p.id.clone()), None))
+        );
+        assert_eq!(s.session_scope("missing").unwrap(), None);
+
+        let renamed = s
+            .update_project(&p.id, None, Some("new brief"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.name, "Launch", "an absent name is left alone");
+        assert_eq!(renamed.description.as_deref(), Some("new brief"));
+        assert!(s
+            .update_project("missing", Some("x"), None)
+            .unwrap()
+            .is_none());
     }
 
     /// Archive and trash are different states, and neither destroys anything.

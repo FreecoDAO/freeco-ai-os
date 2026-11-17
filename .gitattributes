@@ -1,3 +1,19 @@
+# Text files are stored with LF and checked out with LF on every platform.
+# Without this, an editor on Windows that writes CRLF made git report whole
+# files as changed: 207 changed lines on X2 showed as 45,472, which hid the
+# real change and would have conflicted with every open branch.
+* text=auto eol=lf
+
+# cmd.exe misreads labels and GOTO in batch files with LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Every pull request adds its own lines under "Unreleased", so two branches
+# always touched the same spot. Union keeps both sides' lines when git merges
+# or rebases locally. GitHub's merge button does not read this setting, so
+# conflicts still show there until the branch is rebased.
+CHANGELOG.md merge=union
+
 # Vendored libraries must be byte-identical on every platform: their
 # SHA-256 is recorded in vendor/SHA256SUMS and checked in CI.
 crates/freeco-api/static/vendor/*.js -text

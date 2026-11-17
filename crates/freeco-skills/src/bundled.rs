@@ -1,6 +1,6 @@
 //! Bundled skills — compile-time embedded SKILL.md files.
 //!
-//! Ships 60 prompt-only skills inside the Freeco binary via `include_str!()`.
+//! Ships 66 prompt-only skills inside the Freeco binary via `include_str!()`.
 //! User-installed skills with the same name override bundled ones.
 
 use crate::openclaw_compat::convert_skillmd_str;
@@ -180,6 +180,24 @@ pub fn bundled_skills() -> Vec<(&'static str, &'static str)> {
             "wasm-expert",
             include_str!("../bundled/wasm-expert/SKILL.md"),
         ),
+        // Design (5)
+        (
+            "freeco-design",
+            include_str!("../bundled/freeco-design/SKILL.md"),
+        ),
+        (
+            "ui-ux-pro-max",
+            include_str!("../bundled/ui-ux-pro-max/SKILL.md"),
+        ),
+        (
+            "design-system",
+            include_str!("../bundled/design-system/SKILL.md"),
+        ),
+        ("slides", include_str!("../bundled/slides/SKILL.md")),
+        (
+            "apple-design",
+            include_str!("../bundled/apple-design/SKILL.md"),
+        ),
     ]
 }
 
@@ -205,7 +223,7 @@ mod tests {
     #[test]
     fn test_bundled_skills_count() {
         let skills = bundled_skills();
-        assert_eq!(skills.len(), 61, "Expected 61 bundled skills");
+        assert_eq!(skills.len(), 66, "Expected 66 bundled skills");
     }
 
     #[test]

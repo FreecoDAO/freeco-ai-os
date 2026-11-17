@@ -675,6 +675,134 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+### Spend limits and secrets.env -- from the 2026-09-14 audit
+
+Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
+secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
+
+- 🟨 Streaming calls -- the chat, the popup, the OpenAI-compatible API -- are
+  refused once the agent's cost quota or the global `[budget]` cap is reached.
+  Before, only the non-streaming path checked either.
+- 🟨 Every `secrets.env` writer refuses line breaks and NUL in values and
+  anything but letters, digits and `_` in names; the API answers 400.
+- 🟨 Release builds add each target to the pinned toolchain, so the Windows
+  ARM64 and macOS Intel installers and CLIs build again.
+- 🟨 Release images go to the private `ghcr.io/freecodao/freeco-ai-os`; the
+  public `freeco-ai` package is never pushed to.
+- 🟨 MCP over HTTP caps response bodies (rmcp 3.9), and the bundled SQLite is
+  3.54.1 (rusqlite 0.41), for two advisories published in November.
+- ⬜ Still open: `PUT /api/budget` is not enforced until restart (enforcement
+  reads the boot-time config); handlers still call `std::env::set_var`;
+  `freeco-migrate` keeps its own secrets writer, which does not validate.
+
+- 🟨 **Conversations run in parallel.** Runs take turns per conversation, not
+  per agent, so different chats -- including several of one agent -- run at the
+  same time, and two runs in one conversation can no longer save over each
+  other. Verified by `crates/freeco-kernel/tests/parallel_conversations_test.rs`
+  against a scripted model: it fails with the old unlocked streaming path.
+- 🟨 **`agent_delegate`** runs several tasks on several agents at once, each in
+  a fresh conversation filed under the lead's project. Still one canonical
+  history per agent: a delegated task is appended to it like any other turn.
+- 🟨 **Projects page** edits the brief every agent in the project reads, starts
+  conversations inside a project and shows which are working.
+- 🟨 **Teams run like a lead with teammates.** A goal given to a team goes to
+  its lead in a new conversation; the lead hands parts to members with
+  `agent_delegate`, they run at once, and every member's prompt carries the
+  roster. The delegated conversations are the team's task list on the Projects
+  page.
+- 🟨 **Team task boards and the Teams page.** `task_post` puts a task on a
+  team's board, where only members can claim it, and holds it until the tasks
+  it is `blocked_by` are completed; only the holder or the poster completes it.
+  The Teams page shows each team as a room: a seat is lit only while a run holds
+  one of that agent's conversations, and hand-offs (`agent_delegate`,
+  `agent_send`) are drawn between seats from the kernel's record. Verified by
+  `team_board_respects_blockers_membership_and_holder` and the hand-off tests in
+  `parallel_conversations_test.rs`. The hand-off record is in memory and starts
+  empty after a restart.
+- 🟨 **A message from another agent is marked as not from the user**, so a
+  colleague's request cannot pass as the owner's approval.
+- 🟨 **`web_fetch` checks every redirect** against the same SSRF rules as the
+  first URL; the fallback fetch now has them too.
+- 🟨 **The WhatsApp gateway answers only allowed chats** (groups off unless
+  listed, optional number allowlist) and gives each contact a conversation of
+  its own. The kernel still keys a conversation's history by agent, so a guest
+  is kept apart by the gateway choosing the conversation, not by the kernel.
+- 🟨 **Long chats keep their start in view.** What the history window drops is
+  carried in the system prompt: the user's words verbatim (instructions kept
+  longest when the budget is short), the agent's replies in short. Free and
+  deterministic; no summarising call.
+- 🟨 **A failed or stopped reply keeps the user's message**, saved before the
+  model is called.
+- ⚠️ Stopping a run still stops the agent's most recent one; with parallel
+  conversations that may not be the one on screen.
+- ⚠️ A chat of several hundred messages carries its earliest ordinary messages
+  only as a count once the note's budget is full; instructions are kept
+  longest. A paid summary for that case is not built.
+
+### OmniRoute as the one gateway — 2026-11-14
+
+Live now (runtime config, no build needed):
+
+- ✅ OmniRoute bound to 127.0.0.1 only (`OMNIROUTE_HOSTNAME`; `HOSTNAME` is
+  overwritten by the image's launcher). Sandboxes still reach it via pasta `-T`.
+- ✅ Connections: Claude Code subscription (`cc/`, setup token), Novita (live
+  catalog, 101 models), NVIDIA (live catalog, free-only filter off), OpenAI.
+- ✅ Claude Code (`freeco-claude`, its own container, pasta forwarding only
+  20128) runs through OmniRoute: opus/sonnet/haiku → `freeco-cc-heavy` /
+  `-main` / `-easy`, Claude first, then Novita/NVIDIA. Failover verified with
+  the Claude connection switched off.
+- ✅ FreEco agents run through OmniRoute: CEO → `freeco-agent-ceo`, worker 1 →
+  `freeco-agent-worker`, hands → `freeco-agent-hands` (each keeps its old model
+  as step 1). The `omniroute` agent stays direct so it works when the gateway
+  is down.
+- ✅ Compression: session-dedup + lite, standard above 64k; system prompt never
+  compressed. OmniRoute advertises only connected providers (allowlist,
+  blocked keyless providers, auto combos hidden).
+- ✅ OmniRoute MCP on (streamable HTTP, loopback); scoped key for the hand;
+  registered in config.toml.
+
+Open:
+
+- ⬜ **Daemon rebuild needed** to ship: fallback picker rendering nothing
+  (duplicate x-for keys across providers), `/api/models?available=true`
+  offering models that are not ready (offline keyless servers, gateway routes
+  with no provider), and to activate the `omniroute` MCP server — then attach
+  it to the `omniroute` agent (`PUT /api/agents/{id}/mcp_servers`). Fold in the
+  unmerged `claude/project-thread-*` branches first.
+- ⬜ **Security approvals have no UI.** `POST /api/security/approve/{hash}` is
+  never called by the dashboard, so a manifest with `shell_exec` can never be
+  approved by clicking. (The `containers` agent was approved through the API
+  on the owner's chat go-ahead, hash `5e6652e8…`.)
+- ⬜ **Hands cannot safely manage their own containers.** A hand that lists
+  `shell_exec` in HAND.toml gets `exec_policy` mode **Full** (any command;
+  `activate_hand`: "Hands are curated packages"). Needs a per-hand
+  `[exec_policy]` in HAND.toml (e.g. podman-only) and a container-name scope
+  checked by the kernel. Until then the `containers` agent does container
+  work. Also: hand agents are rebuilt from HAND.toml on every boot, so their
+  `agent.toml` edits are silently discarded (overrides go in
+  `~/.freeco-ai/hands/<id>/HAND.toml`; the `omniroute` hand now has one with
+  its OmniRoute MCP tools).
+- ⬜ **MCP servers are connected once at boot, with no retry.** The daemon
+  started 2 s before OmniRoute and never connected; `POST
+  /api/integrations/reload` fixed it by hand.
+- ⬜ **`capabilities.shell` is dead wiring.** It becomes `Capability::ShellExec`
+  and nothing checks it; only the agent's `[exec_policy]` limits commands.
+- 🟨 **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
+  approval on every `shell_exec` (verified live), no shell metacharacters,
+  `[exec_policy]` allowlist = `podman` only, five tools, no agent spawning.
+  Prompt-only (not enforced) — FreecoDAO images only, `freeco-*` containers
+  only, backup/rollback, 127.0.0.1 binding, never touching `freeco-daemon`.
+  `podman` with any arguments is still powerful (`run --privileged`, host
+  mounts); next: read-only podman without a click, mutating podman with one,
+  and an image/argument allowlist checked by the kernel.
+- ⬜ **OmniRoute from the FreecoDAO fork.** `FreecoDAO/OmniRoute` is on
+  `release/v3.8.50` (upstream v3.8.54) and its docker-publish run failed
+  (2026-08-27); the container still runs `docker.io/diegosouzapw/omniroute`.
+- ⬜ CEO worker 2 (`claude-opus-5-5@medium`) reaches Claude via an OmniRoute
+  alias with no fallback: `@` is not allowed in combo names.
+- ⬜ OmniRoute's dashboard has no login password; loopback binding is the only
+  thing closing it.
+
 ## Planned — containers, users, local and cloud
 
 The sequence matters more than the items. Phase 1 is a gate: every later phase
@@ -784,12 +912,13 @@ on Windows and takes every call that probes it down with it.
   and no dashboard tab. Nothing about this is reachable by a user. Building the
   schema first was reasonable; reporting it as a delivered feature was not.
 
-- ⚠️ **Three crates nothing links.** `freeco-learning` (569 lines, a replay /
-  scoring / promotion self-improvement loop), `freeco-runtime` (263) and
-  `freeco-budget-engine` (428, with tiers, a ledger and an enforcer) have no
-  dependents and are not binaries. They compile on every build and are reachable
-  from nothing. `agent-core/src/learning.rs` documents the self-improvement loop
-  in a comment, which reads as shipped. Decide per crate: adopt or remove.
+- ✅ **Four crates nothing linked, removed (Nov 2026).** `freeco-learning` (a
+  replay / scoring / promotion self-improvement loop), `freeco-runtime` (a
+  re-export wrapper), `freeco-budget-engine` (tiers from an old plan: Free,
+  Concierge, Business at CHF 22) and `freeco-input-parser` (listed by the
+  Shopping agent, never imported) had no callers. They are in git history if
+  wanted. Plan budgets belong in `freeco-kernel/src/metering.rs`, which is the
+  budget the daemon enforces.
 - ⚠️ **A complete OAuth PKCE flow, wired to nothing.**
   `freeco-extensions/src/oauth.rs:128` — `run_pkce_flow()` with zeroizing token
   accessors beside it. The only OAuth actually reachable is Copilot's device

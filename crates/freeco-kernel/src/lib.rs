@@ -4,6 +4,7 @@
 //! and inter-agent communication.
 
 pub mod approval;
+pub mod audit_trail;
 pub mod auth;
 pub mod auto_reply;
 pub mod background;
@@ -15,6 +16,7 @@ pub mod cron_delivery;
 pub mod error;
 pub mod event_bus;
 pub mod freeco_agents;
+pub mod guest;
 pub mod heartbeat;
 pub mod kernel;
 pub mod metering;

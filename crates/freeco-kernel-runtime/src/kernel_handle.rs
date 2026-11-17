@@ -20,6 +20,17 @@ pub struct AgentInfo {
     pub tools: Vec<String>,
 }
 
+/// What came back from one task handed to an agent with `agent_delegate`.
+#[derive(Debug, Clone)]
+pub struct DelegatedTask {
+    pub agent_id: String,
+    pub agent_name: String,
+    /// The fresh conversation the task ran in. It stays, so the user can open
+    /// it and the lead agent can follow up in it with `agent_send`.
+    pub session_id: String,
+    pub reply: String,
+}
+
 /// Handle to kernel operations, passed into the agent loop so agents
 /// can interact with each other via tools.
 #[allow(clippy::too_many_arguments)]
@@ -34,8 +45,42 @@ pub trait KernelHandle: Send + Sync {
         parent_id: Option<&str>,
     ) -> Result<(String, String), String>;
 
+    /// Send a message to another agent on behalf of `from_agent_id`.
+    ///
+    /// The kernel uses the sender to tell the receiving agent who is asking,
+    /// to name the sender in the audit trail and to show the exchange on the
+    /// Comms page. Without a known sender this is plain
+    /// [`send_to_agent`](Self::send_to_agent).
+    async fn send_to_agent_from(
+        &self,
+        from_agent_id: Option<&str>,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<String, String> {
+        let _ = from_agent_id;
+        self.send_to_agent(agent_id, message).await
+    }
+
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
+
+    /// Run one task in a fresh conversation of `agent` (the caller itself when
+    /// `None`) and wait for its reply.
+    ///
+    /// A fresh conversation is what lets several of these run at once, even
+    /// on one agent, without waiting for or disturbing any chat that agent is
+    /// already in. It is filed under the same project as the conversation that
+    /// asked, so the project shows the whole piece of work.
+    async fn delegate_task(
+        &self,
+        caller_id: Option<&str>,
+        agent: Option<&str>,
+        title: &str,
+        task: &str,
+    ) -> Result<DelegatedTask, String> {
+        let _ = (caller_id, agent, title, task);
+        Err("Delegation is not available".to_string())
+    }
 
     /// List all running agents.
     /// Store an API key for a provider, and report whether it now works.
@@ -114,8 +159,44 @@ pub trait KernelHandle: Send + Sync {
     /// Claim the next available task (optionally filtered by assignee). Returns task JSON or None.
     async fn task_claim(&self, agent_id: &str) -> Result<Option<serde_json::Value>, String>;
 
+    /// Post a task onto a team's board (named by id or name), optionally
+    /// waiting on other tasks. The assignee, when given, must be on the team.
+    async fn team_task_post(
+        &self,
+        title: &str,
+        description: &str,
+        assigned_to: Option<&str>,
+        created_by: Option<&str>,
+        team: Option<&str>,
+        blocked_by: &[String],
+    ) -> Result<String, String> {
+        let _ = (
+            title,
+            description,
+            assigned_to,
+            created_by,
+            team,
+            blocked_by,
+        );
+        Err("Team task boards are not available".to_string())
+    }
+
     /// Mark a task as completed with a result string.
     async fn task_complete(&self, task_id: &str, result: &str) -> Result<(), String>;
+
+    /// Complete a task on behalf of `by` (the holder or the poster only) and
+    /// return the ids of the waiting tasks this made ready.
+    async fn task_complete_by(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let _ = by;
+        self.task_complete(task_id, result)
+            .await
+            .map(|_| Vec::new())
+    }
 
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
@@ -192,6 +273,26 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<bool, String> {
         let _ = (agent_id, tool_name, action_summary, purpose);
         Ok(true) // Default: auto-approve
+    }
+
+    /// Scan the skills in a GitHub repository without installing anything.
+    /// Returns the pinned commit plus a security report per skill.
+    async fn skill_github_preview(&self, source: &str) -> Result<serde_json::Value, String> {
+        let _ = source;
+        Err("Skill installs not available".to_string())
+    }
+
+    /// Install skills from a GitHub repository at exactly `commit` (a full
+    /// SHA from a preview). `skills` limits the install to those names.
+    async fn skill_github_install(
+        &self,
+        source: &str,
+        commit: &str,
+        skills: &[String],
+        overwrite: bool,
+    ) -> Result<serde_json::Value, String> {
+        let _ = (source, commit, skills, overwrite);
+        Err("Skill installs not available".to_string())
     }
 
     /// List available Hands and their activation status.
@@ -403,4 +504,56 @@ pub trait KernelHandle: Send + Sync {
         let _ = parent_caps;
         self.spawn_agent(manifest_toml, parent_id).await
     }
+
+    /// One agent's full setup (model, tools it really has, skills, MCP
+    /// servers, tags), for agents that manage other agents. Accepts a UUID or
+    /// a name.
+    fn describe_agent(&self, agent: &str) -> Result<serde_json::Value, String> {
+        let _ = agent;
+        Err("Agent details not available".to_string())
+    }
+
+    /// An agent's skill allowlist and every installed skill name, as
+    /// `(assigned, installed)`. An empty `assigned` means every skill.
+    fn agent_skills(&self, agent: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let _ = agent;
+        Err("Skill assignment not available".to_string())
+    }
+
+    /// Replace an agent's skill allowlist. Empty means every skill.
+    fn set_agent_skills_by_ref(&self, agent: &str, skills: Vec<String>) -> Result<(), String> {
+        let _ = (agent, skills);
+        Err("Skill assignment not available".to_string())
+    }
+
+    /// Reload skills from disk; returns how many are installed afterwards.
+    fn reload_skills_now(&self) -> Result<usize, String> {
+        Err("Skill reload not available".to_string())
+    }
+
+    /// Every model in the catalog, with whether it can be used right now.
+    fn list_model_choices(&self) -> Vec<ModelChoice> {
+        Vec::new()
+    }
+}
+
+/// A model an agent can be pointed at, as `model_list` reports it.
+#[derive(Debug, Clone, Default)]
+pub struct ModelChoice {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    pub tier: String,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
+    pub supports_tools: bool,
+    pub input_cost_per_m: f64,
+    pub output_cost_per_m: f64,
+    /// The provider has a key (or needs none) and has not reported the model
+    /// as unavailable for that key.
+    pub usable: bool,
+    /// The provider has a key or needs none. Kept apart from `usable` so a
+    /// model the provider does not serve is not reported as a missing key,
+    /// which would send the agent to replace a working key.
+    pub provider_has_key: bool,
 }

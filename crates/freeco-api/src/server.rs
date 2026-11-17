@@ -489,6 +489,15 @@ pub async fn build_router(
             "/api/marketplace/search",
             axum::routing::get(routes::marketplace_search),
         )
+        // GitHub skill install (pinned to a commit, scanned before install)
+        .route(
+            "/api/skills/github/preview",
+            axum::routing::post(routes::github_skill_preview),
+        )
+        .route(
+            "/api/skills/github/install",
+            axum::routing::post(routes::github_skill_install),
+        )
         // ClawHub (OpenClaw ecosystem) endpoints
         .route(
             "/api/clawhub/search",
@@ -629,6 +638,19 @@ pub async fn build_router(
         // Companies, projects and teams. Without a surface the structure is
         // invisible, and a conversation that belongs to a project the user
         // cannot see is the same as one that belongs nowhere.
+        // The sidebar's chat and task lists and the Live view.
+        .route(
+            "/api/activity",
+            axum::routing::get(crate::live_routes::activity),
+        )
+        .route(
+            "/api/org/chats",
+            axum::routing::get(crate::live_routes::recent_chats),
+        )
+        .route(
+            "/api/tasks",
+            axum::routing::get(crate::live_routes::list_tasks),
+        )
         .route(
             "/api/org/overview",
             axum::routing::get(crate::org_routes::overview),
@@ -648,8 +670,40 @@ pub async fn build_router(
             axum::routing::get(crate::org_routes::list_teams).post(crate::org_routes::create_team),
         )
         .route(
+            "/api/org/projects/{id}",
+            axum::routing::get(crate::org_routes::get_project)
+                .put(crate::org_routes::update_project),
+        )
+        .route(
             "/api/org/projects/{id}/sessions",
             axum::routing::get(crate::org_routes::project_sessions),
+        )
+        .route(
+            "/api/org/projects/{id}/conversations",
+            axum::routing::post(crate::org_routes::start_project_conversation),
+        )
+        .route(
+            "/api/org/teams/{id}/members",
+            axum::routing::post(crate::org_routes::add_team_member),
+        )
+        .route(
+            "/api/org/teams/{id}/run",
+            axum::routing::post(crate::org_routes::run_team),
+        )
+        // The Teams floor: who is on each team, who is working right now,
+        // each team's task board and the latest hand-offs between agents.
+        .route(
+            "/api/teams/floor",
+            axum::routing::get(crate::teams_routes::floor),
+        )
+        .route(
+            "/api/org/teams/{id}/members/{agent_id}",
+            axum::routing::delete(crate::teams_routes::remove_member),
+        )
+        .route(
+            "/api/org/teams/{id}/tasks",
+            axum::routing::get(crate::teams_routes::team_tasks)
+                .post(crate::teams_routes::post_team_task),
         )
         .route(
             "/api/sessions/{id}/assign",

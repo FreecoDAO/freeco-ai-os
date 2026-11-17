@@ -1,7 +1,7 @@
 # FreEco.ai — Agent Instructions
 
 ## Project Overview
-FreEco.ai is an open-source Agent Operating System written in Rust (23 crates).
+FreEco.ai is an open-source Agent Operating System written in Rust (19 crates).
 - Config: `~/.freeco-ai/config.toml`
 - Default API: `http://127.0.0.1:4200`
 - CLI binary: `target/release/freeco-ai.exe` (or `target/debug/freeco-ai.exe`)
@@ -148,7 +148,7 @@ Before concluding any part of the release pipeline is broken, read
 past releases were actually triggered:
 
 ```bash
-curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai/actions/workflows/release.yml/runs?per_page=5"
+curl -s "https://api.github.com/repos/FreecoDAO/freeco-ai-os/actions/workflows/release.yml/runs?per_page=5"
 ```
 
 `auto-tag.yml` is a self-healing fallback, not the path. A green Auto Tag means
@@ -176,6 +176,27 @@ full key into chat, an issue, or a commit to "confirm" a finding.
 `NOT RUN` is a real verdict. A check that did not complete must be reported as
 incomplete, never rounded up to a pass.
 
+### founder skills
+
+`.claude/skills/founder-*/` — eleven skills that test the business before money
+is spent: `founder-board`, `founder-competitors`, `founder-consumer`,
+`founder-pricing`, `founder-offer`, `founder-cfo`, `founder-marketing`,
+`founder-brand`, `founder-ops`, `founder-launch`, `founder-plan`. Run them in
+that order; each reads what the others wrote in `founder/`, which is
+gitignored so business plans and panel answers never get committed.
+
+Copied from `FreecoDAO/founder-skill` at fd9385b (Jake Schincariol, MIT; the
+licence is in each folder). The four Python tools use the standard library
+only and make no network calls. To update, read the upstream diff first.
+Our copy differs from upstream in four tools, all input checks: missing cost
+lists are refused instead of read as zero, a re-run of `panel.py init` moves
+the earlier run to `previous-N/`, the plan and ramp must fit inside capacity,
+and infinite prices and malformed answer files are dropped. Keep these when
+updating unless upstream has fixed them.
+
+The consumer panel is simulated buyers and the numbers are projections. Never
+quote panel answers as customer testimonials.
+
 ### karpathy-guidelines
 
 `.claude/skills/karpathy-guidelines/` — behavioural guidelines that cut the
@@ -186,6 +207,19 @@ Apply it when writing, reviewing or refactoring here. The rules that matter
 most on this codebase, judging by what has actually gone wrong: make the
 change surgical rather than sweeping, say the assumption out loud instead of
 picking silently, and define what "working" means before claiming it.
+
+### Design skills (cloud sessions only)
+
+`.claude/hooks/session-start.sh` installs four design skills into
+`~/.claude/skills/` when a Claude Code cloud session starts: `apple-design`
+(reviews against Apple's Human Interface Guidelines), `ui-ux-pro-max`
+(searchable styles, palettes, font pairings and UX rules), `slides` and
+`design-system`. Local sessions are skipped.
+
+Each one is pinned to an upstream commit that was reviewed, and nothing fetched
+is run. They are installed rather than committed because `apple-design` carries
+Apple's HIG text with no licence to redistribute it. To update one, read the
+upstream diff since its pin, then move the pin.
 
 ## Architecture Notes
 - **Don't touch `freeco-cli`** — user is actively building the interactive CLI

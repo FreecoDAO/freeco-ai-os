@@ -111,6 +111,65 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    async fn send_message_from(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Option<Vec<freeco_types::message::ContentBlock>>,
+        from: &freeco_channels::bridge::MessageSender,
+    ) -> Result<String, String> {
+        let key = from.key();
+        let session = self
+            .kernel
+            .conversation_for(agent_id, &key)
+            .map_err(|e| format!("{e}"))?;
+        // The text drives memory recall and the log; blocks carry images.
+        let text = match &blocks {
+            Some(blocks) if message.is_empty() => {
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        freeco_types::message::ContentBlock::Text { text, .. } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.is_empty() {
+                    "[Image]".to_string()
+                } else {
+                    text
+                }
+            }
+            _ => message.to_string(),
+        };
+        let handle: Arc<dyn freeco_kernel_runtime::kernel_handle::KernelHandle> =
+            self.kernel.clone();
+        let result = self
+            .kernel
+            .send_message_in_session_from(
+                agent_id,
+                session,
+                &text,
+                Some(handle),
+                blocks,
+                Some(key),
+                Some(from.display_name.clone()),
+            )
+            .await
+            .map_err(|e| format!("{e}"))?;
+        if result.silent {
+            return Ok(String::new());
+        }
+        Ok(result.response)
+    }
+
+    async fn is_operator(&self, channel: &str, user_id: &str) -> bool {
+        freeco_kernel::guest::guest_for(&self.kernel.auth, Some(&format!("{channel}:{user_id}")))
+            .is_none()
+    }
+
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
         Ok(self.kernel.registry.find_by_name(name).map(|e| e.id))
     }

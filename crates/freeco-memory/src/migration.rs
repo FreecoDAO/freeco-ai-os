@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Current schema version.
 // Must be bumped whenever a migration is added, or the new migration
 // never runs on an existing database.
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -74,6 +74,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 14 {
         migrate_v14(conn)?;
+    }
+
+    if current_version < 15 {
+        migrate_v15(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -870,6 +874,35 @@ fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
         [],
     )?;
 
+    Ok(())
+}
+
+/// Version 15: team task boards.
+///
+/// A task can sit on one team's board, and can wait on other tasks: it is
+/// not offered to anyone until every task it is blocked by is completed.
+/// Both columns default to "no team" and "waits on nothing", so every task
+/// written before this keeps behaving as it did.
+fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (name, typedef) in [
+        ("team_id", "TEXT DEFAULT ''"),
+        ("blocked_by", "TEXT DEFAULT '[]'"),
+    ] {
+        if !column_exists(conn, "task_queue", name) {
+            conn.execute(
+                &format!("ALTER TABLE task_queue ADD COLUMN {name} {typedef}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_task_team_status ON task_queue(team_id, status);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (15, datetime('now'), 'Team task boards: team_id and blocked_by on task_queue')",
+        [],
+    )?;
     Ok(())
 }
 

@@ -47,6 +47,11 @@ fn is_shell_tool(name: &str) -> bool {
     matches!(name, "shell_exec" | "process_start")
 }
 
+/// Tools that always need a human's approval, whatever `[approval]` says and
+/// whichever agent calls them (hand agents included). Installing skills
+/// changes what every agent is told and can run, so it is never automatic.
+pub const ALWAYS_ASK_TOOLS: &[&str] = &["skill_install_github"];
+
 /// Check if a shell command should be blocked by taint tracking.
 ///
 /// Layer 1: Shell metacharacter injection (backticks, `$(`, `${`, etc.)
@@ -108,12 +113,191 @@ tokio::task_local! {
     static AGENT_CALL_DEPTH: std::cell::Cell<u32>;
     /// Canvas max HTML size in bytes (set from kernel config at loop start).
     pub static CANVAS_MAX_BYTES: usize;
+    /// The tool call whose human approval the agent loop already obtained,
+    /// outside the tool deadline. Set only by [`run_approved`].
+    static APPROVED_TOOL_CALL: String;
 }
 
 /// Get the current inter-agent call depth from the task-local context.
 /// Returns 0 if called outside an agent task.
 pub fn current_agent_depth() -> u32 {
     AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0)
+}
+
+/// Run `fut` at inter-agent call depth `depth`.
+///
+/// For a run moved onto a task of its own: task-locals do not cross
+/// `tokio::spawn`, and without this the moved run would start counting from
+/// zero, lifting the limit on how deep agents may ask each other.
+pub async fn with_agent_depth<F: std::future::Future>(depth: u32, fut: F) -> F::Output {
+    AGENT_CALL_DEPTH
+        .scope(std::cell::Cell::new(depth), fut)
+        .await
+}
+
+/// The checks that refuse a call outright, before anyone is asked to approve
+/// it: the tool is outside the agent's grants, or the agent is working for
+/// another agent and the tool is one no subagent may use.
+fn refuse_before_approval(
+    tool_use_id: &str,
+    tool_name: &str,
+    allowed_tools: Option<&[String]>,
+) -> Option<ToolResult> {
+    // Capability enforcement: reject tools not in the allowed list
+    if let Some(allowed) = allowed_tools {
+        // Both sides normalized: a manifest naming `docker_exec` grants the
+        // tool now called `sandbox_exec`, so renaming a tool cannot silently
+        // strip a capability from agents that already list the old name.
+        if !allowed
+            .iter()
+            .any(|t| normalize_tool_name(t.as_str()) == tool_name)
+        {
+            warn!(tool_name, "Capability denied: tool not in allowed list");
+            return Some(ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: format!(
+                    "Permission denied: agent does not have capability to use tool '{tool_name}'"
+                ),
+                is_error: true,
+            });
+        }
+    }
+
+    if current_agent_depth() > 0 && crate::tool_policy::SUBAGENT_DENY_ENFORCED.contains(&tool_name)
+    {
+        warn!(tool_name, "Refused: tool not available to subagents");
+        return Some(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!(
+                "Permission denied: '{tool_name}' cannot be used by an agent working for another agent. Tell the user; their own agent can do it."
+            ),
+            is_error: true,
+        });
+    }
+    None
+}
+
+/// Ask a human to approve this call when the tool needs it. Returns the
+/// result to give the model when the call must not run, or `None` to go on.
+async fn approval_gate(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+) -> Option<ToolResult> {
+    // Approval gate: check if this tool requires human approval before execution.
+    //
+    // When exec_policy.mode = "full" (or allowlist with allowed_commands = ["*"]),
+    // the user has explicitly opted into unrestricted shell access. In that case,
+    // shell_exec should bypass the approval gate — requiring approval for commands
+    // the user already whitelisted is contradictory (GitHub issue #772).
+    let exec_policy_bypasses_approval = is_shell_tool(tool_name)
+        && exec_policy.is_some_and(|p| {
+            p.mode == freeco_types::config::ExecSecurityMode::Full
+                || (p.mode == freeco_types::config::ExecSecurityMode::Allowlist
+                    && p.allowed_commands.iter().any(|c| c == "*"))
+        });
+
+    if exec_policy_bypasses_approval {
+        debug!(
+            tool_name,
+            "Approval bypassed: exec_policy grants unrestricted shell access"
+        );
+    }
+
+    if let Some(kh) = kernel {
+        if !exec_policy_bypasses_approval
+            && (kh.requires_approval(tool_name) || ALWAYS_ASK_TOOLS.contains(&tool_name))
+        {
+            let agent_id_str = caller_agent_id.unwrap_or("unknown");
+            let input_str = input.to_string();
+            let summary = format!(
+                "{}: {}",
+                tool_name,
+                freeco_types::truncate_str(&input_str, 200)
+            );
+            // The agent's own reason, when it supplied one. Any tool may carry
+            // `purpose`; the approval-gated ones ask for it in their schema.
+            let purpose = input
+                .get("purpose")
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty());
+            match kh
+                .request_approval(agent_id_str, tool_name, &summary, purpose)
+                .await
+            {
+                Ok(true) => {
+                    debug!(tool_name, "Approval granted — proceeding with execution");
+                }
+                Ok(false) => {
+                    warn!(tool_name, "Approval denied — blocking tool execution");
+                    return Some(ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "Execution denied: '{}' requires human approval and was denied or timed out. The operation was not performed.",
+                            tool_name
+                        ),
+                        is_error: true,
+                    });
+                }
+                Err(e) => {
+                    warn!(tool_name, error = %e, "Approval system error");
+                    return Some(ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!("Approval system error: {e}"),
+                        is_error: true,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get any human approval this call needs now, before its deadline starts.
+///
+/// The agent loop wraps `execute_tool` in a deadline of a few minutes, while
+/// a person may take hours to answer an approval request. Asked inside that
+/// deadline, a slow "yes" arrived after the call was already cancelled. The
+/// loop calls this first, with no deadline, then runs `execute_tool` inside
+/// [`run_approved`] so it is not asked a second time.
+///
+/// Returns the result to give the model when the call must not run. Calls
+/// that will be refused anyway (see `refuse_before_approval`) return `None`
+/// without asking anyone, and `execute_tool` then refuses them.
+#[allow(clippy::too_many_arguments)]
+pub async fn approve_before_deadline(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    allowed_tools: Option<&[String]>,
+    caller_agent_id: Option<&str>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+) -> Option<ToolResult> {
+    let tool_name = normalize_tool_name(tool_name);
+    if refuse_before_approval(tool_use_id, tool_name, allowed_tools).is_some() {
+        return None;
+    }
+    approval_gate(
+        tool_use_id,
+        tool_name,
+        input,
+        kernel,
+        caller_agent_id,
+        exec_policy,
+    )
+    .await
+}
+
+/// Run an `execute_tool` future for `tool_use_id` as already approved by
+/// [`approve_before_deadline`]. Every agent loop sets this around each of its
+/// own calls, so a nested agent's calls are matched against its own ids.
+pub async fn run_approved<F: std::future::Future>(tool_use_id: &str, fut: F) -> F::Output {
+    APPROVED_TOOL_CALL.scope(tool_use_id.to_string(), fut).await
 }
 
 /// Execute a tool by name with the given input, returning a ToolResult.
@@ -148,89 +332,27 @@ pub async fn execute_tool(
     // (e.g. "fs-write" → "file_write") resolve to the canonical Freeco name.
     let tool_name = normalize_tool_name(tool_name);
 
-    // Capability enforcement: reject tools not in the allowed list
-    if let Some(allowed) = allowed_tools {
-        // Both sides normalized: a manifest naming `docker_exec` grants the
-        // tool now called `sandbox_exec`, so renaming a tool cannot silently
-        // strip a capability from agents that already list the old name.
-        if !allowed
-            .iter()
-            .any(|t| normalize_tool_name(t.as_str()) == tool_name)
-        {
-            warn!(tool_name, "Capability denied: tool not in allowed list");
-            return ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                content: format!(
-                    "Permission denied: agent does not have capability to use tool '{tool_name}'"
-                ),
-                is_error: true,
-            };
-        }
+    if let Some(refused) = refuse_before_approval(tool_use_id, tool_name, allowed_tools) {
+        return refused;
     }
 
-    // Approval gate: check if this tool requires human approval before execution.
-    //
-    // When exec_policy.mode = "full" (or allowlist with allowed_commands = ["*"]),
-    // the user has explicitly opted into unrestricted shell access. In that case,
-    // shell_exec should bypass the approval gate — requiring approval for commands
-    // the user already whitelisted is contradictory (GitHub issue #772).
-    let exec_policy_bypasses_approval = is_shell_tool(tool_name)
-        && exec_policy.is_some_and(|p| {
-            p.mode == freeco_types::config::ExecSecurityMode::Full
-                || (p.mode == freeco_types::config::ExecSecurityMode::Allowlist
-                    && p.allowed_commands.iter().any(|c| c == "*"))
-        });
-
-    if exec_policy_bypasses_approval {
-        debug!(
+    // The agent loop asks for approval before the tool deadline starts and
+    // marks the call as approved; anything else is asked here.
+    let approved = APPROVED_TOOL_CALL
+        .try_with(|id| id == tool_use_id)
+        .unwrap_or(false);
+    if !approved {
+        if let Some(refused) = approval_gate(
+            tool_use_id,
             tool_name,
-            "Approval bypassed: exec_policy grants unrestricted shell access"
-        );
-    }
-
-    if let Some(kh) = kernel {
-        if !exec_policy_bypasses_approval && kh.requires_approval(tool_name) {
-            let agent_id_str = caller_agent_id.unwrap_or("unknown");
-            let input_str = input.to_string();
-            let summary = format!(
-                "{}: {}",
-                tool_name,
-                freeco_types::truncate_str(&input_str, 200)
-            );
-            // The agent's own reason, when it supplied one. Any tool may carry
-            // `purpose`; the approval-gated ones ask for it in their schema.
-            let purpose = input
-                .get("purpose")
-                .and_then(|p| p.as_str())
-                .map(str::trim)
-                .filter(|p| !p.is_empty());
-            match kh
-                .request_approval(agent_id_str, tool_name, &summary, purpose)
-                .await
-            {
-                Ok(true) => {
-                    debug!(tool_name, "Approval granted — proceeding with execution");
-                }
-                Ok(false) => {
-                    warn!(tool_name, "Approval denied — blocking tool execution");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!(
-                            "Execution denied: '{}' requires human approval and was denied or timed out. The operation was not performed.",
-                            tool_name
-                        ),
-                        is_error: true,
-                    };
-                }
-                Err(e) => {
-                    warn!(tool_name, error = %e, "Approval system error");
-                    return ToolResult {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: format!("Approval system error: {e}"),
-                        is_error: true,
-                    };
-                }
-            }
+            input,
+            kernel,
+            caller_agent_id,
+            exec_policy,
+        )
+        .await
+        {
+            return refused;
         }
     }
 
@@ -383,7 +505,8 @@ pub async fn execute_tool(
         }
 
         // Inter-agent tools (require kernel handle)
-        "agent_send" => tool_agent_send(input, kernel).await,
+        "agent_send" => tool_agent_send(input, kernel, caller_agent_id).await,
+        "agent_delegate" => tool_agent_delegate(input, kernel, caller_agent_id).await,
         "agent_spawn" => tool_agent_spawn(input, kernel, caller_agent_id).await,
         // Setup tools. These change configuration rather than reading it, so
         // they are gated by the capability system like any other write.
@@ -403,7 +526,7 @@ pub async fn execute_tool(
         "agent_find" => tool_agent_find(input, kernel),
         "task_post" => tool_task_post(input, kernel, caller_agent_id).await,
         "task_claim" => tool_task_claim(kernel, caller_agent_id).await,
-        "task_complete" => tool_task_complete(input, kernel).await,
+        "task_complete" => tool_task_complete(input, kernel, caller_agent_id).await,
         "task_list" => tool_task_list(input, kernel).await,
         "event_publish" => tool_event_publish(input, kernel).await,
 
@@ -468,6 +591,10 @@ pub async fn execute_tool(
         "process_write" => tool_process_write(input, process_manager).await,
         "process_kill" => tool_process_kill(input, process_manager).await,
         "process_list" => tool_process_list(process_manager, caller_agent_id).await,
+
+        // Skill install from GitHub (preview is read-only; install is approval-gated)
+        "skill_github_preview" => tool_skill_github_preview(input, kernel).await,
+        "skill_install_github" => tool_skill_install_github(input, kernel).await,
 
         // Hand tools (curated autonomous capability packages)
         "hand_list" => tool_hand_list(kernel).await,
@@ -678,12 +805,42 @@ pub async fn execute_tool(
         },
 
         // Skill introspection tools (issue #1038)
-        "skill_list" => tool_skill_list(skill_registry),
+        "skill_list" => tool_skill_list(input, skill_registry),
         "skill_describe" => tool_skill_describe(input, skill_registry),
         "skill_execute" => tool_skill_execute(input, skill_registry).await,
 
         // Canvas / A2UI tool
         "canvas_present" => tool_canvas_present(input, workspace_root).await,
+
+        // Running the installation: containers, per-agent skills, agent
+        // details and the model catalog. The CEO role holds these.
+        "container_list" => crate::container_admin::tool_container_list(input).await,
+        "container_logs" => crate::container_admin::tool_container_logs(input).await,
+        "container_start" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Start,
+                input,
+            )
+            .await
+        }
+        "container_stop" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Stop,
+                input,
+            )
+            .await
+        }
+        "container_restart" => {
+            crate::container_admin::tool_container_action(
+                crate::container_admin::ContainerAction::Restart,
+                input,
+            )
+            .await
+        }
+        "agent_describe" => tool_agent_describe(input, kernel),
+        "agent_skills_set" => tool_agent_skills_set(input, kernel),
+        "skill_reload" => tool_skill_reload(kernel),
+        "model_list" => tool_model_list(input, kernel),
 
         other => {
             // Fallback 1: MCP tools (mcp_{server}_{tool} prefix)
@@ -1045,6 +1202,36 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "agent_delegate".to_string(),
+            description: "Hand one or more tasks to agents and have them worked on at the same \
+                          time. Each task runs in a fresh conversation of its agent, with its own \
+                          context, filed under the same project as this conversation. Waits for \
+                          all of them and returns every result together, each with the \
+                          conversation it ran in. Leave `agent` out to hand a task to a fresh \
+                          conversation of yourself. Split independent work into separate tasks \
+                          so they run in parallel; use agent_send instead for a quick question \
+                          inside another agent's ongoing conversation.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "The tasks, all started at once (at most 8)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent": { "type": "string", "description": "Agent name or UUID; omit for yourself" },
+                                "title": { "type": "string", "description": "A few words naming the task" },
+                                "task": { "type": "string", "description": "Everything the agent needs to do it: the goal, the facts, what to hand back" }
+                            },
+                            "required": ["task"]
+                        }
+                    }
+                },
+                "required": ["tasks"]
+            }),
+        },
+        ToolDefinition {
             name: "agent_spawn".to_string(),
             description: "Hire a new agent from a TOML manifest. Returns its ID and name.\n\
                           Check `agent_list` and `org_overview` first: if an agent already \
@@ -1200,13 +1387,15 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "task_post".to_string(),
-            description: "Post a task to the shared task queue for another agent to pick up.".to_string(),
+            description: "Post a task to the shared task queue for another agent to pick up. Name a team to put it on that team's board, where only its members can claim it, and list task IDs in blocked_by to hold it until those tasks are completed.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Short task title" },
                     "description": { "type": "string", "description": "Detailed task description" },
-                    "assigned_to": { "type": "string", "description": "Agent name or ID to assign the task to (optional)" }
+                    "assigned_to": { "type": "string", "description": "Agent name or ID to assign the task to (optional; on a team board it must be a member)" },
+                    "team": { "type": "string", "description": "Team name or ID whose board the task goes on (optional)" },
+                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "IDs of tasks that must be completed before this one can be claimed (optional)" }
                 },
                 "required": ["title", "description"]
             }),
@@ -1556,6 +1745,33 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["channel", "recipient"]
             }),
         },
+        // --- Skill install from GitHub ---
+        ToolDefinition {
+            name: "skill_github_preview".to_string(),
+            description: "Scan the skills in a GitHub repository WITHOUT installing them. Returns the exact commit SHA scanned and, per skill, its name, description, security warnings and whether it is blocked. Always run this before skill_install_github and show the user what it found.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "owner/repo, owner/repo/path/to/skills, optionally @branch-or-tag, or a github.com URL (e.g. 'FreecoDAO/ponytail/skills')" }
+                },
+                "required": ["source"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_install_github".to_string(),
+            description: "Install skills from a GitHub repository at the exact commit a skill_github_preview returned. Always asks the user for approval first. Skills the scan blocked are never installed.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "Same source string given to skill_github_preview" },
+                    "commit": { "type": "string", "description": "The full 40-character commit SHA from skill_github_preview" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Names of the skills to install (from the preview). Omit to install every unblocked skill found." },
+                    "overwrite": { "type": "boolean", "description": "Replace an installed or built-in skill of the same name. Default false." },
+                    "purpose": { "type": "string", "description": "Why these skills are needed — shown to the user in the approval request" }
+                },
+                "required": ["source", "commit", "purpose"]
+            }),
+        },
         // --- Hand tools (curated autonomous capability packages) ---
         ToolDefinition {
             name: "hand_list".to_string(),
@@ -1791,10 +2007,12 @@ them.".to_string(),
         // which is outside the workspace sandbox — file_read cannot reach them.
         ToolDefinition {
             name: "skill_list".to_string(),
-            description: "List all installed skills available to this agent. Returns name, version, description, runtime type, and provided tool names. Use this instead of file_list on the skills directory.".to_string(),
+            description: "List all installed skills available to this agent. Returns name, version, description, runtime type, and provided tool names. Pass `query` to return only skills whose name or description contains every word of it. Use this instead of file_list on the skills directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "query": { "type": "string", "description": "Optional words to search for in skill names and descriptions (case-insensitive, all words must match)" }
+                }
             }),
         },
         ToolDefinition {
@@ -1819,6 +2037,141 @@ them.".to_string(),
                     "input": { "type": "object", "description": "Optional JSON input for the skill tool" }
                 },
                 "required": ["skill"]
+            }),
+        },
+        // --- Running the installation (the CEO role holds these) ---
+        ToolDefinition {
+            name: "container_list".to_string(),
+            description: "List every container on this machine, whatever started it: FreEco's \
+                          services, hands, the CRM, speech, accounting, the daemon itself. Shows \
+                          name, state, status, image and ports. Use this first whenever a \
+                          service seems down, before reading logs or restarting anything."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter": { "type": "string", "description": "Optional text to match in the container name or image, e.g. crm or speaches" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "container_logs".to_string(),
+            description: "Read the last lines a container wrote. Use it to find out why a \
+                          service fails before restarting it: a restart hides the cause and \
+                          the same error usually comes back."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id, exactly as container_list shows it" },
+                    "lines": { "type": "integer", "description": "How many of the newest lines to read (default 100, max 1000)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_start".to_string(),
+            description: "Start a stopped container and report the state it reaches. A \
+                          container that exits straight away is reported as not running, \
+                          with a pointer to its logs."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_stop".to_string(),
+            description: "Stop a running container. It gets 20 seconds to shut down cleanly. \
+                          Whatever it serves is unavailable until it is started again. \
+                          FreEco's own container cannot be stopped from here."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "container_restart".to_string(),
+            description: "Restart a container and report the state it reaches. Read \
+                          container_logs first: restart only when the logs show a transient \
+                          fault (a lost connection, a hung process), not a configuration error. \
+                          FreEco's own container cannot be restarted from here."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Container name or id from container_list" },
+                    "purpose": { "type": "string", "description": "One sentence on why, shown to the owner if this needs approval" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_describe".to_string(),
+            description: "Show one agent's full setup: model and provider, output limit, the \
+                          tools it really has, which skills are switched on for it, its MCP \
+                          servers and tags. Call it on yourself to see your own abilities, \
+                          and on an agent before changing it."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_skills_set".to_string(),
+            description: "Switch skills on or off for one agent. An agent with no list uses \
+                          every installed skill; switching one off gives it a list of all the \
+                          others. Pass all=true to go back to every skill. With no changes it \
+                          reports the agent's current skills. Find skill names with skill_list."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": { "type": "string", "description": "Agent UUID or name" },
+                    "enable": { "type": "array", "items": { "type": "string" }, "description": "Skill names to switch on" },
+                    "disable": { "type": "array", "items": { "type": "string" }, "description": "Skill names to switch off" },
+                    "only": { "type": "array", "items": { "type": "string" }, "description": "Replace the agent's skills with exactly these" },
+                    "all": { "type": "boolean", "description": "true: the agent uses every installed skill again" }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "skill_reload".to_string(),
+            description: "Reload installed skills from disk, after skill folders were added, \
+                          changed or removed. Reports how many skills are installed now. New \
+                          skills reach agents from their next message."
+                .to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDefinition {
+            name: "model_list".to_string(),
+            description: "List the models agents can be switched to, with provider, tier, \
+                          context size, tool support and price. By default only models whose \
+                          provider has a working key; include_unavailable=true shows the rest. \
+                          Use it before agent_set_model, and provider_list to see which \
+                          providers still need a key."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "provider": { "type": "string", "description": "Only this provider, e.g. anthropic, groq, nvidia" },
+                    "query": { "type": "string", "description": "Text to match in the model id or name, e.g. opus or llama" },
+                    "include_unavailable": { "type": "boolean", "description": "Also list models that cannot be used now (provider has no key, or does not serve the model), with the reason" }
+                }
             }),
         },
     ]
@@ -2027,15 +2380,20 @@ async fn tool_apply_patch(
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, String> {
     let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
+    // The same SSRF rules as the full fetch engine, on the first URL and on
+    // every redirect: this path had none, so an agent without the web tools
+    // context could read the cloud metadata endpoint or the LAN.
+    crate::web_fetch::check_ssrf(url, &[])?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(crate::web_fetch::ssrf_checked_redirects(Vec::new()))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
+        .map_err(|e| format!("HTTP request failed: {}", crate::web_fetch::error_chain(&e)))?;
     let status = resp.status();
     // Reject responses larger than 10MB to prevent memory exhaustion
     if let Some(len) = resp.content_length() {
@@ -2266,9 +2624,52 @@ fn require_kernel(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Skill install from GitHub
+// ---------------------------------------------------------------------------
+
+async fn tool_skill_github_preview(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let source = input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+    let preview = kh.skill_github_preview(source).await?;
+    serde_json::to_string_pretty(&preview).map_err(|e| format!("Serialize preview: {e}"))
+}
+
+async fn tool_skill_install_github(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let source = input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+    let commit = input["commit"]
+        .as_str()
+        .ok_or("Missing 'commit' parameter — run skill_github_preview first")?;
+    let skills: Vec<String> = input["skills"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let overwrite = input["overwrite"].as_bool().unwrap_or(false);
+    let outcome = kh
+        .skill_github_install(source, commit, &skills, overwrite)
+        .await?;
+    serde_json::to_string_pretty(&outcome).map_err(|e| format!("Serialize result: {e}"))
+}
+
 async fn tool_agent_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = input["agent_id"]
@@ -2290,9 +2691,138 @@ async fn tool_agent_send(
 
     AGENT_CALL_DEPTH
         .scope(std::cell::Cell::new(current_depth + 1), async {
-            kh.send_to_agent(agent_id, message).await
+            kh.send_to_agent_from(caller_agent_id, agent_id, message)
+                .await
         })
         .await
+}
+
+/// Most tasks one `agent_delegate` call may start at once.
+const MAX_DELEGATED_TASKS: usize = 8;
+
+/// Longest delegated reply handed back to the lead agent, in bytes. The whole
+/// answer stays in the delegated conversation, which the result names.
+const MAX_DELEGATED_RESULT_BYTES: usize = 12_000;
+
+/// All replies of one call together, in bytes. The agent loop cuts a tool
+/// result at 30% of the context window (2 bytes a token), so eight full
+/// replies would be cut mid-JSON on a 128k model and the later tasks lost,
+/// conversations included. Splitting this keeps every task in the result on
+/// any model with a context of 40k tokens or more.
+const MAX_DELEGATED_RESULTS_TOTAL_BYTES: usize = 24_000;
+
+/// Hand tasks to agents and run them all at once.
+///
+/// `agent_send` runs one exchange inside the other agent's current
+/// conversation, and the tool loop runs one call at a time, so a lead agent
+/// with three specialists waited for each in turn -- and for any chat a
+/// specialist was already busy in. Here every task gets a fresh conversation
+/// of its own and they all run together; the lead waits once, for the slowest.
+async fn tool_agent_delegate(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let tasks = input["tasks"]
+        .as_array()
+        .ok_or("Missing 'tasks': a list of {agent, title, task}")?;
+    if tasks.is_empty() {
+        return Err("'tasks' is empty: give at least one task".to_string());
+    }
+    if tasks.len() > MAX_DELEGATED_TASKS {
+        return Err(format!(
+            "{} tasks is more than {MAX_DELEGATED_TASKS} at once. Group related work, \
+             or delegate in two rounds.",
+            tasks.len()
+        ));
+    }
+    // Every task is checked before any starts: half a fan-out is harder to
+    // reason about than a refusal.
+    let mut planned: Vec<(Option<String>, String, String)> = Vec::with_capacity(tasks.len());
+    for (i, t) in tasks.iter().enumerate() {
+        let task = t["task"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("Task {} has no 'task' text", i + 1))?;
+        let agent = t["agent"]
+            .as_str()
+            .or_else(|| t["agent_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let title = t["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                let first = task.lines().next().unwrap_or(task);
+                crate::str_utils::safe_truncate_str(first, 60).to_string()
+            });
+        planned.push((agent, title, task.to_string()));
+    }
+
+    let current_depth = AGENT_CALL_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+    if current_depth >= MAX_AGENT_CALL_DEPTH {
+        return Err(format!(
+            "Inter-agent call depth exceeded (max {MAX_AGENT_CALL_DEPTH}). \
+             Do this part yourself, or use the task queue instead."
+        ));
+    }
+
+    let runs = planned.iter().map(|(agent, title, task)| async move {
+        kh.delegate_task(caller_agent_id, agent.as_deref(), title, task)
+            .await
+    });
+    let outcomes = AGENT_CALL_DEPTH
+        .scope(
+            std::cell::Cell::new(current_depth + 1),
+            futures::future::join_all(runs),
+        )
+        .await;
+
+    let per_reply =
+        (MAX_DELEGATED_RESULTS_TOTAL_BYTES / planned.len().max(1)).min(MAX_DELEGATED_RESULT_BYTES);
+    let mut finished = 0usize;
+    let results: Vec<serde_json::Value> = planned
+        .iter()
+        .zip(outcomes)
+        .map(|((agent, title, _), outcome)| match outcome {
+            Ok(done) => {
+                finished += 1;
+                let reply: String = if done.reply.len() > per_reply {
+                    let mut r =
+                        crate::str_utils::safe_truncate_str(&done.reply, per_reply).to_string();
+                    r.push_str("\n[... cut here; the whole reply is in its conversation]");
+                    r
+                } else {
+                    done.reply
+                };
+                serde_json::json!({
+                    "title": title,
+                    "agent": done.agent_name,
+                    "agent_id": done.agent_id,
+                    "conversation": done.session_id,
+                    "ok": true,
+                    "reply": reply,
+                })
+            }
+            Err(e) => serde_json::json!({
+                "title": title,
+                "agent": agent.as_deref().unwrap_or("(yourself)"),
+                "ok": false,
+                "error": e,
+            }),
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&serde_json::json!({
+        "summary": format!("{finished} of {} tasks finished", results.len()),
+        "results": results,
+    }))
+    .map_err(|e| e.to_string())
 }
 
 async fn tool_agent_spawn(
@@ -2422,6 +2952,304 @@ fn tool_agent_activate(
 }
 
 // ---------------------------------------------------------------------------
+// Running the installation: agent details, per-agent skills, models
+// ---------------------------------------------------------------------------
+
+/// A JSON array of strings, trimmed, empty entries dropped.
+fn string_list(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn required_agent_ref(input: &serde_json::Value) -> Result<&str, String> {
+    input["agent_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "agent_id is required: the agent's UUID or name".to_string())
+}
+
+fn tool_agent_describe(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let details = kh.describe_agent(required_agent_ref(input)?)?;
+    Ok(serde_json::to_string_pretty(&details).unwrap_or_else(|_| details.to_string()))
+}
+
+/// What a skill change asks for, worked out before anything is stored.
+#[derive(Debug, PartialEq, Eq)]
+enum SkillChange {
+    /// Nothing to store; the agent already has what was asked.
+    Unchanged,
+    /// Store this allowlist. Empty means every installed skill.
+    Set(Vec<String>),
+}
+
+/// Work out an agent's next skill allowlist.
+///
+/// The stored form has one quirk every rule here works around: an empty list
+/// means "every skill". So switching one skill off for an agent that has no
+/// list gives it a list of all the others, a list that would end up empty is
+/// refused rather than silently turning every skill back on, and a list that
+/// names every installed skill is stored as empty, so skills installed later
+/// reach the agent too.
+fn next_skill_list(
+    assigned: &[String],
+    installed: &[String],
+    enable: &[String],
+    disable: &[String],
+    only: Option<&[String]>,
+    all: bool,
+) -> Result<SkillChange, String> {
+    let unknown: Vec<&str> = enable
+        .iter()
+        .chain(disable.iter())
+        .chain(only.unwrap_or(&[]).iter())
+        .filter(|name| !installed.contains(name))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "No installed skill is called {}. skill_list shows the installed names.",
+            unknown.join(", ")
+        ));
+    }
+    if all {
+        if only.is_some() || !enable.is_empty() || !disable.is_empty() {
+            return Err("all=true cannot be combined with enable, disable or only.".to_string());
+        }
+        return Ok(if assigned.is_empty() {
+            SkillChange::Unchanged
+        } else {
+            SkillChange::Set(Vec::new())
+        });
+    }
+    let next: Vec<String> = match only {
+        Some(list) => {
+            if !enable.is_empty() || !disable.is_empty() {
+                return Err("only cannot be combined with enable or disable.".to_string());
+            }
+            if list.is_empty() {
+                return Err(
+                    "only must name at least one skill. Use all=true for every skill.".to_string(),
+                );
+            }
+            let mut out: Vec<String> = Vec::new();
+            for name in list {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            out
+        }
+        None => {
+            if enable.is_empty() && disable.is_empty() {
+                return Ok(SkillChange::Unchanged);
+            }
+            // Every skill is already on for an agent without a list.
+            if assigned.is_empty() && disable.is_empty() {
+                return Ok(SkillChange::Unchanged);
+            }
+            let mut out: Vec<String> = if assigned.is_empty() {
+                installed.to_vec()
+            } else {
+                assigned.to_vec()
+            };
+            for name in enable {
+                if !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            out.retain(|name| !disable.contains(name));
+            out
+        }
+    };
+    if next.is_empty() {
+        return Err(
+            "That would switch off every skill for this agent, which cannot be stored: an \
+             empty list means every skill. Leave at least one switched on."
+                .to_string(),
+        );
+    }
+    if !installed.is_empty() && installed.iter().all(|name| next.contains(name)) {
+        return Ok(if assigned.is_empty() {
+            SkillChange::Unchanged
+        } else {
+            SkillChange::Set(Vec::new())
+        });
+    }
+    if next == assigned {
+        return Ok(SkillChange::Unchanged);
+    }
+    Ok(SkillChange::Set(next))
+}
+
+/// One line saying which skills an agent has.
+fn describe_skill_assignment(agent: &str, assigned: &[String], installed: usize) -> String {
+    if assigned.is_empty() {
+        return format!("{agent} uses every installed skill ({installed}).");
+    }
+    const SHOWN: usize = 40;
+    let mut names = assigned
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if assigned.len() > SHOWN {
+        names.push_str(&format!(" and {} more", assigned.len() - SHOWN));
+    }
+    format!(
+        "{agent} uses {} of {installed} installed skills: {names}.",
+        assigned.len()
+    )
+}
+
+fn tool_agent_skills_set(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent = required_agent_ref(input)?;
+    let (assigned, installed) = kh.agent_skills(agent)?;
+    let only = input.get("only").filter(|v| v.is_array()).map(string_list);
+    let change = next_skill_list(
+        &assigned,
+        &installed,
+        &string_list(&input["enable"]),
+        &string_list(&input["disable"]),
+        only.as_deref(),
+        input["all"].as_bool().unwrap_or(false),
+    )?;
+    match change {
+        SkillChange::Unchanged => Ok(format!(
+            "No change. {}",
+            describe_skill_assignment(agent, &assigned, installed.len())
+        )),
+        SkillChange::Set(skills) => {
+            kh.set_agent_skills_by_ref(agent, skills)?;
+            // Report what was stored, read back, not what was asked for.
+            let (stored, installed) = kh.agent_skills(agent)?;
+            Ok(format!(
+                "Saved. {} The change applies from the agent's next message.",
+                describe_skill_assignment(agent, &stored, installed.len())
+            ))
+        }
+    }
+}
+
+fn tool_skill_reload(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let count = kh.reload_skills_now()?;
+    Ok(format!(
+        "Skills reloaded from disk: {count} installed. Agents see the new set from their next \
+         message; skill_list in this same turn still shows the set from when it began."
+    ))
+}
+
+fn tool_model_list(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    const MAX_SHOWN: usize = 60;
+    let kh = require_kernel(kernel)?;
+    let provider = input["provider"]
+        .as_str()
+        .map(|p| p.trim().to_lowercase())
+        .filter(|p| !p.is_empty());
+    let query = input["query"]
+        .as_str()
+        .map(|q| q.trim().to_lowercase())
+        .filter(|q| !q.is_empty());
+    let include_unavailable = input["include_unavailable"].as_bool().unwrap_or(false);
+
+    let mut models: Vec<crate::kernel_handle::ModelChoice> = kh
+        .list_model_choices()
+        .into_iter()
+        .filter(|m| include_unavailable || m.usable)
+        .filter(|m| {
+            provider
+                .as_ref()
+                .is_none_or(|p| m.provider.to_lowercase() == *p)
+        })
+        .filter(|m| {
+            query.as_ref().is_none_or(|q| {
+                m.id.to_lowercase().contains(q) || m.display_name.to_lowercase().contains(q)
+            })
+        })
+        .collect();
+    if models.is_empty() {
+        return Ok(if include_unavailable {
+            "No model in the catalog matches.".to_string()
+        } else {
+            "No usable model matches. Pass include_unavailable=true to see the ones that \
+             cannot be used now and why, and provider_list for which keys are missing."
+                .to_string()
+        });
+    }
+    models.sort_by(|a, b| {
+        b.usable
+            .cmp(&a.usable)
+            .then_with(|| a.provider.cmp(&b.provider))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let total = models.len();
+    let mut out = format!(
+        "{} models{}. Pass the id to agent_set_model.\n",
+        total,
+        if total > MAX_SHOWN {
+            format!(", the first {MAX_SHOWN} shown (narrow with provider or query)")
+        } else {
+            String::new()
+        }
+    );
+    for m in models.iter().take(MAX_SHOWN) {
+        let context = if m.context_window >= 1000 {
+            format!("{}k context", m.context_window / 1000)
+        } else {
+            format!("{} context", m.context_window)
+        };
+        let price = if m.input_cost_per_m == 0.0 && m.output_cost_per_m == 0.0 {
+            "no per-token price".to_string()
+        } else {
+            format!(
+                "${:.2} in / ${:.2} out per M tokens",
+                m.input_cost_per_m, m.output_cost_per_m
+            )
+        };
+        out.push_str(&format!(
+            "- {} | {} | {} | {} | tools: {} | {}{}\n",
+            m.id,
+            m.provider,
+            m.tier,
+            context,
+            if m.supports_tools { "yes" } else { "no" },
+            price,
+            if m.usable {
+                ""
+            } else if !m.provider_has_key {
+                " | not usable: provider has no key"
+            } else {
+                " | not usable: the provider does not serve this model for its key"
+            }
+        ));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Shared memory tools
 // ---------------------------------------------------------------------------
 
@@ -2521,10 +3349,41 @@ async fn tool_task_post(
         .as_str()
         .ok_or("Missing 'description' parameter")?;
     let assigned_to = input["assigned_to"].as_str();
-    let task_id = kh
-        .task_post(title, description, assigned_to, caller_agent_id)
-        .await?;
-    Ok(format!("Task created with ID: {task_id}"))
+    let team = input["team"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let blocked_by: Vec<String> = input["blocked_by"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let task_id = if team.is_some() || !blocked_by.is_empty() {
+        kh.team_task_post(
+            title,
+            description,
+            assigned_to,
+            caller_agent_id,
+            team,
+            &blocked_by,
+        )
+        .await?
+    } else {
+        kh.task_post(title, description, assigned_to, caller_agent_id)
+            .await?
+    };
+    if blocked_by.is_empty() {
+        Ok(format!("Task created with ID: {task_id}"))
+    } else {
+        Ok(format!(
+            "Task created with ID: {task_id}. It waits for {} task{} to be completed before anyone can claim it.",
+            blocked_by.len(),
+            if blocked_by.len() == 1 { "" } else { "s" }
+        ))
+    }
 }
 
 async fn tool_task_claim(
@@ -2544,6 +3403,7 @@ async fn tool_task_claim(
 async fn tool_task_complete(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let task_id = input["task_id"]
@@ -2552,8 +3412,17 @@ async fn tool_task_complete(
     let result = input["result"]
         .as_str()
         .ok_or("Missing 'result' parameter")?;
-    kh.task_complete(task_id, result).await?;
-    Ok(format!("Task {task_id} marked as completed."))
+    let ready = kh
+        .task_complete_by(task_id, result, caller_agent_id)
+        .await?;
+    if ready.is_empty() {
+        Ok(format!("Task {task_id} marked as completed."))
+    } else {
+        Ok(format!(
+            "Task {task_id} marked as completed. Now ready to claim: {}.",
+            ready.join(", ")
+        ))
+    }
 }
 
 async fn tool_task_list(
@@ -4385,14 +5254,33 @@ async fn tool_canvas_present(
 // ---------------------------------------------------------------------------
 
 /// List all skills available to this agent, with their provided tool names.
-fn tool_skill_list(skill_registry: Option<&SkillRegistry>) -> Result<String, String> {
+fn tool_skill_list(
+    input: &serde_json::Value,
+    skill_registry: Option<&SkillRegistry>,
+) -> Result<String, String> {
     let registry = match skill_registry {
         Some(r) => r,
         None => return Ok("No skill registry available.".to_string()),
     };
-    let skills = registry.list();
+    let mut skills = registry.list();
     if skills.is_empty() {
         return Ok("No skills installed. Install skills via the dashboard or `freeco-ai skill install <name>`.".to_string());
+    }
+    skills.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+    let query = input["query"].as_str().unwrap_or("").to_lowercase();
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if !words.is_empty() {
+        skills.retain(|s| {
+            let text = format!("{} {}", s.manifest.skill.name, s.manifest.skill.description)
+                .to_lowercase();
+            words.iter().all(|w| text.contains(w))
+        });
+        if skills.is_empty() {
+            return Ok(format!(
+                "No installed skill matches \"{}\". Call skill_list without a query to see all skills.",
+                query.trim()
+            ));
+        }
     }
     let entries: Vec<serde_json::Value> = skills
         .iter()
@@ -4537,6 +5425,149 @@ async fn tool_skill_execute(
 mod tests {
     use super::*;
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn management_tools_are_defined_with_object_schemas() {
+        let tools = builtin_tool_definitions();
+        for name in [
+            "container_list",
+            "container_logs",
+            "container_start",
+            "container_stop",
+            "container_restart",
+            "agent_describe",
+            "agent_skills_set",
+            "skill_reload",
+            "model_list",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} not defined"));
+            assert_eq!(tool.input_schema["type"], "object", "{name}");
+        }
+        let unique: HashSet<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(unique.len(), tools.len(), "a tool is defined twice");
+    }
+
+    #[test]
+    fn skills_switched_off_from_all_leave_the_others_on() {
+        let installed = names(&["a", "b", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &names(&["b"]), None, false),
+            Ok(SkillChange::Set(names(&["a", "c"])))
+        );
+    }
+
+    #[test]
+    fn switching_on_a_skill_an_agent_already_has_changes_nothing() {
+        let installed = names(&["a", "b", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &names(&["a"]), &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &names(&["a"]), &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &[], &[], None, false),
+            Ok(SkillChange::Unchanged)
+        );
+    }
+
+    #[test]
+    fn skills_are_added_and_removed_from_a_list() {
+        let installed = names(&["a", "b", "c", "d"]);
+        assert_eq!(
+            next_skill_list(
+                &names(&["a", "b"]),
+                &installed,
+                &names(&["c"]),
+                &names(&["a"]),
+                None,
+                false
+            ),
+            Ok(SkillChange::Set(names(&["b", "c"])))
+        );
+    }
+
+    #[test]
+    fn switching_the_last_skill_off_is_refused_not_turned_into_all() {
+        let installed = names(&["a", "b"]);
+        let err = next_skill_list(&names(&["a"]), &installed, &[], &names(&["a"]), None, false)
+            .unwrap_err();
+        assert!(err.contains("every skill"), "{err}");
+        assert!(next_skill_list(&[], &installed, &[], &names(&["a", "b"]), None, false).is_err());
+    }
+
+    #[test]
+    fn a_list_naming_every_skill_is_stored_as_all() {
+        let installed = names(&["a", "b"]);
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &names(&["b"]), &[], None, false),
+            Ok(SkillChange::Set(vec![]))
+        );
+        assert_eq!(
+            next_skill_list(&names(&["a"]), &installed, &[], &[], None, true),
+            Ok(SkillChange::Set(vec![]))
+        );
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &[], None, true),
+            Ok(SkillChange::Unchanged)
+        );
+    }
+
+    #[test]
+    fn only_replaces_the_list() {
+        let installed = names(&["a", "b", "c"]);
+        let only = names(&["c", "a", "c"]);
+        assert_eq!(
+            next_skill_list(&[], &installed, &[], &[], Some(&only), false),
+            Ok(SkillChange::Set(names(&["c", "a"])))
+        );
+        assert!(next_skill_list(&[], &installed, &[], &[], Some(&[]), false).is_err());
+        assert!(next_skill_list(&[], &installed, &names(&["a"]), &[], Some(&only), false).is_err());
+    }
+
+    #[test]
+    fn unknown_skill_names_are_named_in_the_refusal() {
+        let installed = names(&["a"]);
+        let err =
+            next_skill_list(&[], &installed, &names(&["ghost"]), &[], None, false).unwrap_err();
+        assert!(err.contains("ghost") && err.contains("skill_list"), "{err}");
+        assert!(
+            next_skill_list(&[], &installed, &names(&["a"]), &[], None, true).is_err(),
+            "all cannot be mixed with changes"
+        );
+    }
+
+    #[test]
+    fn skill_assignment_is_described_in_one_line() {
+        assert_eq!(
+            describe_skill_assignment("ceo", &[], 335),
+            "ceo uses every installed skill (335)."
+        );
+        let many: Vec<String> = (0..45).map(|i| format!("s{i}")).collect();
+        let line = describe_skill_assignment("ceo", &many, 335);
+        assert!(line.starts_with("ceo uses 45 of 335 installed skills: s0, s1"));
+        assert!(line.ends_with(" and 5 more."), "{line}");
+    }
+
+    #[test]
+    fn management_tools_need_a_kernel() {
+        let input = serde_json::json!({"agent_id": "ceo"});
+        assert!(tool_agent_describe(&input, None).is_err());
+        assert!(tool_agent_skills_set(&input, None).is_err());
+        assert!(tool_skill_reload(None).is_err());
+        assert!(tool_model_list(&serde_json::json!({}), None).is_err());
+        let err = required_agent_ref(&serde_json::json!({"agent_id": "  "})).unwrap_err();
+        assert!(err.contains("agent_id"));
+    }
+
     #[test]
     fn test_builtin_tool_definitions() {
         let tools = builtin_tool_definitions();
@@ -4637,7 +5668,7 @@ mod tests {
         assert_eq!(registry.count(), 1);
 
         // skill_list returns the global skill without any filesystem call
-        let list_out = tool_skill_list(Some(&registry)).unwrap();
+        let list_out = tool_skill_list(&serde_json::json!({}), Some(&registry)).unwrap();
         assert!(list_out.contains("daily-journal"));
         assert!(list_out.contains("Keep a daily journal"));
 
@@ -4669,6 +5700,64 @@ mod tests {
         assert!(missing.unwrap_err().contains("not found"));
     }
 
+    /// skill_list's optional `query` narrows a large install to the skills
+    /// whose name or description contains every word of the query.
+    #[test]
+    fn test_skill_list_query_filters() {
+        use freeco_skills::registry::SkillRegistry;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        for (name, desc) in [
+            ("pdf-tools", "Convert PDF files to Markdown"),
+            ("daily-journal", "Keep a daily journal"),
+            ("web-scraper", "Fetch web pages and convert them to text"),
+        ] {
+            let skill_dir = dir.path().join(name);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n---\n# {name}\n\nBody."),
+            )
+            .unwrap();
+        }
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+        assert_eq!(registry.count(), 3);
+
+        let all = tool_skill_list(&serde_json::json!({}), Some(&registry)).unwrap();
+        assert!(all.contains("\"count\": 3"));
+
+        // One word, matched case-insensitively in the description.
+        let out =
+            tool_skill_list(&serde_json::json!({ "query": "CONVERT" }), Some(&registry)).unwrap();
+        assert!(out.contains("\"count\": 2"));
+        assert!(out.contains("pdf-tools"));
+        assert!(out.contains("web-scraper"));
+        assert!(!out.contains("daily-journal"));
+
+        // Every word must match, across name and description.
+        let out = tool_skill_list(
+            &serde_json::json!({ "query": "pdf markdown" }),
+            Some(&registry),
+        )
+        .unwrap();
+        assert!(out.contains("\"count\": 1"));
+        assert!(out.contains("pdf-tools"));
+
+        // No match gives a plain hint instead of an empty list.
+        let out = tool_skill_list(
+            &serde_json::json!({ "query": "kubernetes" }),
+            Some(&registry),
+        )
+        .unwrap();
+        assert!(out.contains("No installed skill matches"));
+
+        // A blank query lists everything.
+        let out = tool_skill_list(&serde_json::json!({ "query": "  " }), Some(&registry)).unwrap();
+        assert!(out.contains("\"count\": 3"));
+    }
+
     #[test]
     fn test_collaboration_tool_schemas() {
         let tools = builtin_tool_definitions();
@@ -4697,6 +5786,211 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn test_github_skill_tools_are_defined_and_gated() {
+        let tools = builtin_tool_definitions();
+        let preview = tools
+            .iter()
+            .find(|t| t.name == "skill_github_preview")
+            .expect("skill_github_preview defined");
+        assert_eq!(
+            preview.input_schema["required"],
+            serde_json::json!(["source"])
+        );
+
+        let install = tools
+            .iter()
+            .find(|t| t.name == "skill_install_github")
+            .expect("skill_install_github defined");
+        let required = install.input_schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("commit")));
+        assert!(required.contains(&serde_json::json!("purpose")));
+
+        // Installs always ask a human; the read-only preview never needs to.
+        assert!(ALWAYS_ASK_TOOLS.contains(&"skill_install_github"));
+        assert!(!ALWAYS_ASK_TOOLS.contains(&"skill_github_preview"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_install_github_without_kernel_errors() {
+        let result = execute_tool(
+            "test-id",
+            "skill_install_github",
+            &serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "test"}),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error);
+    }
+
+    /// `execute_tool` with only the arguments these tests vary.
+    async fn run_tool(
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        kernel: &Arc<dyn KernelHandle>,
+        allowed: Option<&[String]>,
+    ) -> ToolResult {
+        execute_tool(
+            id,
+            name,
+            input,
+            Some(kernel),
+            allowed,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn approval_asked_before_the_deadline_is_not_asked_again() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+
+        let refused = approve_before_deadline(
+            "call-1",
+            "skill_install_github",
+            &input,
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+        )
+        .await;
+        assert!(refused.is_none());
+        assert_eq!(fake.approvals_asked(), 1);
+
+        // The approved call runs without a second request.
+        let result = run_approved(
+            "call-1",
+            run_tool("call-1", "skill_install_github", &input, &kernel, None),
+        )
+        .await;
+        assert!(!result.content.contains("requires human approval"));
+        assert_eq!(fake.approvals_asked(), 1);
+
+        // Another call id, even inside that scope, is asked again.
+        run_approved(
+            "call-1",
+            run_tool("call-2", "skill_install_github", &input, &kernel, None),
+        )
+        .await;
+        assert_eq!(fake.approvals_asked(), 2);
+
+        // So is a call that never went through approve_before_deadline.
+        run_tool("call-3", "skill_install_github", &input, &kernel, None).await;
+        assert_eq!(fake.approvals_asked(), 3);
+    }
+
+    #[tokio::test]
+    async fn nobody_is_asked_about_a_call_that_will_be_refused() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+        let allowed = vec!["file_read".to_string()];
+
+        let refused = approve_before_deadline(
+            "call-1",
+            "skill_install_github",
+            &input,
+            Some(&kernel),
+            Some(&allowed),
+            Some("agent-1"),
+            None,
+        )
+        .await;
+        assert!(refused.is_none());
+        assert_eq!(fake.approvals_asked(), 0);
+        let result = run_approved(
+            "call-1",
+            run_tool(
+                "call-1",
+                "skill_install_github",
+                &input,
+                &kernel,
+                Some(&allowed),
+            ),
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("does not have capability"));
+    }
+
+    #[tokio::test]
+    async fn subagents_cannot_install_skills() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let kernel: Arc<dyn KernelHandle> = fake.clone();
+        let input = serde_json::json!({"source": "o/r", "commit": "a".repeat(40), "purpose": "t"});
+
+        let result = AGENT_CALL_DEPTH
+            .scope(std::cell::Cell::new(1), async {
+                let pre = approve_before_deadline(
+                    "call-1",
+                    "skill_install_github",
+                    &input,
+                    Some(&kernel),
+                    None,
+                    Some("agent-1"),
+                    None,
+                )
+                .await;
+                assert!(pre.is_none());
+                run_approved(
+                    "call-1",
+                    run_tool("call-1", "skill_install_github", &input, &kernel, None),
+                )
+                .await
+            })
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("working for another agent"));
+        assert_eq!(
+            fake.approvals_asked(),
+            0,
+            "a refused call must not ask anyone"
+        );
+
+        // The read-only preview stays available to subagents.
+        let preview = AGENT_CALL_DEPTH
+            .scope(std::cell::Cell::new(1), async {
+                run_tool(
+                    "call-2",
+                    "skill_github_preview",
+                    &serde_json::json!({"source": "o/r"}),
+                    &kernel,
+                    None,
+                )
+                .await
+            })
+            .await;
+        assert!(!preview.content.contains("working for another agent"));
     }
 
     #[tokio::test]
@@ -5592,6 +6886,7 @@ mod tests {
         created: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         cancelled: std::sync::Mutex<Vec<String>>,
         jobs: std::sync::Mutex<Vec<serde_json::Value>>,
+        approval_requests: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeKernelHandle {
@@ -5600,7 +6895,13 @@ mod tests {
                 created: std::sync::Mutex::new(Vec::new()),
                 cancelled: std::sync::Mutex::new(Vec::new()),
                 jobs: std::sync::Mutex::new(Vec::new()),
+                approval_requests: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        fn approvals_asked(&self) -> usize {
+            self.approval_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
         }
 
         fn with_job(self, job: serde_json::Value) -> Self {
@@ -5611,6 +6912,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::kernel_handle::KernelHandle for FakeKernelHandle {
+        // Counts approval requests and approves them all.
+        async fn request_approval(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _action_summary: &str,
+            _purpose: Option<&str>,
+        ) -> Result<bool, String> {
+            self.approval_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+
         // Test double. Records nothing and touches no real key store: a mock
         // that wrote to secrets.env would put a key on the developer's disk
         // every time the suite ran.

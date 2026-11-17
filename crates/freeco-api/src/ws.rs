@@ -318,7 +318,7 @@ pub async fn agent_ws(
     // fail-closed path for non-loopback origins (see issue #1034 B2).
     let api_key_raw = &state.kernel.config.api_key;
     let api_key = api_key_raw.trim();
-    let is_loopback = addr.ip().is_loopback();
+    let is_loopback = crate::middleware::from_this_device(addr.ip(), &headers);
     let allow_no_auth = crate::middleware::allow_no_auth_from_env();
 
     // Mirror the session_secret derivation in server.rs::AuthState so cookies
@@ -711,17 +711,50 @@ async fn handle_text_message(
             )
             .await;
 
-            // Send message to agent with streaming
+            // Send message to agent with streaming.
+            //
+            // A chat names the conversation it shows, so the message lands
+            // there even if another window has since switched the agent to a
+            // different one. Without it, the agent's current conversation.
             let kernel_handle: Arc<dyn KernelHandle> =
                 state.kernel.clone() as Arc<dyn KernelHandle>;
-            match state.kernel.send_message_streaming(
-                agent_id,
-                &content,
-                Some(kernel_handle),
-                None,
-                None,
-                ws_content_blocks,
-            ) {
+            // A conversation named but not readable is refused, as over HTTP:
+            // treating it as unnamed would send the message somewhere else.
+            let pinned_session = match parsed["session_id"].as_str().map(str::trim) {
+                None | Some("") => None,
+                Some(sid) => match uuid::Uuid::parse_str(sid) {
+                    Ok(u) => Some(freeco_types::agent::SessionId(u)),
+                    Err(_) => {
+                        let _ = send_json(
+                            sender,
+                            &serde_json::json!({
+                                "type": "error",
+                                "content": "Invalid session_id",
+                            }),
+                        )
+                        .await;
+                        return;
+                    }
+                },
+            };
+            let started = match pinned_session {
+                Some(session_id) => state.kernel.send_message_streaming_in_session(
+                    agent_id,
+                    session_id,
+                    &content,
+                    Some(kernel_handle),
+                    ws_content_blocks,
+                ),
+                None => state.kernel.send_message_streaming(
+                    agent_id,
+                    &content,
+                    Some(kernel_handle),
+                    None,
+                    None,
+                    ws_content_blocks,
+                ),
+            };
+            match started {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing.
                     //
@@ -1420,6 +1453,9 @@ fn classify_streaming_error(err: &freeco_kernel::error::KernelError) -> String {
     }
     if inner.contains("quota") || inner.contains("Quota") {
         return "Token quota exceeded. Try /compact or /new to free up space.".to_string();
+    }
+    if inner.contains(freeco_kernel::kernel::CONVERSATION_RESET_WHILE_WAITING) {
+        return freeco_kernel::kernel::CONVERSATION_RESET_WHILE_WAITING.to_string();
     }
 
     // Use the LLM error classifier for everything else

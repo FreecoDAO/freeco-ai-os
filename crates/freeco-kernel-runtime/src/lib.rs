@@ -8,6 +8,7 @@
 pub const USER_AGENT: &str = "freeco/0.3.48";
 
 pub mod a2a;
+pub mod activity;
 pub mod agent_context;
 pub mod agent_loop;
 pub mod apply_patch;
@@ -16,12 +17,14 @@ pub mod auth_cooldown;
 pub mod browser;
 pub mod command_lane;
 pub mod compactor;
+pub mod container_admin;
 pub mod context_budget;
 pub mod context_overflow;
 pub mod copilot_oauth;
 pub mod crm_tool;
 pub mod docker_sandbox;
 pub mod drivers;
+pub mod earlier_conversation;
 pub mod embedding;
 pub mod graceful_shutdown;
 pub mod hooks;

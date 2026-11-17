@@ -52,6 +52,19 @@ pub struct StateFlag {
     pub value: bool,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateProject {
+    pub name: Option<String>,
+    /// The project's brief, read by every agent working in it.
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct StartConversation {
+    pub agent_id: String,
+    pub label: Option<String>,
+}
+
 fn fail(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -195,16 +208,232 @@ pub async fn create_team(
 }
 
 /// GET /api/org/projects/:id/sessions — a project's own history.
+///
+/// Each conversation carries its agent's name and whether a run is working in
+/// it right now, so the page shows a project's parallel work as it happens.
 pub async fn project_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.memory.org().sessions_for_project(&id) {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "sessions": rows })),
+        Ok(mut rows) => {
+            for row in &mut rows {
+                let busy = row["id"]
+                    .as_str()
+                    .and_then(|sid| uuid::Uuid::parse_str(sid).ok())
+                    .is_some_and(|u| {
+                        state
+                            .kernel
+                            .is_conversation_busy(freeco_types::agent::SessionId(u))
+                    });
+                let agent_name = row["agent_id"]
+                    .as_str()
+                    .and_then(|a| a.parse::<freeco_types::agent::AgentId>().ok())
+                    .and_then(|a| state.kernel.registry.get(a))
+                    .map(|e| e.name);
+                row["busy"] = serde_json::Value::Bool(busy);
+                row["agent_name"] = serde_json::json!(agent_name);
+            }
+            let working = rows.iter().filter(|r| r["busy"] == true).count();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "sessions": rows, "working": working })),
+            )
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// GET /api/org/projects/:id — one project, with its brief.
+pub async fn get_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().get_project(&id) {
+        Ok(Some(p)) => (StatusCode::OK, Json(serde_json::json!({ "project": p }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such project" })),
         ),
         Err(e) => fail(e),
+    }
+}
+
+/// PUT /api/org/projects/:id — rename a project or rewrite its brief.
+pub async fn update_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateProject>,
+) -> impl IntoResponse {
+    let name = body.name.as_deref().map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "A project needs a name." })),
+        );
+    }
+    match state
+        .kernel
+        .memory
+        .org()
+        .update_project(&id, name, body.description.as_deref())
+    {
+        Ok(Some(p)) => (StatusCode::OK, Json(serde_json::json!({ "project": p }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such project" })),
+        ),
+        Err(e) => fail(e),
+    }
+}
+
+/// POST /api/org/projects/:id/conversations — start a conversation in a project.
+///
+/// A new conversation of the chosen agent, filed under the project. It does
+/// not become the agent's current conversation, so starting one never pulls
+/// the agent out of a chat already in progress: any number run side by side.
+pub async fn start_project_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<StartConversation>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    let project = match org.get_project(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such project" })),
+            )
+        }
+        Err(e) => return fail(e),
+    };
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("{} — {}", project.name, entry.name));
+    let session = match state
+        .kernel
+        .memory
+        .create_session_with_label(entry.id, Some(&label))
+    {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let session_id = session.id.0.to_string();
+    if let Err(e) = org.assign_session(&session_id, Some(&project.id), None) {
+        return fail(e);
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "agent_id": entry.id.to_string(),
+            "agent_name": entry.name,
+            "label": label,
+            "project_id": project.id,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddTeamMember {
+    pub agent_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// POST /api/org/teams/:id/members — put an agent on a team.
+///
+/// Members are what a team run hands work to, and the dashboard had no way
+/// to add one: a team could be created and never staffed.
+pub async fn add_team_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AddTeamMember>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    match org.get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let role = body
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Err(e) = org.add_team_member(&id, &entry.id.to_string(), role) {
+        return fail(e);
+    }
+    match org.get_team(&id) {
+        Ok(team) => (StatusCode::OK, Json(serde_json::json!({ "team": team }))),
+        Err(e) => fail(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunTeam {
+    pub goal: String,
+}
+
+/// POST /api/org/teams/:id/run — give a team a goal.
+///
+/// Its lead gets a new conversation filed under the team, with the goal as
+/// its first message, and hands parts to the other members, who work at the
+/// same time. Returns at once with the lead's conversation; the work shows
+/// on the project page as it happens.
+pub async fn run_team(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RunTeam>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    match state.kernel.start_team_run(&id, &body.goal) {
+        Ok(run) => (StatusCode::OK, Json(run)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

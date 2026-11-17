@@ -611,19 +611,50 @@ pub async fn send_message(
         None => req.message.clone(),
     };
 
+    let pinned_session = match req.session_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(sid) => match uuid::Uuid::parse_str(sid) {
+            Ok(u) => Some(freeco_types::agent::SessionId(u)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid session_id"})),
+                );
+            }
+        },
+    };
+
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle_and_blocks(
-            agent_id,
-            &message,
-            Some(kernel_handle),
-            content_blocks,
-            req.sender_id,
-            req.sender_name,
-        )
-        .await
-    {
+    let outcome = match pinned_session {
+        Some(session_id) => {
+            state
+                .kernel
+                .send_message_in_session_from(
+                    agent_id,
+                    session_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                    req.sender_id,
+                    req.sender_name,
+                )
+                .await
+        }
+        None => {
+            state
+                .kernel
+                .send_message_with_handle_and_blocks(
+                    agent_id,
+                    &message,
+                    Some(kernel_handle),
+                    content_blocks,
+                    req.sender_id,
+                    req.sender_name,
+                )
+                .await
+        }
+    };
+    match outcome {
         Ok(result) => {
             // Strip <think>...</think> blocks from model output
             let cleaned = crate::ws::strip_think_tags(&result.response);
@@ -677,6 +708,9 @@ pub async fn send_message(
 ///   response (intended for debugging only). Defaults to `false` so the
 ///   internal system prompt is never leaked into the Web UI conversation
 ///   history (issue #935).
+/// - `session_id` — one named conversation of this agent instead of its
+///   current one. A chat watching its own conversation asks for that one, so
+///   another window switching the agent does not change what it sees.
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -710,7 +744,25 @@ pub async fn get_agent_session(
         }
     };
 
-    match state.kernel.memory.get_session(entry.session_id) {
+    let session_id = match params.get("session_id").map(|s| s.trim()) {
+        None | Some("") => entry.session_id,
+        Some(sid) => match uuid::Uuid::parse_str(sid) {
+            Ok(u) => freeco_types::agent::SessionId(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid session_id"})),
+                );
+            }
+        },
+    };
+
+    match state.kernel.memory.get_session(session_id) {
+        // Another agent's conversation is not readable through this one.
+        Ok(Some(session)) if session.agent_id != agent_id => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "No such conversation for this agent"})),
+        ),
         Ok(Some(session)) => {
             // Filter out system-role messages BEFORE any rendering / truncation
             // logic so the system prompt cannot leak into the response. The
@@ -864,17 +916,23 @@ pub async fn get_agent_session(
                     "context_window_tokens": session.context_window_tokens,
                     "label": session.label,
                     "messages": messages,
+                    // A run is still working in this conversation. Its reply
+                    // is saved when it finishes, so a chat opened mid-run --
+                    // after switching away and back, or a reload -- shows that
+                    // it is coming rather than a thread that looks ignored.
+                    "busy": state.kernel.is_conversation_busy(session.id),
                 })),
             )
         }
         Ok(None) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "session_id": entry.session_id.0.to_string(),
+                "session_id": session_id.0.to_string(),
                 "agent_id": agent_id.to_string(),
                 "message_count": 0,
                 "context_window_tokens": 0,
                 "messages": [],
+                "busy": state.kernel.is_conversation_busy(session_id),
             })),
         ),
         Err(e) => {
@@ -3339,8 +3397,13 @@ pub async fn configure_channel(
         if let Some(env_var) = field_def.env_var {
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
+                let status = if e.kind() == std::io::ErrorKind::InvalidInput {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status,
                     Json(serde_json::json!({"error": format!("Failed to write secret: {e}")})),
                 );
             }
@@ -4399,10 +4462,6 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 
 /// GET /api/skills — List installed skills.
 pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
-    let mut registry = freeco_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
-
     // Snapshot of user-provided overrides for the `config_resolved_count`.
     // Matches `reload_skills()` fallback order so the count reflects what
     // agents will actually see.
@@ -4418,13 +4477,26 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
             .unwrap_or_else(|| state.kernel.config.skills.clone())
     };
 
-    let skills: Vec<serde_json::Value> = registry
-        .list()
+    // Load the same way the kernel does: bundled skills first, then user
+    // skills from disk (which override bundled ones with the same name).
+    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let mut registry = freeco_skills::registry::SkillRegistry::new(skills_dir);
+    registry.set_skill_configs(user_configs.clone());
+    registry.load_bundled();
+    let _ = registry.load_all();
+
+    let mut installed = registry.list();
+    installed.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+
+    let skills: Vec<serde_json::Value> = installed
         .iter()
         .map(|s| {
             let source = match &s.manifest.source {
                 Some(freeco_skills::SkillSource::ClawHub { slug, version }) => {
                     serde_json::json!({"type": "clawhub", "slug": slug, "version": version})
+                }
+                Some(freeco_skills::SkillSource::GitHub { repo, commit, path }) => {
+                    serde_json::json!({"type": "github", "repo": repo, "commit": commit, "path": path})
                 }
                 Some(freeco_skills::SkillSource::OpenClaw) => {
                     serde_json::json!({"type": "openclaw"})
@@ -4644,18 +4716,27 @@ pub async fn audit_append(
     };
     let outcome = req.outcome.clone().unwrap_or_else(|| "ok".to_string());
 
-    let hash = state
+    let Some(entry) = state
         .kernel
         .audit_log
-        .record(agent_id, action, detail, outcome);
-    let seq = state.kernel.audit_log.len().saturating_sub(1) as u64;
+        .record_entry(agent_id, action, detail, outcome)
+    else {
+        // The database refused it; it is written before the next entry.
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "queued",
+                "tip": state.kernel.audit_log.tip_hash(),
+            })),
+        );
+    };
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "appended",
-            "seq": seq,
-            "hash": hash,
+            "seq": entry.seq,
+            "hash": entry.hash,
             "tip": state.kernel.audit_log.tip_hash(),
         })),
     )
@@ -5025,6 +5106,77 @@ pub async fn clawhub_install(
             };
             tracing::warn!("ClawHub install failed: {msg}");
             (status, Json(serde_json::json!({"error": msg})))
+        }
+    }
+}
+
+/// Map a skill-install error to the HTTP status the dashboard expects.
+fn skill_error_status(e: &freeco_skills::SkillError) -> StatusCode {
+    match e {
+        freeco_skills::SkillError::SecurityBlocked(_) => StatusCode::FORBIDDEN,
+        freeco_skills::SkillError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
+        freeco_skills::SkillError::Network(_) => StatusCode::BAD_GATEWAY,
+        freeco_skills::SkillError::NotFound(_) => StatusCode::NOT_FOUND,
+        freeco_skills::SkillError::InvalidManifest(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// POST /api/skills/github/preview — Scan a GitHub repo's skills; installs nothing.
+pub async fn github_skill_preview(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GitHubSkillPreviewRequest>,
+) -> impl IntoResponse {
+    match state.kernel.github_skill_preview(&req.source).await {
+        Ok(preview) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&preview).unwrap_or_default()),
+        ),
+        Err(e) => {
+            tracing::warn!("GitHub skill preview failed: {e}");
+            (
+                skill_error_status(&e),
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+        }
+    }
+}
+
+/// POST /api/skills/github/install — Install skills from a GitHub repo at one commit.
+pub async fn github_skill_install(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<GitHubSkillInstallRequest>,
+) -> impl IntoResponse {
+    let opts = freeco_skills::installer::InstallOptions {
+        require_signed: req.require_signed,
+        allowed_signer_keys: req.allowed_signer_keys.clone(),
+    };
+    match state
+        .kernel
+        .github_skill_install(
+            &req.source,
+            req.commit.as_deref(),
+            &req.skills,
+            req.overwrite,
+            &opts,
+        )
+        .await
+    {
+        Ok(outcome) => {
+            let mut body = serde_json::to_value(&outcome).unwrap_or_default();
+            body["status"] = serde_json::json!(if outcome.installed.is_empty() {
+                "nothing_installed"
+            } else {
+                "installed"
+            });
+            (StatusCode::OK, Json(body))
+        }
+        Err(e) => {
+            tracing::warn!("GitHub skill install failed: {e}");
+            (
+                skill_error_status(&e),
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
         }
     }
 }
@@ -6385,32 +6537,84 @@ pub async fn audit_recent(
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
+///
+/// Checks the record in the database and lists every break with its date,
+/// plus where the unbroken run to the end begins -- one old break used to
+/// make every check read "BROKEN" with nothing to say whether anything
+/// recent was affected.
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entry_count = state.kernel.audit_log.len();
-    match state.kernel.audit_log.verify_integrity() {
-        Ok(()) => {
-            if entry_count == 0 {
-                // SECURITY: Warn that an empty audit log has no forensic value
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": 0,
-                    "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
-                }))
-            } else {
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": entry_count,
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
-                }))
-            }
-        }
-        Err(msg) => Json(serde_json::json!({
-            "valid": false,
-            "error": msg,
-            "entries": entry_count,
-        })),
+    let report = state.kernel.audit_log.verify_report();
+    if report.entries == 0 && report.is_intact() {
+        // SECURITY: Warn that an empty audit log has no forensic value
+        return Json(serde_json::json!({
+            "valid": true,
+            "entries": 0,
+            "warning": "Audit log is empty — no events have been recorded yet",
+            "tip_hash": state.kernel.audit_log.tip_hash(),
+        }));
     }
+    let breaks = (report.break_count > 0).then(|| {
+        let list: Vec<String> = report
+            .breaks
+            .iter()
+            .map(|b| {
+                let what = match b.kind.as_str() {
+                    "altered" => "changed after it was written",
+                    "missing" => "entries before it are missing",
+                    "unreadable" => "its row could not be read",
+                    _ => "does not chain from the entry before it",
+                };
+                format!(
+                    "entry {} ({}): {what}",
+                    b.seq,
+                    b.timestamp.get(..10).unwrap_or("")
+                )
+            })
+            .collect();
+        let more = report.break_count.saturating_sub(report.breaks.len());
+        let intact = match (&report.intact_since_seq, &report.intact_since) {
+            (Some(seq), Some(ts)) => format!(
+                " Intact since entry {seq} ({}).",
+                ts.get(..10).unwrap_or("")
+            ),
+            _ => " The latest entry is itself affected.".to_string(),
+        };
+        format!(
+            "{} break(s): {}{}.{intact}",
+            report.break_count,
+            list.join("; "),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            },
+        )
+    });
+    let mut problems: Vec<String> = Vec::new();
+    if report.error.is_some() {
+        problems.push(
+            "The audit database could not be read, so the chain could not be checked.".to_string(),
+        );
+    }
+    problems.extend(breaks);
+    if report.unsaved > 0 {
+        problems.push(format!(
+            "{} entries could not be written to the database yet and are missing from the record.",
+            report.unsaved
+        ));
+    }
+    let error = (!problems.is_empty()).then(|| problems.join(" "));
+    Json(serde_json::json!({
+        "valid": report.is_intact(),
+        "entries": report.entries,
+        "unsaved": report.unsaved,
+        "breaks": report.breaks,
+        "break_count": report.break_count,
+        "intact_since_seq": report.intact_since_seq,
+        "intact_since": report.intact_since,
+        "error": error,
+        "tip_hash": state.kernel.audit_log.tip_hash(),
+    }))
 }
 
 /// GET /api/logs/stream — SSE endpoint for real-time audit log streaming.
@@ -6443,26 +6647,26 @@ pub async fn logs_stream(
     >(256);
 
     tokio::spawn(async move {
-        let mut last_seq: u64 = 0;
-        let mut first_poll = true;
+        // The last entry sent. None until the backfill has been sent.
+        let mut last_seq: Option<u64> = None;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit_log.recent(200);
+            // First the latest 200 as backfill, then everything after the
+            // last entry sent -- not the latest 200 again, which lost the
+            // entries in between whenever more than 200 came in a second.
+            let entries = match last_seq {
+                None => state.kernel.audit_log.recent(200),
+                Some(seq) => state.kernel.audit_log.since(seq, 1000),
+            };
 
             for entry in &entries {
-                // On first poll, send all existing entries as backfill.
-                // After that, only send entries newer than last_seq.
-                if !first_poll && entry.seq <= last_seq {
-                    continue;
-                }
-
                 let action_str = format!("{:?}", entry.action);
 
                 // Apply level filter
                 if !level_filter.is_empty() {
-                    let classified = classify_audit_level(&action_str);
+                    let classified = classify_audit_level(&action_str, &entry.outcome);
                     if classified != level_filter {
                         continue;
                     }
@@ -6494,9 +6698,8 @@ pub async fn logs_stream(
 
             // Update tracking state
             if let Some(last) = entries.last() {
-                last_seq = last.seq;
+                last_seq = Some(last.seq);
             }
-            first_poll = false;
         }
     });
 
@@ -6510,12 +6713,27 @@ pub async fn logs_stream(
         .into_response()
 }
 
-/// Classify an audit action string into a level (info, warn, error).
-fn classify_audit_level(action: &str) -> &'static str {
+/// Classify an audit entry into a level (info, warn, error).
+///
+/// By its outcome as well as its action: no action name contains "error",
+/// so going by the action alone, the ERROR filter never showed a failed
+/// message or tool call.
+fn classify_audit_level(action: &str, outcome: &str) -> &'static str {
     let a = action.to_lowercase();
-    if a.contains("error") || a.contains("fail") || a.contains("crash") || a.contains("denied") {
+    let o = outcome.to_lowercase();
+    if o.starts_with("error")
+        || o.contains("fail")
+        || a.contains("error")
+        || a.contains("fail")
+        || a.contains("crash")
+    {
         "error"
-    } else if a.contains("warn") || a.contains("block") || a.contains("kill") {
+    } else if o.starts_with("denied")
+        || a.contains("denied")
+        || a.contains("warn")
+        || a.contains("block")
+        || a.contains("kill")
+    {
         "warn"
     } else {
         "info"
@@ -7199,10 +7417,13 @@ pub async fn delete_session(
     };
 
     match state.kernel.memory.delete_session(session_id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "session_id": id})),
-        ),
+        Ok(()) => {
+            state.kernel.mark_conversation_ended(session_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "deleted", "session_id": id})),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -7702,16 +7923,10 @@ pub async fn list_models(
                     return false;
                 }
             }
-            if available_only {
-                let provider = catalog.get_provider(&m.provider);
-                if let Some(p) = provider {
-                    if p.auth_status == freeco_types::model_catalog::AuthStatus::Missing {
-                        return false;
-                    }
-                }
-                if catalog.is_served(&m.provider, &m.id) == Some(false) {
-                    return false;
-                }
+            // Only models that can be used now: a keyed provider with its key,
+            // or a keyless server that answered, and listed by that provider.
+            if available_only && !catalog.is_ready(m) {
+                return false;
             }
             true
         })
@@ -7727,11 +7942,7 @@ pub async fn list_models(
             // A provider that has never been probed answers None, and its
             // models stay available: hiding a model that works is worse than
             // showing one that might not.
-            let has_key = catalog
-                .get_provider(&m.provider)
-                .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
-            let available = has_key && catalog.is_served(&m.provider, &m.id) != Some(false);
+            let available = catalog.is_ready(m);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -7802,10 +8013,9 @@ pub async fn get_model(
         .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
         Some(m) => {
-            let available = catalog
-                .get_provider(&m.provider)
-                .map(|p| p.auth_status != freeco_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(m.tier == freeco_types::model_catalog::ModelTier::Custom);
+            // The same rule as the model list, so a model is not "available"
+            // here while /api/models?available=true leaves it out.
+            let available = catalog.is_ready(m);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -7902,12 +8112,13 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             entry["is_local"] = serde_json::json!(true);
             entry["reachable"] = serde_json::json!(probe.reachable);
             entry["latency_ms"] = serde_json::json!(probe.latency_ms);
+            // Record the answer whether or not it came: an offline server must
+            // drop out of the model pickers, not linger as "no key needed".
+            if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+                catalog.record_local_probe(&p.id, probe.reachable, &probe.discovered_models);
+            }
             if !probe.discovered_models.is_empty() {
                 entry["discovered_models"] = serde_json::json!(probe.discovered_models);
-                // Merge discovered models into the catalog so agents can use them
-                if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-                    catalog.merge_discovered_models(&p.id, &probe.discovered_models);
-                }
             }
             if let Some(err) = &probe.error {
                 entry["error"] = serde_json::json!(err);
@@ -8674,7 +8885,13 @@ pub async fn create_agent_session(
         }
     };
     let label = req.get("label").and_then(|v| v.as_str());
-    match state.kernel.create_agent_session(agent_id, label) {
+    // `"switch": false` opens the conversation without moving the agent's
+    // chat to it: what a channel gateway wants when it opens one per contact.
+    let switch_to = req.get("switch").and_then(|v| v.as_bool()).unwrap_or(true);
+    match state
+        .kernel
+        .create_agent_session_opts(agent_id, label, switch_to)
+    {
         Ok(session) => (StatusCode::OK, Json(session)),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9632,6 +9849,13 @@ pub async fn set_provider_key(
             })
     };
 
+    if let Err(e) = validate_secret_env_entry(&env_var, &key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
+
     // Store in vault (best-effort — no-op if vault not initialized)
     state.kernel.store_credential(&env_var, &key);
 
@@ -10015,12 +10239,14 @@ pub async fn set_provider_url(
 
     // Probe reachability at the new URL
     let probe = freeco_kernel_runtime::provider_health::probe_provider(&name, &base_url).await;
+    // The cache is keyed by provider, not URL. Without this, the settings
+    // page's immediate reload of /api/providers got the old URL's answer for
+    // up to a minute and recorded it over this one.
+    state.provider_probe_cache.insert(&name, probe.clone());
 
-    // Merge discovered models into catalog
-    if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
-        }
+    // Record reachability and the served model list, not only additions.
+    if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+        catalog.record_local_probe(&name, probe.reachable, &probe.discovered_models);
     }
 
     let mut resp = serde_json::json!({
@@ -10673,73 +10899,7 @@ fn atomic_write_toml(
 
 // ── Helper functions for secrets.env management ────────────────────────
 
-/// Write or update a key in the secrets.env file.
-/// File format: one `KEY=value` per line. Existing keys are overwritten.
-pub(crate) fn write_secret_env(
-    path: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> Result<(), std::io::Error> {
-    let mut lines: Vec<String> = if path.exists() {
-        std::fs::read_to_string(path)?
-            .lines()
-            .map(|l| l.to_string())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Remove existing line for this key
-    lines.retain(|l| !l.starts_with(&format!("{key}=")));
-
-    // Add new line
-    lines.push(format!("{key}={value}"));
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(path, lines.join("\n") + "\n")?;
-
-    // SECURITY (threat-model M2/M3): restrict the secrets file to the current user.
-    // Unix: set 0600 permissions. Windows: remove inherited ACEs and ensure the
-    // current user has Full Control. If hardening fails, return an error rather
-    // than leaving plaintext keys readable to other accounts.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(windows)]
-    {
-        let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
-            (Ok(domain), Ok(name)) if !name.is_empty() => format!(r"{domain}\\{name}"),
-            (_, Ok(name)) if !name.is_empty() => name,
-            _ => String::new(),
-        };
-        if !user.is_empty() {
-            let system_root =
-                std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-            let icacls = std::path::PathBuf::from(system_root)
-                .join("System32")
-                .join("icacls.exe");
-            let out = std::process::Command::new(icacls)
-                .arg(path)
-                .args(["/inheritance:r", "/grant:r", &format!("{user}:F")])
-                .output()
-                .map_err(|e| std::io::Error::other(format!("icacls failed: {e}")))?;
-            if !out.status.success() {
-                return Err(std::io::Error::other(format!(
-                    "icacls failed: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
+use freeco_types::secrets::{validate_secret_env_entry, write_secret_env};
 
 /// Remove a key from the secrets.env file.
 fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::Error> {
@@ -14408,37 +14568,64 @@ fn audit_to_comms_event(
     let action_str = format!("{:?}", entry.action);
     let (kind, detail, target_label) = match action_str.as_str() {
         "AgentMessage" => {
-            // Format detail: "tokens_in=X, tokens_out=Y" → readable summary
-            let detail = if entry.detail.starts_with("tokens_in=") {
-                let parts: Vec<&str> = entry.detail.split(", ").collect();
-                let in_tok = parts
-                    .first()
-                    .and_then(|p| p.strip_prefix("tokens_in="))
-                    .unwrap_or("?");
-                let out_tok = parts
-                    .get(1)
-                    .and_then(|p| p.strip_prefix("tokens_out="))
-                    .unwrap_or("?");
-                if entry.outcome == "ok" {
-                    format!("{} in / {} out tokens", in_tok, out_tok)
-                } else {
-                    format!(
-                        "{} in / {} out — {}",
-                        in_tok,
-                        out_tok,
-                        freeco_types::truncate_str(&entry.outcome, 80)
-                    )
+            // Detail is "key=value, ..." pairs: from=, from_id= (when the
+            // sender is known), then tokens_in=, tokens_out= or "agent loop
+            // failed". Older entries have no sender.
+            let mut from = None;
+            let mut from_id = None;
+            let mut tokens_in = None;
+            let mut tokens_out = None;
+            for part in entry.detail.split(", ") {
+                match part.split_once('=') {
+                    Some(("from", v)) => from = Some(v),
+                    Some(("from_id", v)) => from_id = Some(v),
+                    Some(("tokens_in", v)) => tokens_in = Some(v),
+                    Some(("tokens_out", v)) => tokens_out = Some(v),
+                    _ => {}
                 }
-            } else if entry.outcome != "ok" {
-                format!(
-                    "{} — {}",
-                    freeco_types::truncate_str(&entry.detail, 80),
+            }
+            let detail = match (tokens_in, tokens_out) {
+                (Some(i), Some(o)) if entry.outcome == "ok" => format!("{i} in / {o} out tokens"),
+                (Some(i), Some(o)) => format!(
+                    "{i} in / {o} out — {}",
                     freeco_types::truncate_str(&entry.outcome, 80)
-                )
-            } else {
-                freeco_types::truncate_str(&entry.detail, 200).to_string()
+                ),
+                _ if entry.outcome != "ok" => format!(
+                    "Failed — {}",
+                    freeco_types::truncate_str(&entry.outcome, 80)
+                ),
+                _ => freeco_types::truncate_str(&entry.detail, 200).to_string(),
             };
-            (CommsEventKind::AgentMessage, detail, "user")
+            match (from, from_id) {
+                // From an agent: draw it as sender → receiver.
+                (_, Some(fid)) if fid.starts_with("agent:") => {
+                    let sender = fid.trim_start_matches("agent:");
+                    return Some(CommsEvent {
+                        id: format!("audit-{}", entry.seq),
+                        timestamp: entry.timestamp.clone(),
+                        kind: CommsEventKind::AgentMessage,
+                        source_id: sender.to_string(),
+                        source_name: resolve_name(sender),
+                        target_id: entry.agent_id.clone(),
+                        target_name: resolve_name(&entry.agent_id),
+                        detail,
+                    });
+                }
+                // From a named person or service.
+                (Some(name), _) => {
+                    return Some(CommsEvent {
+                        id: format!("audit-{}", entry.seq),
+                        timestamp: entry.timestamp.clone(),
+                        kind: CommsEventKind::AgentMessage,
+                        source_id: from_id.unwrap_or_default().to_string(),
+                        source_name: name.to_string(),
+                        target_id: entry.agent_id.clone(),
+                        target_name: resolve_name(&entry.agent_id),
+                        detail,
+                    });
+                }
+                _ => (CommsEventKind::AgentMessage, detail, "user"),
+            }
         }
         "AgentSpawn" => (
             CommsEventKind::AgentSpawned,
@@ -14477,6 +14664,59 @@ fn audit_to_comms_event(
         },
         detail,
     })
+}
+
+#[cfg(test)]
+mod comms_log_tests {
+    use super::*;
+    use freeco_kernel_runtime::audit::{AuditAction, AuditLog};
+
+    fn message(detail: &str, outcome: &str) -> freeco_kernel_runtime::audit::AuditEntry {
+        let log = AuditLog::new();
+        log.record_entry("receiver-id", AuditAction::AgentMessage, detail, outcome)
+            .unwrap()
+    }
+
+    #[test]
+    fn an_agent_to_agent_message_is_drawn_from_sender_to_receiver() {
+        let e = message(
+            "from=Researcher, from_id=agent:sender-id, tokens_in=10, tokens_out=4",
+            "ok",
+        );
+        let ev = audit_to_comms_event(&e, &[]).unwrap();
+        assert_eq!(ev.source_id, "sender-id");
+        assert_eq!(ev.target_id, "receiver-id");
+        assert_eq!(ev.detail, "10 in / 4 out tokens");
+    }
+
+    #[test]
+    fn a_named_sender_is_shown_by_name() {
+        let e = message("from=Ana, from_id=wa:41, tokens_in=1, tokens_out=2", "ok");
+        let ev = audit_to_comms_event(&e, &[]).unwrap();
+        assert_eq!(ev.source_name, "Ana");
+        assert_eq!(ev.target_id, "receiver-id");
+    }
+
+    #[test]
+    fn older_entries_and_failures_still_read() {
+        let ev = audit_to_comms_event(&message("tokens_in=3, tokens_out=5", "ok"), &[]).unwrap();
+        assert_eq!(ev.target_name, "user");
+        assert_eq!(ev.detail, "3 in / 5 out tokens");
+        let ev = audit_to_comms_event(&message("agent loop failed", "error: rate limited"), &[])
+            .unwrap();
+        assert_eq!(ev.detail, "Failed — error: rate limited");
+    }
+
+    #[test]
+    fn failures_and_denials_get_their_level() {
+        assert_eq!(classify_audit_level("AgentMessage", "error: boom"), "error");
+        assert_eq!(classify_audit_level("ToolInvoke", "ok"), "info");
+        assert_eq!(
+            classify_audit_level("CapabilityCheck", "denied: no"),
+            "warn"
+        );
+        assert_eq!(classify_audit_level("AgentKill", "ok"), "warn");
+    }
 }
 
 /// GET /api/comms/events — Return recent inter-agent communication events.
@@ -14532,22 +14772,28 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         Result<axum::response::sse::Event, std::convert::Infallible>,
     >(256);
 
+    // Agent-to-agent messages, with their text, are on the event bus rather
+    // than in the audit trail. Subscribed from the moment the feed opens:
+    // polling the bus history lost whatever came beyond its window between
+    // two polls.
+    let mut bus = state.kernel.event_bus.subscribe_every();
+
     tokio::spawn(async move {
-        let mut last_seq: u64 = {
-            let entries = state.kernel.audit_log.recent(1);
-            entries.last().map(|e| e.seq).unwrap_or(0)
-        };
+        // Where the page's initial load (GET /api/comms/events) ends.
+        let mut last_seq: Option<u64> = state.kernel.audit_log.recent(1).last().map(|e| e.seq);
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
             let agents = state.kernel.registry.list();
-            let entries = state.kernel.audit_log.recent(50);
+            // Everything after the last entry seen. A fixed window of the
+            // latest 50 lost whatever came in a burst bigger than that.
+            let entries = match last_seq {
+                Some(seq) => state.kernel.audit_log.since(seq, 1000),
+                None => state.kernel.audit_log.recent(1000),
+            };
 
             for entry in &entries {
-                if entry.seq <= last_seq {
-                    continue;
-                }
                 if let Some(comms_event) = audit_to_comms_event(entry, &agents) {
                     let data = serde_json::to_string(&comms_event).unwrap_or_default();
                     if tx.send(Ok(Event::default().data(data))).await.is_err() {
@@ -14557,7 +14803,31 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
             }
 
             if let Some(last) = entries.last() {
-                last_seq = last.seq;
+                last_seq = Some(last.seq);
+            }
+
+            // This feed used to read only the trail, so agent messages
+            // appeared only after a reload.
+            loop {
+                let event = match bus.try_recv() {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                        // Their audit entries still reach the feed above, as
+                        // sender -> receiver without the preview.
+                        tracing::warn!(missed, "Comms feed fell behind the event bus");
+                        continue;
+                    }
+                    Err(_) => break, // Empty, or the bus is gone
+                };
+                if !matches!(event.payload, freeco_types::event::EventPayload::Message(_)) {
+                    continue;
+                }
+                if let Some(comms_event) = filter_to_comms_event(&event, &agents) {
+                    let data = serde_json::to_string(&comms_event).unwrap_or_default();
+                    if tx.send(Ok(Event::default().data(data))).await.is_err() {
+                        return; // Client disconnected
+                    }
+                }
             }
         }
     });
@@ -14628,7 +14898,12 @@ pub async fn comms_send(
         );
     }
 
-    match state.kernel.send_message(to_id, &req.message).await {
+    // As the sending agent, so the exchange shows who talked to whom.
+    match state
+        .kernel
+        .send_agent_message(from_id, to_id, &req.message, "comms_send")
+        .await
+    {
         Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -14898,7 +15173,7 @@ pub async fn auth_set_password(
         .unwrap_or("admin");
 
     if password_hash.is_empty() {
-        if !peer.ip().is_loopback() {
+        if !crate::middleware::from_this_device(peer.ip(), &headers) {
             return (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -14979,8 +15254,9 @@ pub async fn auth_set_password(
 pub async fn auth_disable(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if !peer.ip().is_loopback() {
+    if !crate::middleware::from_this_device(peer.ip(), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Only available from this device"})),
@@ -15831,6 +16107,37 @@ mod role_resolution_tests {
     fn unrecognized_role_string_defaults_to_user() {
         let users = vec![user("dave", "wizard", true)];
         assert_eq!(role_for("dave", "admin", &users), "user");
+    }
+}
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_newline_injection_in_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        let err =
+            write_secret_env(&path, "GROQ_API_KEY", "sk-x\nLD_PRELOAD=/tmp/evil.so").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_invalid_key_names() {
+        for key in ["", "A=B", "A\nB", "A B", "A\0B"] {
+            assert!(validate_secret_env_entry(key, "v").is_err(), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_normal_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.env");
+        write_secret_env(&path, "MY_PROVIDER_API_KEY", "sk-abc=123").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "MY_PROVIDER_API_KEY=sk-abc=123\n");
     }
 }
 
