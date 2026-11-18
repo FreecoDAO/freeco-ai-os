@@ -34,16 +34,17 @@ Everything in this document follows from four rules:
    stored-password login or a change to a node.
 4. **Each kind of recovery has its own path.** Recovering the account does not
    recover the node's keys, and neither one recovers the user's encrypted
-   data. For a node the user runs, only the user's Recovery Kit does that. A
-   hosted cell is different, and section 11 says how.
+   data. Only the user's passkeys and Recovery Kit do that, on a home node
+   and in a FreEco-hosted cell alike (section 11.1).
 
 This gives Fre.Eco a privacy story Instinct cannot match: Instinct keeps your
 credentials on a cloud computer it controls, while a Fre.Eco node keeps them
 on your own machine and only accepts the requests you allowed.
 
 The same protocol serves all three deployment modes (section 11): cloud only,
-hybrid, and fully sovereign. A FreEco-hosted workspace cell is simply a node
-that FreEco runs for you, connected the same way and labelled as hosted.
+hybrid, and fully sovereign. A FreEco-hosted cell is simply a node that FreEco
+runs for you, connected the same way, inside a sealed confidential machine
+that FreEco itself cannot look into.
 
 ---
 
@@ -91,9 +92,9 @@ request would look like the owner sitting at the machine.
                          ┌───────────┴────┐     ┌────────┴───────────────┐
                          │ Home node      │     │ Hosted node (cell)     │
                          │ agents, memory,│     │ same kernel, run by    │
-                         │ files, keys,   │     │ FreEco.ai, labelled    │
-                         │ local policy   │     │ "Hosted" on the device │
-                         └────────────────┘     │ page                   │
+                         │ files, keys,   │     │ FreEco.ai in a sealed  │
+                         │ local policy   │     │ confidential machine   │
+                         └────────────────┘     │ FreEco cannot read     │
                                                 └────────────────────────┘
 ```
 
@@ -817,7 +818,9 @@ Header `{ "typ": "freeco-node-cert+jwt", "alg": "ES256", "kid": "reg-2026-11" }`
 ```
 
 `kind` is `personal_node` (runs agents), `client` (phone or desktop app with
-no agents) or `hosted_node` (a cell FreEco runs). On receipt, the node checks
+no agents) or `hosted_node` (a cell FreEco runs). A `hosted_node` certificate
+also carries `"attested": { "measurement": "sha384:…", "log_index": 812 }`
+from its confidential machine (section 11.1). On receipt, the node checks
 that `cnf.jwk` and `enc` are its own keys and refuses a certificate that names
 anything else. The node renews it with
 `POST /v1/nodes/self/certificate` (DPoP plus assertion) from day 15.
@@ -1026,14 +1029,107 @@ use).
 
 | | Cloud only | Hybrid | Fully sovereign |
 |---|---|---|---|
-| Who runs the node | FreEco.ai (a hosted cell, labelled "Hosted by FreEco.ai in Geneva") | The user (home computer, laptop, Podman server), optionally plus a hosted cell | The user |
+| Who runs the node | FreEco.ai, as a sealed hosted cell in a confidential machine (section 11.1) | The user (home computer, laptop, Podman server), optionally plus a hosted cell | The user |
 | Registry | FreEco.ai | FreEco.ai | The node itself (section 6.4), or the organisation's own `freeco-cloud` |
 | Human login | Zitadel | Zitadel | Local password or passkey; an organisation's own OIDC provider |
-| Who can read the data | FreEco.ai's operations can, technically: the cell vault key is wrapped by the control plane master key (production plan, section 1B), and the cell's backup key is wrapped by that vault key, so FreEco can also restore a hosted cell's backups without the Recovery Kit. That is also what lets FreEco restore a cell after a server failure. Say so on the device page | Data on the home node: only the user. Data in a hosted cell: as in cloud only | Only the user |
+| Who can read the data | Only the user. FreEco runs the machine but cannot look into it, and cannot restore it without the user's passkey or Recovery Kit (section 11.1) | Only the user, on the home node and in a hosted cell alike | Only the user |
 | Channels | FreEco's shared numbers | Shared numbers routed to the node, or the node's own | The node's own |
 
 The protocol is the same in every column. Moving from cloud only to hybrid is
 "Add this computer"; moving to sovereign is unpairing and keeping the node.
+
+### 11.1 Hosted cells that FreEco cannot read
+
+Free's decision 5: FreEco may host a cell for users who will never run a
+computer of their own, but **FreEco must not be able to read it.** A hosted
+cell therefore gives the same privacy promise as a home node. The only
+difference is that FreEco runs the machine, so keeping it running is FreEco's
+job, while what is inside stays the user's.
+
+**What "cannot read" means.** Nobody at FreEco can read a cell's data or keys
+or restore its backups without the user. That includes someone with full
+control of the servers, the control plane, the relay and the backup store.
+FreEco can still switch a cell off, and it still sees metadata: that the cell
+exists, when it is busy, how much traffic it sends, and the account details
+the control plane needs for billing.
+
+**How it works:**
+
+1. **A confidential machine per cell.** Each cell runs in its own
+   confidential virtual machine (AMD SEV-SNP or Intel TDX). The CPU encrypts
+   its memory with keys the host cannot read, and the cell encrypts its own
+   disk. The hosting provider must offer such machines in Switzerland or the
+   EU, which needs checking before the provider is chosen.
+2. **A build anyone can check.** The cell runs a reproducible FreEco build.
+   Before any cell may run it, its measurement (the hash of firmware, kernel
+   and image) is published in an append-only transparency log, in the style of
+   Certificate Transparency. The CPU signs an attestation report that
+   contains that measurement and the cell's public keys.
+3. **The user's device checks before it trusts.** A cell pairs with the
+   account like any node. During pairing, the user's app also checks the
+   attestation report against the CPU vendor's certificate chain and the
+   transparency log, and only then gives the cell any key. The device page
+   shows "Sealed: confidential machine, build 0.10.2, log entry 812", and the
+   node certificate for a `hosted_node` carries the measurement and log entry
+   (section 7.2).
+4. **Keys only the user can open.** The cell makes its identity key and
+   encryption key inside the confidential machine. Its vault master key never
+   leaves the machine in the clear and is stored only wrapped:
+   - by the **Recovery Key**, for a restore from backup, as on a home node;
+   - by a key derived from each of the user's **passkeys** through the
+     WebAuthn PRF extension, so the user can unlock the cell again with one
+     tap;
+   - by a **sealing key the CPU derives** for this exact build on this exact
+     machine, so ordinary restarts unlock without the user.
+
+   The control plane master key wraps nothing in a cell. This replaces the
+   key design in section 1B of the production plan.
+5. **Moves and updates without the user, where it is safe.** When a cell moves
+   to another server or updates to a new build, the running cell checks the
+   new machine's attestation and hands its key over, sealed with HPKE to the
+   new machine's attested key. It hands over only to a build that has been in
+   the transparency log for at least 7 days, so outsiders can inspect it
+   first. A user who sets "Ask me before updates" approves each handover with
+   a passkey.
+6. **After a hardware failure** the old cell is gone, so nothing can hand
+   over. The user brings the cell back with one passkey tap, and the app
+   seals the unwrapped key to the new attested machine. Until then the cell
+   is paused, and messages for it queue sealed for up to 7 days (section 10,
+   rule 5).
+7. **Backups.** The backup key is wrapped by the cell's vault key, the
+   Recovery Key and the passkey-derived keys, and nothing else. FreEco stores
+   ciphertext only and cannot restore a cell on its own.
+8. **Model calls leave the cell directly.** A cell calls the model provider
+   over TLS straight from the confidential machine, not through a FreEco
+   proxy that could read the prompts. It reports token counts for billing,
+   signed with its key. The model provider still sees the prompt, as it would
+   for any cloud model, and the device page names the provider.
+9. **Support cannot look inside.** FreEco staff see health metrics and the
+   logs the cell exports, which never contain content. To get help with
+   something inside, the user grants a time-limited support session from
+   their device, which shows on the device page and can be revoked.
+
+**Limits to state plainly on the device page:**
+
+- The CPU vendor (AMD or Intel) and its attestation keys are trusted.
+- Side-channel attacks on confidential machines have been published. Cells
+  run only on CPUs whose firmware version in the attestation report is
+  current, and older versions are refused. This raises the bar a long way but
+  is not absolute, so a home node remains the strongest option.
+- Messages through FreEco's shared WhatsApp and Telegram numbers pass through
+  the channel gateway in plain text, because Meta and Telegram deliver them
+  that way (section 10, rule 6). The gateway forwards them sealed to the cell
+  and keeps nothing.
+- A provisional WhatsApp guest has no passkey or Recovery Kit yet. If their
+  cell's server fails outright, their history cannot come back, and the cell
+  starts fresh. The claim flow (section 6.2) invites the guest to add a
+  passkey, which closes this gap.
+
+**Cost.** A confidential machine per cell costs more than one shared server.
+Before launch, compare the price per cell with the Green plan. If it is too
+high, Green cells can share one confidential machine, each with its own data
+keys and only its own user's keys, while Executive and Elite cells keep a
+machine each.
 
 ---
 
@@ -1067,8 +1163,8 @@ The protocol is the same in every column. Moving from cloud only to hybrid is
   encrypts its data to the new node's encryption key, after approval on the
   old node.
 
-**Data recovery** (the old device is gone). These guarantees are for nodes
-the user runs; hosted cells follow section 11.
+**Data recovery** (the old device is gone). These guarantees hold for home
+nodes and hosted cells alike.
 
 - Backups a personal node uploads to the cloud are ciphertext only. The
   backup key is wrapped by the node's vault key and by the Recovery Key, and
@@ -1077,10 +1173,10 @@ the user runs; hosted cells follow section 11.
   everything. Without both the old node and the Recovery Kit, the data cannot
   be recovered, by anyone. The app says this in plain words when it shows the
   kit: "FreEco.ai cannot reset this. That is what keeps it yours."
-- A hosted cell's backups can be restored by FreEco.ai, because the control
-  plane can unwrap the cell's keys. A later option for users who want a hosted
-  cell without that: wrap the cell's backup key to the Recovery Key only, at
-  the cost that FreEco can no longer restore the cell for them.
+- A hosted cell's backups are protected the same way, with the user's
+  passkeys as a second way in. FreEco cannot restore them on its own. After a
+  server failure the user brings the cell back with one passkey tap
+  (section 11.1).
 - Later (Phase F), a 2-of-3 split of the Recovery Key between the paper kit, a
   trusted person and a safe place suits executive users who want no single
   point of loss.
@@ -1102,21 +1198,24 @@ is Phase 0.3 of the production plan.
 | **A. Node identity on the node** | Node key on first boot (hardware where available); `GET /api/node/identity` (id, fingerprint words, key protection); key-based local pairing (6.4) with device certificates; DPoP accepted by the API middleware; audit actions; new columns on `paired_devices` through a migration | New `freeco-kernel/src/node_identity.rs`; `pairing.rs`; `routes.rs` pairing handlers; `middleware.rs`; `freeco-memory/src/migration.rs`; `freeco-desktop` pairing screen | A phone pairs with X2's node over the LAN, its signed request works, and after removal the same request is refused (curl test). `cargo test` and clippy green | 1 to 2 weeks |
 | **B. Accounts and the node registry** | New `freeco-cloud` crate (axum): OIDC with Zitadel through a backend-for-frontend, passkeys, accounts and workspaces, terms records; registry tables; pairing start, lookup, approve and token; node token endpoint; trust document with the offline root key; device page with list, rename and revoke; role checks on every API route (Owner, Admin, User, Kid, Viewer from `tenancy.rs`), in the cloud and in the node's API; both pairing paths (6.3); both proof methods: DPoP, and mTLS with X.509 node certificates from the Node CA on the `mtls.` hosts; the two-part trust document with the root-signed key list, standby keys and the daily timestamp | New `crates/freeco-cloud`; the desktop app's sign-in reuses the loopback PKCE flow in `freeco-extensions/src/oauth.rs` (RFC 8252), while the web app keeps tokens server-side; shared types in a new small `freeco-identity` crate (ids, JWK thumbprint, DPoP create and verify, both node certificate forms, envelope, scopes) used by both node and cloud | The X2 node pairs with a staging account once by typed code and once by the app's code, and each time stays inactive until its owner confirms the account on the node; it shows on the device page; it gets tokens over DPoP and over mTLS, and a token bound to one method is refused on the other; a registration with a changed `enc_key` is refused; revoking it makes the next token request fail on both hosts; a Viewer session cannot call an Owner route | 4 to 5 weeks |
 | **C. Relay and local policy** | WebSocket relay with `hello` binding; signed envelopes; the node checks grants and policy; approvals round trip; web chat to the home Concierge; sealed queue; long-poll fallback; hosted cells connect the same way | `freeco-cloud` relay module; a node-link handler in `freeco-kernel` that calls the kernel directly (never through `127.0.0.1:4200`); `approval.rs` | From `app.freeco.ai`, chat with the Concierge on X2 behind NAT with no open port. A request the cloud allows but the node did not grant is refused by the node, and so is a tool call a relayed chat asks for outside its grants. A frame or approval decision altered in transit is refused. Revocation closes the socket within 5 s | 3 to 4 weeks |
+| **C2. Sealed hosted cells** | Confidential machines per cell (SEV-SNP or TDX); reproducible builds; the transparency log for build measurements; attestation checks in the app and in the running cell; vault key wrapped by passkey PRF, Recovery Key and CPU sealing key; key handover on moves and updates; passkey unlock after a failure; direct model calls with signed token counts; time-limited support sessions | `freeco-cloud` cell manager; new `freeco-attest` module in `freeco-identity`; `freeco-extensions/src/vault.rs` (wrapping); the build pipeline for reproducible images; phone and web app | A cell on a confidential test machine pairs only after the app has checked its attestation; an operator with root on the host cannot read its memory or disk, which is shown with a memory dump test; a restart unlocks by itself; a move to a second machine hands the key over with no user action; after the first machine is wiped, one passkey tap brings the cell back; a build not yet 7 days in the log is refused | 4 to 6 weeks |
 | **D. WhatsApp identity** | Cloud API webhook with signature check; channel links table; host invite codes; provisional accounts; claim link with reverse code; assurance levels enforced; routing to node or cell | `freeco-cloud` channel gateway; `freeco-channels/src/whatsapp.rs` (wire up the allowlist); `freeco-kernel/src/auth.rs` (bindings from links, with assurance) | A test guest scans a host QR code, chats, and claims the account with a passkey; a payment-class approval cannot be given from WhatsApp alone | 2 to 3 weeks, after Meta confirms eligibility |
 | **E. Recovery** | Several passkeys, with a second one asked for at sign-up; recovery codes; manual support recovery with a 72-hour wait, and no email-only path; recovery quarantine; Recovery Kit and encrypted cloud backups; node replacement and restore | `freeco-cloud`; `freeco-api/src/backup.rs` (encrypt snapshots with the backup key) | A node backup restores on a new machine with only the Recovery Kit; after an account recovery, nodes stay at status-only until confirmed on the node | 2 to 3 weeks |
 | **F. Hardening** | End-to-end signed approvals and approver lists; OFP between a user's nodes with node certificates instead of the shared secret; TPM and App Attest as extra trust signals; a self-hosted registry for sovereign organisations; 2-of-3 recovery | `freeco-wire/src/peer.rs`; `freeco-identity`; `freeco-cloud` | Each item with its own live test | Later, after paid launch |
 
-A to C are the critical path, about 8 to 11 weeks in total. Building both
-pairing paths and both proof methods in B adds about a week over a single
-path each. D can run beside
-C once B is done. E must be done before paid launch.
+A to C are the critical path for home nodes, about 8 to 11 weeks in total.
+Building both pairing paths and both proof methods in B adds about a week
+over a single path each. No hosted cell takes a real user before C2 is done,
+so cloud-only users and WhatsApp guests need A to C2, about 12 to 17 weeks.
+D can run beside C once B is done. E must be done before paid launch.
 
 **Where this sits in the development roadmap** (`/mnt/project-files/plans/dev-roadmap-2026-11.md`):
 all six phases are its Phase 2, after its Phase 1 (one conversation per
 person, WhatsApp closed by default). A is new there: it needs no cloud and can
 start as soon as Phase 1 lands. B covers roadmap steps 2.1 (accounts and
 passkeys), 2.2, 2.3, 2.4 and 2.6; C is 2.5; D is the channel part of 2.1; E is
-2.7; F follows Phase 4. Hosted cells reuse C, as the roadmap recommends.
+2.7; F follows Phase 4. Hosted cells reuse C, as the roadmap recommends, and
+C2 adds what makes them sealed.
 
 **Not touched:** `freeco-cli`, which Free is building by hand. Headless
 pairing runs from the dashboard and `POST /api/node/cloud/pair` on the local
@@ -1145,7 +1244,7 @@ or similar for the Node CA to issue certificates; `x509-parser` to check them.
 | The relay or API is put behind a third-party edge that ends TLS | mTLS stays on its own `mtls.` hosts at FreEco's ingress; DPoP hosts can sit behind any edge |
 | A node key is stolen from a software keystore | Revoke on the device page; prefer hardware keys; the device page shows key protection so the user can see which devices are weaker |
 | The relay or edge is compromised | Envelopes and approval decisions are signed with the request key, which the relay does not hold; every node frame is signed by the node and checked by the control plane with session, id and sequence; the registration payload is signed by the node key; trust documents carry a serial that only goes up; the node's grants still apply |
-| The control plane is compromised | It cannot widen node grants without local confirmation and cannot read a personal node's Recovery-Key-protected backups; from Phase F it cannot forge approvals either. Node policy remains the last word. Hosted cells are exposed, as section 11 says, which is why they are labelled |
+| The control plane is compromised | It cannot widen node grants without local confirmation and cannot read a personal node's Recovery-Key-protected backups; from Phase F it cannot forge approvals either. Node policy remains the last word. Hosted cells are protected too: their keys open only inside an attested confidential machine (section 11.1) |
 | SIM swap or a stolen phone | Channel identity tops out at `a1`; payments, credentials and node changes need a passkey |
 | Prompt injection asks the node to act | The envelope's `origin` and the agent's taint tracking both reach the approval, which shows where the instruction came from |
 | Replay of a request or proof | `jti` and request id caches (the existing `NonceTracker`), short `exp`, socket binding in `hello_ack` |
@@ -1154,7 +1253,9 @@ or similar for the Node CA to issue certificates; `x509-parser` to check them.
 | A hacked mailbox is used to take an account | There is no email-only recovery, so a mailbox alone opens nothing |
 | Someone talks support into a manual recovery | Identity check, then a 72-hour wait with notices to every device and channel, cancellable from any of them; recovery quarantine keeps every node at status-only until confirmed on the node |
 | Free, the only holder of the root key, cannot be reached | Emergencies never need the root key: the timestamp key revokes and standby keys take over (section 3.1). Planned signing happens weeks ahead, and each key list lasts 6 months. The backup key is sealed in a separate place, such as a bank safe deposit box, with a written procedure. Who may open it if Free cannot is worth writing into the company's papers |
-| Hosted cells are less private than home nodes | Labelled on the device page, with a one-tap path to add a home node |
+| FreEco, or someone inside FreEco, ships a build that leaks a cell's keys | Cells hand keys only to builds that have been in the public transparency log for 7 days, so anyone can inspect them first; users can choose "Ask me before updates" |
+| A flaw in confidential-computing hardware | Only CPUs with current firmware in the attestation report are accepted; the device page says plainly that this protection is strong but not absolute, and a home node stays the strongest option |
+| Confidential machines cost more per cell | Price per cell checked against the Green plan before launch; Green cells can share a confidential machine while Executive and Elite keep one each (section 11.1) |
 
 ---
 
@@ -1169,7 +1270,7 @@ says where each answer lives in this document.
 | 2 | Node authentication | **DPoP and mTLS, both from day one** | Sections 5.1, 6.5, 6.6 and 7.2: X.509 node certificates from a Node CA, `mtls.` hosts, certificate-bound tokens; Phase B instead of F |
 | 3 | Who issues node credentials | **Open.** Recommendation: FreEco.ai's own node registry; Zitadel for humans only | The document is written for the recommendation |
 | 4 | WhatsApp-first accounts | **Yes, as recommended:** through host invite codes, limited to `a1` until a passkey is added; unknown numbers get the introduction only | Sections 6.2 and 8, unchanged |
-| 5 | Hosted cells | **No** to hosted cells that FreEco can read. Free asked for a self-hosted option instead; its exact meaning is being pinned down (hosted but unreadable by FreEco, or self-hosted only) | Sections 3, 11 and 12 still describe readable hosted cells and will change once the meaning is settled |
+| 5 | Hosted cells | **Hosted, but FreEco cannot read it.** Free first said no to hosted cells that FreEco can read, then chose this: a cell runs as a node in a sealed confidential machine whose keys only the user can open | New section 11.1; sections 1, 3, 7.2, 11, 12 and 14; new Phase C2 |
 | 6 | Email-only account recovery | **No:** only a second passkey or a recovery code; a user who lost both goes through a manual support check | Section 12, Phase E, section 14 |
 | 7 | Who holds the offline root key | **Free alone**, on one hardware key plus a backup | Section 3.1: the trust document now has a root-signed key list and a daily part signed by an online timestamp key, with standby keys, so the root key is used about four times a year and never in an emergency |
 
@@ -1185,4 +1286,7 @@ says where each answer lives in this document.
 - JWT bearer assertions, RFC 7523; JWK thumbprint, RFC 7638; EdDSA in JOSE, RFC 8037
 - OpenID Connect Core 1.0; WebAuthn Level 3 (passkeys)
 - HPKE, RFC 9180
+- WebAuthn PRF extension (WebAuthn Level 3), for keys derived from passkeys
+- AMD SEV-SNP and Intel TDX attestation; a transparency log in the style of
+  Certificate Transparency, RFC 9162
 - OAuth 2.0 Protected Resource Metadata, RFC 9728 (for standard MCP clients at the MCP gateway)
