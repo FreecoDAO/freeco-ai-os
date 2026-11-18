@@ -133,24 +133,40 @@ has two parts, so the offline root key is needed rarely and never in a hurry:
   the list lasts 6 months and is re-signed every quarter, one missed signing
   stops nothing.
 - **The freshness part**, signed daily by the online trust timestamp key,
-  which is itself in the key list. It carries the `serial`, the dates, the
-  hash of the key list it goes with, and `revoked_kids`. It can revoke a key,
-  but it can never add one the root did not sign.
+  which is itself in the key list. It carries the `keys_serial` and hash of
+  the key list it goes with, its own `serial`, the dates, and `revoked_kids`.
+  It can revoke a key, but it can never add one the root did not sign.
 
-A stolen online key is therefore cut off within minutes, by a revocation from
-the timestamp key and a switch to the standby key, without anyone reaching for
-the root key. A forged trust document is rejected, because no key outside the
-root-signed list is ever accepted.
+When an online key other than the timestamp key leaks, the timestamp key
+revokes it and the service switches to its standby key, without anyone
+reaching for the root key. The cloud stops trusting the leaked key at once. A
+node drops it as soon as the relay pushes `trust_update`, and at the latest at
+its next daily fetch. If an attacker blocks a node's fetches, the node stops
+accepting cloud requests when its stored freshness part expires, 7 days after
+issue. A leaked timestamp key is the one case that needs the root key
+(section 6.10). A forged trust document is rejected, because no key outside
+the root-signed list is ever accepted.
 
 A valid signature proves the document is genuine, not that it is current, so
 nodes also check freshness:
 
-- Every document has a `serial` that only goes up, and so does the key list's
-  `keys_serial`. The node stores the highest of each it has accepted and
-  refuses anything lower, so a relay or edge cannot replay an older document
-  that still lists a leaked key.
-- Every `kid` the node has ever seen in `revoked_kids` stays revoked locally,
-  whatever a later document says.
+- The key list's `keys_serial` only goes up, and the node refuses a lower one.
+  The freshness part's `serial` only goes up **within one key list**: the
+  node stores the pair (`keys_serial`, `serial`) it last accepted and refuses
+  a document whose pair is lower, comparing `keys_serial` first. A relay or
+  edge therefore cannot replay an older document that still lists a leaked
+  key. A newer root-signed key list also resets the freshness counter, so a
+  thief who signed a freshness part with a huge `serial` cannot lock nodes
+  out once Free has signed a new list without the stolen timestamp key.
+- The node accepts a freshness part only if its `keys_serial` and `keys_hash`
+  match the key list in the same document, and its signer is an active
+  `trust-timestamp` key in that list.
+- A `kid` revoked by the root stays revoked for good. A `kid` revoked by the
+  timestamp key also stays revoked locally, whatever a later freshness part
+  says, until a newer root-signed key list lists it as active again, which
+  only Free can do. That keeps a thief's revocations from outliving a
+  recovery. Production `kid`s carry a random suffix, so nobody can revoke a
+  future key in advance.
 - The freshness part is valid until its `expires_at`, 7 days after issue, and
   the key list until its own `expires_at`. If the node cannot fetch a newer
   one by then, it keeps working locally but refuses cloud requests until it
@@ -177,13 +193,14 @@ nodes also check freshness:
     ],
     "sig": "<JWS by the root key over keys_doc without sig>"
   },
+  "keys_serial": 5,
   "serial": 42,
   "issued_at": "2026-11-15T00:00:00Z",
   "next_update": "2026-11-16T00:00:00Z",
   "expires_at": "2026-11-22T00:00:00Z",
   "keys_hash": "sha256:9b1e…",
   "revoked_kids": [],
-  "sig": "<JWS by the trust timestamp key over serial, dates, keys_hash and revoked_kids>"
+  "sig": "<JWS by the trust timestamp key over keys_serial, serial, dates, keys_hash and revoked_kids>"
 }
 ```
 
@@ -779,7 +796,7 @@ PUT  /v1/devices/{node_id}/grants      { "add": ["node.files:read:~/Documents/Fr
 | Lost or stolen device | Same as removal | Local data stays encrypted at rest with the device-bound key. A remote wipe request is delivered if the device ever reconnects. The device page says plainly that this is best effort |
 | Sign out everywhere | `POST /v1/account/sessions:revoke-all` | Ends web and app sessions and refresh tokens. **Nodes stay paired**: they are devices, not sessions. "Remove all devices" is a separate button |
 | A cloud signing key leaks | The trust timestamp key adds the leaked `kid` to `revoked_kids`, and the service switches to its standby key (section 3.1). No root signature is needed | Nodes drop the old `kid` on their next daily fetch, or at once when the relay pushes `{ "t": "trust_update" }`. Free signs a new key list with a fresh standby key at the next opportunity |
-| The trust timestamp key leaks | Free signs a new key list with a new timestamp key and revokes the old one | Until then the thief cannot add a key, only revoke keys (an outage, not a takeover) or hold back a new revocation from nodes that have not seen it yet |
+| The trust timestamp key leaks | Free signs a new key list with a new timestamp key and revokes the old one | Until then the thief cannot add a key, only revoke keys (an outage, not a takeover) or hold back a new revocation from nodes that have not seen it yet. Once the new list is out, the thief's freshness parts and revocations stop counting (section 3.1) |
 
 Other nodes and the phone app check certificates offline against
 `GET /v1/nodes/revocations`, a registry-signed list with `next_update` one hour
@@ -1252,7 +1269,7 @@ or similar for the Node CA to issue certificates; `x509-parser` to check them.
 | The user loses everything | Two passkeys and recovery codes for the account, asked for at sign-up; a manual support check as the last way back in; the Recovery Kit for data; clear words up front that the data cannot be recovered without it |
 | A hacked mailbox is used to take an account | There is no email-only recovery, so a mailbox alone opens nothing |
 | Someone talks support into a manual recovery | Identity check, then a 72-hour wait with notices to every device and channel, cancellable from any of them; recovery quarantine keeps every node at status-only until confirmed on the node |
-| Free, the only holder of the root key, cannot be reached | Emergencies never need the root key: the timestamp key revokes and standby keys take over (section 3.1). Planned signing happens weeks ahead, and each key list lasts 6 months. The backup key is sealed in a separate place, such as a bank safe deposit box, with a written procedure. Who may open it if Free cannot is worth writing into the company's papers |
+| Free, the only holder of the root key, cannot be reached | Only a leaked timestamp key needs the root key. Every other leaked key is revoked by the timestamp key and replaced by its standby (section 3.1). Planned signing happens weeks ahead, and each key list lasts 6 months. The backup key is sealed in a separate place, such as a bank safe deposit box, with a written procedure. Who may open it if Free cannot is worth writing into the company's papers |
 | FreEco, or someone inside FreEco, ships a build that leaks a cell's keys | Cells hand keys only to builds that have been in the public transparency log for 7 days, so anyone can inspect them first; users can choose "Ask me before updates" |
 | A flaw in confidential-computing hardware | Only CPUs with current firmware in the attestation report are accepted; the device page says plainly that this protection is strong but not absolute, and a home node stays the strongest option |
 | Confidential machines cost more per cell | Price per cell checked against the Green plan before launch; Green cells can share a confidential machine while Executive and Elite keep one each (section 11.1) |
@@ -1272,7 +1289,7 @@ says where each answer lives in this document.
 | 4 | WhatsApp-first accounts | **Yes, as recommended:** through host invite codes, limited to `a1` until a passkey is added; unknown numbers get the introduction only | Sections 6.2 and 8, unchanged |
 | 5 | Hosted cells | **Hosted, but FreEco cannot read it.** Free first said no to hosted cells that FreEco can read, then chose this: a cell runs as a node in a sealed confidential machine whose keys only the user can open | New section 11.1; sections 1, 3, 7.2, 11, 12 and 14; new Phase C2 |
 | 6 | Email-only account recovery | **No:** only a second passkey or a recovery code; a user who lost both goes through a manual support check | Section 12, Phase E, section 14 |
-| 7 | Who holds the offline root key | **Free alone**, on one hardware key plus a backup | Section 3.1: the trust document now has a root-signed key list and a daily part signed by an online timestamp key, with standby keys, so the root key is used about four times a year and never in an emergency |
+| 7 | Who holds the offline root key | **Free alone**, on one hardware key plus a backup | Section 3.1: the trust document now has a root-signed key list and a daily part signed by an online timestamp key, with standby keys, so the root key is used about four times a year, and in an emergency only when the timestamp key itself leaks |
 
 ---
 
