@@ -1,7 +1,8 @@
 # FreEco.ai identity and node pairing protocol
 
-_Design draft v0.1, 2026-11-15. Status: proposal for Free to review. Nothing
-here is built yet. Code references are to `main` at d382cea (v0.9.8) unless a
+_Design draft v0.2, 2026-11-18. Status: proposal. Free's answers to six of the
+seven decisions are worked in (section 15); who issues node credentials is
+still open. Nothing here is built yet. Code references are to `main` at d382cea (v0.9.8) unless a
 branch is named. Domain names such as `app.freeco.ai` are placeholders until
 the production hosts are chosen. Sizes in section 13 are estimates, not
 measurements._
@@ -63,7 +64,7 @@ shared identity model.
 | Local policy | Approvals with Low/Medium/High/Critical risk (`freeco-kernel/src/approval.rs`, `freeco-types/src/approval.rs`), per-agent capabilities (`capabilities.rs`) | This is the node's policy engine. Cloud requests carry a risk class that maps straight onto `RiskLevel` |
 | Audit | Merkle hash chain (`freeco-kernel-runtime/src/audit.rs`) | New actions: `NodePaired`, `NodeRevoked`, `CloudRequest`, `GrantChanged`, `ApprovalProof` |
 | WhatsApp | Cloud API adapter has an allowlist that is never called (`freeco-channels/src/whatsapp.rs`, `is_allowed` is dead code). The Baileys gateway gains `WHATSAPP_ALLOWED_NUMBERS` / `WHATSAPP_ALLOWED_GROUPS` and one conversation per contact on branch `claude/project-thread-antq0c` (c6afffe), not yet merged | The allowlist becomes per-node policy. In the cloud, numbers map to accounts through verified channel links (section 8) |
-| Desktop app | Tauri app with tray and updater (`freeco-desktop`) | Shows the pairing code, the node fingerprint and the local permission screen |
+| Desktop app | Tauri app with tray and updater (`freeco-desktop`) | Shows its own pairing code or takes the code the app shows, plus the node fingerprint and the local permission screen |
 
 One rule from the current code matters for the relay: several handlers trust
 a loopback caller as the owner (for example `auth_disable` in `routes.rs`, and
@@ -113,45 +114,80 @@ The cloud uses separate keys so that one leak does not give everything:
 
 | Key | Signs | Rotation |
 |---|---|---|
-| Registry token key | Node access tokens and node certificates | Every 90 days. The retired key signs nothing new but stays in the trust document as verify-only for 31 days, longer than the longest certificate it signed (30 days) plus clock skew |
+| Registry token key | Node access tokens and JWT node certificates | Every 90 days. The retired key signs nothing new but stays in the trust document as verify-only for 31 days, longer than the longest certificate it signed (30 days) plus clock skew |
+| Node CA key | X.509 node certificates for mTLS (section 7.2) | Every 90 days, verify-only for 31 days after, like the registry token key |
 | Request key | Every cloud-to-node request envelope and approval decision | Every 90 days, verify-only for 1 day after (envelopes live 60 s) |
+| Trust timestamp key (online, in the control plane's key store) | Only the daily freshness part of the trust document: serial, dates and revocations | Every 90 days. It can take trust away but never add a key |
 | Zitadel keys | Human ID and access tokens | Managed by Zitadel |
-| **Root key** (offline, two hardware tokens held by two people in separate places) | Only the trust document listing the keys above | Rare; used for emergency rotation |
+| **Root key** (offline; held by Free on one hardware security key, with a backup key sealed in a separate safe place) | Only the key list in the trust document | About four times a year, a few weeks ahead of each planned rotation, and to replace a leaked timestamp key |
 
 Nodes pin the root public key in the binary and fetch
 `GET https://api.freeco.ai/.well-known/freeco-trust.json` daily. The document
-is signed by the root key, so a stolen online key can be replaced without
-shipping a new app, and a forged trust document is rejected.
+has two parts, so the offline root key is needed rarely and never in a hurry:
+
+- **The key list**, signed by the root key. It names every cloud key with its
+  use and status, valid for 6 months. Each quarterly list already holds the
+  keys for the next rotation, and one **standby** key for each use whose
+  private half stays disabled in the key store until it is needed. Because
+  the list lasts 6 months and is re-signed every quarter, one missed signing
+  stops nothing.
+- **The freshness part**, signed daily by the online trust timestamp key,
+  which is itself in the key list. It carries the `serial`, the dates, the
+  hash of the key list it goes with, and `revoked_kids`. It can revoke a key,
+  but it can never add one the root did not sign.
+
+A stolen online key is therefore cut off within minutes, by a revocation from
+the timestamp key and a switch to the standby key, without anyone reaching for
+the root key. A forged trust document is rejected, because no key outside the
+root-signed list is ever accepted.
 
 A valid signature proves the document is genuine, not that it is current, so
 nodes also check freshness:
 
-- Every document has a `serial` that only goes up. The node stores the
-  highest serial it has accepted and refuses any document with a lower one,
-  so a relay or edge cannot replay an older document that still lists a
-  leaked key.
+- Every document has a `serial` that only goes up, and so does the key list's
+  `keys_serial`. The node stores the highest of each it has accepted and
+  refuses anything lower, so a relay or edge cannot replay an older document
+  that still lists a leaked key.
 - Every `kid` the node has ever seen in `revoked_kids` stays revoked locally,
   whatever a later document says.
-- A document is valid until its `expires_at`, 7 days after issue. If the node
-  cannot fetch a newer one by then, it keeps working locally but refuses
-  cloud requests until it can (section 10).
+- The freshness part is valid until its `expires_at`, 7 days after issue, and
+  the key list until its own `expires_at`. If the node cannot fetch a newer
+  one by then, it keeps working locally but refuses cloud requests until it
+  can (section 10).
+- Nodes accept a signature only from a key whose `use` matches the job: a
+  `node-request` key cannot sign a node certificate, and the timestamp key
+  signs nothing but the freshness part.
 
 ```json
 {
-  "v": 1,
+  "v": 2,
+  "keys_doc": {
+    "keys_serial": 5,
+    "issued_at": "2026-11-01T00:00:00Z",
+    "expires_at": "2027-05-01T00:00:00Z",
+    "keys": [
+      { "kid": "reg-2026-11", "use": "node-token", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+      { "kid": "reg-2026-08", "use": "node-token", "status": "verify_only", "verify_until": "2026-12-16T00:00:00Z", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+      { "kid": "reg-2027-02", "use": "node-token", "status": "next", "not_before": "2027-02-01T00:00:00Z", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+      { "kid": "reg-standby-1", "use": "node-token", "status": "standby", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+      { "kid": "nca-2026-11", "use": "node-ca", "status": "active", "x5c": ["<DER, base64>"] },
+      { "kid": "req-2026-11", "use": "node-request", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
+      { "kid": "ts-2026-11", "use": "trust-timestamp", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" }
+    ],
+    "sig": "<JWS by the root key over keys_doc without sig>"
+  },
   "serial": 42,
   "issued_at": "2026-11-15T00:00:00Z",
   "next_update": "2026-11-16T00:00:00Z",
   "expires_at": "2026-11-22T00:00:00Z",
-  "keys": [
-    { "kid": "reg-2026-11", "use": "node-token", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
-    { "kid": "reg-2026-08", "use": "node-token", "status": "verify_only", "verify_until": "2026-12-16T00:00:00Z", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" },
-    { "kid": "req-2026-11", "use": "node-request", "status": "active", "kty": "EC", "crv": "P-256", "x": "…", "y": "…" }
-  ],
+  "keys_hash": "sha256:9b1e…",
   "revoked_kids": [],
-  "sig": "<JWS by the root key over the canonical JSON above>"
+  "sig": "<JWS by the trust timestamp key over serial, dates, keys_hash and revoked_kids>"
 }
 ```
+
+The list above is abridged: the real one also carries the next and standby
+keys for the Node CA, request and timestamp uses.
 
 ---
 
@@ -178,7 +214,7 @@ list rather than BIP-39, so nobody mistakes it for a wallet seed.
 
 | Key | Type | Where | Purpose |
 |---|---|---|---|
-| **Node identity key** | P-256 (ES256) when hardware-backed; Ed25519 (EdDSA) in software | Windows TPM through CNG, macOS and iOS Secure Enclave, Android StrongBox or Keystore; otherwise the OS keyring, like the vault key | Signs DPoP proofs, the registration payload, token assertions and every frame the node sends. Never exported |
+| **Node identity key** | P-256 (ES256) when hardware-backed; Ed25519 (EdDSA) in software | Windows TPM through CNG, macOS and iOS Secure Enclave, Android StrongBox or Keystore; otherwise the OS keyring, like the vault key | Signs DPoP proofs, the TLS handshake when the node uses mTLS, the registration payload, token assertions and every frame the node sends. Never exported |
 | **Node encryption key** | X25519 | Wrapped by the vault master key | Receives sealed messages and queued jobs (HPKE, RFC 9180) |
 | Vault master key | AES-256 | OS keyring (exists today) | Protects local secrets |
 | Data keys | AES-256-GCM | Wrapped by the vault key | Encrypt databases and backup snapshots |
@@ -208,8 +244,8 @@ There is no universal token. Each credential does one job.
 | # | Credential | Format | Held by | Lifetime | Bound to | Revoked by |
 |---|---|---|---|---|---|---|
 | 1 | **Web session** | Opaque `__Host-freeco_sess` cookie (HttpOnly, Secure, SameSite=Lax) plus a CSRF token, as `csrf.rs` does now | Browser | Idle 12 h, absolute 14 days | The backend-for-frontend's session record | Sign out, "sign out everywhere", account recovery |
-| 2 | **Cloud access token** | JWT from Zitadel (humans) or the registry (nodes), audience-restricted | The web backend, the phone app, a node | 10 minutes | DPoP key for apps and nodes (`cnf.jkt`) | Expiry; node status checked on every relay request |
-| 3 | **Node credential** | The node identity key, plus a **node certificate** (a registry-signed JWT) | Node | Key: until revoked. Certificate: 30 days, renewed from day 15 | The node's public key | Device page, self-unpair, registry revocation list |
+| 2 | **Cloud access token** | JWT from Zitadel (humans) or the registry (nodes), audience-restricted | The web backend, the phone app, a node | 10 minutes | The DPoP key for apps and nodes (`cnf.jkt`), or the node's X.509 certificate (`cnf.x5t#S256`) when a node uses mTLS | Expiry; node status checked on every relay request |
+| 3 | **Node credential** | The node identity key, plus a **node certificate** in two forms for the same key: a registry-signed JWT and an X.509 certificate from the Node CA (section 7.2) | Node | Key: until revoked. Certificate: 30 days, renewed from day 15 | The node's public key | Device page, self-unpair, registry revocation list |
 | 4 | **Local encryption keys** | Section 4.2 | Node, and paper for the Recovery Key | Until the user rotates them | The device and the user | Only the user |
 
 Around these sit a few short-lived values:
@@ -221,7 +257,7 @@ Around these sit a few short-lived values:
 | Node token assertion (RFC 7523) | At most 60 s, single-use `jti` |
 | DPoP proof | `iat` within ±60 s; `jti` cached 5 minutes |
 | Pairing user code | 10 minutes, single use, 5 wrong attempts |
-| QR pairing offer | 5 minutes (the current `token_expiry_secs` default) |
+| Pairing offer from the app (QR or typed code) | 5 minutes (the current `token_expiry_secs` default) |
 | Cloud-to-node request envelope | Must be accepted within 60 s; a stream may then run until done |
 | Approval request | 4 h default, 24 h maximum (the existing `ApprovalPolicy.timeout_secs`) |
 | Channel link code, claim link | 10 and 15 minutes, single use |
@@ -236,11 +272,25 @@ Around these sit a few short-lived values:
   injected into the page has no token to steal.
 - **Phone and desktop apps** use Authorization Code with PKCE through the
   system browser (RFC 8252), with DPoP-bound tokens.
-- **Nodes use DPoP (RFC 9449), not bearer tokens.** A stolen node token is
-  useless without the node's private key. DPoP works at the HTTP layer, so it
-  survives an edge proxy or web application firewall that terminates TLS.
-  Mutual TLS would not, which is why mTLS is kept as an option for enterprise
-  relays behind FreEco's own ingress (Phase F).
+- **Nodes prove possession of their key on every request, in either of two
+  equal ways**, both built and tested from Phase B (Free's decision 2):
+  - **DPoP (RFC 9449).** The node signs a proof for each HTTP request. It
+    works at the HTTP layer, so it survives an edge proxy, CDN or web
+    application firewall that terminates TLS.
+  - **Mutual TLS with certificate-bound tokens (RFC 8705).** The node presents
+    its X.509 node certificate in the TLS handshake, and its tokens are bound
+    to that certificate. This suits organisations whose security teams ask for
+    mTLS. It needs TLS to end at FreEco's own ingress, so it has its own
+    hosts, `mtls.api.freeco.ai` and `mtls.relay.freeco.ai`, with no
+    third-party edge in front.
+
+  Both rest on the same node key, so a stolen node token is useless without
+  it either way. A token is bound to one method and is refused on the other.
+  The node chooses with `[cloud] proof = "auto" | "dpop" | "mtls"`. `auto`
+  tries mTLS first and falls back to DPoP when a TLS-inspecting proxy on the
+  user's network breaks the handshake. The fallback loses nothing, because
+  DPoP is bound to the same key, and the device page shows which method is in
+  use. Phone and desktop apps use DPoP only.
 - **Nodes need no refresh token.** A node mints a new 10-minute access token
   whenever it needs one by signing an assertion with its key. The only
   long-lived secret is the key itself, which stays in hardware where possible.
@@ -305,12 +355,17 @@ account at that moment, so a forwarded link alone cannot take the account.
 
 ### 6.3 Pairing a node with the account
 
-Two entry points, one result. Both bind the pairing to the node's key from the
-first message, so a stolen code is useless to any other device.
+There are two entry points, equal in standing (Free's decision 1), and both
+lead to the same result. Every pairing screen, on the node and in the app,
+offers both, "Show a code" and "Scan or enter a code", so the user picks
+whichever suits the device. Both bind the pairing to the node's key from the
+first message, so a stolen code is useless to any other device. Both are built
+and live-tested in Phase B.
 
-**A. The node shows a code** (default; headless Podman nodes, the dashboard).
-This follows the OAuth Device Authorization Grant (RFC 8628), with every
-request DPoP-signed by the node key.
+**A. The node shows a code, and the user enters it in the app.** This suits
+headless Podman nodes and any device without a camera. It follows the OAuth
+Device Authorization Grant (RFC 8628), with every request DPoP-signed by the
+node key.
 
 ```http
 POST /v1/node-pairing/start
@@ -397,21 +452,26 @@ DPoP: <proof, htm=POST, htu=https://api.freeco.ai/v1/node-pairing/token>
   "account_id": "usr_01H…",
   "workspace_id": "ws_01H…",
   "node_certificate": "eyJ0eXAiOiJmcmVlY28tbm9kZS1jZXJ0K2p3dCIs…",
+  "node_certificate_x509": "-----BEGIN CERTIFICATE-----\nMIIB…",
   "access_token": "eyJ…",
   "token_type": "DPoP",
   "expires_in": 600,
   "proposed_grants": ["node.status:read", "node.chat:relay", "node.agents:read", "node.approvals:relay"],
   "cloud_scopes": ["cloud.llm:invoke", "cloud.research:invoke", "cloud.channels:send", "cloud.channels:receive"],
-  "relay_url": "wss://relay.freeco.ai/v1/node/connect"
+  "relay_url": "wss://relay.freeco.ai/v1/node/connect",
+  "relay_url_mtls": "wss://mtls.relay.freeco.ai/v1/node/connect"
 }
 ```
 
-**B. The cloud shows a QR code** (desktop app and phone app). The web app
-calls `POST /v1/pairing/offers` and shows a QR code for
-`freeco://pair?c=7Q4M-2KXH&h=api.freeco.ai`, valid 5 minutes. The node scans
-or pastes it and calls `POST /v1/node-pairing/claim` with the same signed
-`registration`, whose payload also carries `"offer_code"` and the `claim`
-URL as `aud`. The web page then shows the node's details and
+**B. The app shows a code, and the user enters it on the node.** This suits
+the desktop app, the phone app and any device with a camera. The web or phone
+app calls `POST /v1/pairing/offers` and shows a QR code for
+`freeco://pair?c=7Q4M-2KXH&h=api.freeco.ai`, valid 5 minutes, with the short
+code `7Q4M-2KXH` printed under it. The node scans the QR code, or the user
+types the short code into the node's pairing screen, so B works on a headless
+node too. The node then calls `POST /v1/node-pairing/claim` with the same
+signed `registration`, whose payload also carries `"offer_code"` and the
+`claim` URL as `aud`. The web page then shows the node's details and
 fingerprint words for the user to confirm, exactly as in A, and the node polls
 the same token endpoint.
 
@@ -501,6 +561,14 @@ The scope is the intersection of what the node asked for, what the user
 granted, and what the plan includes (section 9). A revoked node gets
 `invalid_grant`.
 
+**Over mTLS** the node sends the same request to
+`https://mtls.api.freeco.ai/v1/nodes/token`, with its X.509 node certificate
+in the TLS handshake and no `DPoP` header. The assertion stays, so minting has
+one code path and a misconfigured ingress cannot quietly skip the key check.
+The token then carries `"cnf": { "x5t#S256": "<SHA-256 of the certificate>" }`
+instead of `jkt`. It is sent as `Authorization: Bearer` and accepted only on a
+connection that presents the same certificate.
+
 ### 6.6 The outbound connection
 
 ```http
@@ -512,8 +580,13 @@ Authorization: DPoP eyJ…(access token)
 DPoP: eyJ…(proof with htm=GET, htu=https://relay.freeco.ai/v1/node/connect, ath=<hash of token>)
 ```
 
-Once open, both sides bind the socket to the key, so a copied token cannot be
-replayed on another connection:
+Over mTLS the node connects to `wss://mtls.relay.freeco.ai/v1/node/connect`
+instead, with its certificate in the handshake, `Authorization: Bearer <token>`
+and no `DPoP` header. The relay checks that the token's `x5t#S256` matches the
+certificate presented.
+
+Once open, in either mode, both sides bind the socket to the key, so a copied
+token cannot be replayed on another connection:
 
 ```json
 relay → node  { "t": "hello", "session": "rs_01JD…", "nonce": "Zq3…", "server_time": "2026-11-15T19:40:02Z", "trust_epoch": 7 }
@@ -531,8 +604,8 @@ node → relay  { "t": "hello_ack", "session": "rs_01JD…", "sig": "<node-key J
   `4503` relay restarting. The node reconnects with jittered backoff from 1 s
   to 60 s.
 - Where a network blocks WebSockets, the node long-polls
-  `POST https://relay.freeco.ai/v1/node/jobs:poll` with the same token and
-  proof.
+  `POST https://relay.freeco.ai/v1/node/jobs:poll` (or its `mtls.` twin) with
+  the same token and proof or certificate.
 
 ### 6.7 A request from the cloud to a node
 
@@ -700,11 +773,12 @@ PUT  /v1/devices/{node_id}/grants      { "add": ["node.files:read:~/Documents/Fr
 
 | Trigger | Endpoint | What happens |
 |---|---|---|
-| User removes a device | `POST /v1/devices/{node_id}/revoke` with a passkey from the last 10 minutes | Status becomes `revoked`, `rev_epoch` goes up, the relay closes the socket with `4403` within 5 s, token minting refuses, pending requests are cancelled, the node certificate goes on the revocation list, channels routed to it fall back to the user's other choice, and every other device and the user's email get "Work laptop was removed by you at 21:04" |
+| User removes a device | `POST /v1/devices/{node_id}/revoke` with a passkey from the last 10 minutes | Status becomes `revoked`, `rev_epoch` goes up, the relay closes the socket with `4403` within 5 s, token minting refuses, pending requests are cancelled, both forms of the node certificate go on the revocation list, channels routed to it fall back to the user's other choice, and every other device and the user's email get "Work laptop was removed by you at 21:04" |
 | Node unpairs itself | `DELETE /v1/nodes/self` (DPoP) | The same, with reason `self` |
 | Lost or stolen device | Same as removal | Local data stays encrypted at rest with the device-bound key. A remote wipe request is delivered if the device ever reconnects. The device page says plainly that this is best effort |
 | Sign out everywhere | `POST /v1/account/sessions:revoke-all` | Ends web and app sessions and refresh tokens. **Nodes stay paired**: they are devices, not sessions. "Remove all devices" is a separate button |
-| A cloud signing key leaks | New trust document signed by the root key | Nodes drop the old `kid` on their next daily fetch, or at once when the relay pushes `{ "t": "trust_update" }` |
+| A cloud signing key leaks | The trust timestamp key adds the leaked `kid` to `revoked_kids`, and the service switches to its standby key (section 3.1). No root signature is needed | Nodes drop the old `kid` on their next daily fetch, or at once when the relay pushes `{ "t": "trust_update" }`. Free signs a new key list with a fresh standby key at the next opportunity |
+| The trust timestamp key leaks | Free signs a new key list with a new timestamp key and revokes the old one | Until then the thief cannot add a key, only revoke keys (an outage, not a takeover) or hold back a new revocation from nodes that have not seen it yet |
 
 Other nodes and the phone app check certificates offline against
 `GET /v1/nodes/revocations`, a registry-signed list with `next_update` one hour
@@ -747,6 +821,25 @@ no agents) or `hosted_node` (a cell FreEco runs). On receipt, the node checks
 that `cnf.jwk` and `enc` are its own keys and refuses a certificate that names
 anything else. The node renews it with
 `POST /v1/nodes/self/certificate` (DPoP plus assertion) from day 15.
+
+**X.509 form, for mTLS.** Issued together with the JWT form, for the same key
+and the same 30 days, by the Node CA (`nca-…` in the trust document):
+
+| Field | Value |
+|---|---|
+| Subject | `CN=nod_k3f9q2…` |
+| Subject Alternative Name | URI `urn:freeco:node:nod_k3f9q2…` |
+| Public key | The node identity key (P-256 or Ed25519) |
+| Extended key usage | `clientAuth` only |
+| Validity | 30 days, renewed from day 15 together with the JWT form |
+| Serial | Random, 128 bits; goes on the revocation list with the JWT form |
+
+The registry returns it as `node_certificate_x509` (PEM) next to
+`node_certificate`, at pairing and on every renewal. The node checks that the
+public key is its own, as for the JWT form. Account, workspace and kind are
+left out of the X.509 form: the relay and the API look them up in the
+registry by node id, so the certificate carries identity only and cannot go
+stale when a grant changes.
 
 ### 7.3 Relay frames
 
@@ -948,11 +1041,19 @@ The protocol is the same in every column. Moving from cloud only to hybrid is
 
 **Account recovery** (getting back into the cloud account):
 
-- Encourage two passkeys from the start (phone and laptop, or a hardware key).
-- Ten single-use recovery codes, shown once.
-- Email-only recovery waits **72 hours**, with notices to every device and
-  linked channel, and can be cancelled from any of them. That stops a quick
-  takeover through a hacked mailbox.
+- **There is no email-only recovery** (Free's decision 6). An email address
+  can receive notices and the cancel link, but it never gets anyone back into
+  an account on its own.
+- The two ways back in are **a second passkey** and **one of ten single-use
+  recovery codes**, shown once. Sign-up therefore asks for a second passkey
+  (phone and laptop, or a hardware key) and shows the codes before the first
+  paid action, and the device page reminds a user who still has only one.
+- **A user who has lost both** goes through a manual check by FreEco support.
+  Proposed shape, for Free to confirm: an identity check by video call against
+  the details on the account (Business and Elite users with their named
+  concierge), then a **72-hour wait** with notices to every device and linked
+  channel, which any of them can cancel. The wait stops someone who talked
+  support into it from taking over quietly.
 - A WhatsApp number is never a recovery factor on its own, because of SIM
   swaps. It can send the cancel notice.
 - **Recovery quarantine:** after an account recovery, every node drops to
@@ -999,13 +1100,15 @@ is Phase 0.3 of the production plan.
 | Phase | What | Where in the code | Done when | Size |
 |---|---|---|---|---|
 | **A. Node identity on the node** | Node key on first boot (hardware where available); `GET /api/node/identity` (id, fingerprint words, key protection); key-based local pairing (6.4) with device certificates; DPoP accepted by the API middleware; audit actions; new columns on `paired_devices` through a migration | New `freeco-kernel/src/node_identity.rs`; `pairing.rs`; `routes.rs` pairing handlers; `middleware.rs`; `freeco-memory/src/migration.rs`; `freeco-desktop` pairing screen | A phone pairs with X2's node over the LAN, its signed request works, and after removal the same request is refused (curl test). `cargo test` and clippy green | 1 to 2 weeks |
-| **B. Accounts and the node registry** | New `freeco-cloud` crate (axum): OIDC with Zitadel through a backend-for-frontend, passkeys, accounts and workspaces, terms records; registry tables; pairing start, lookup, approve and token; node token endpoint; trust document with the offline root key; device page with list, rename and revoke; role checks on every API route (Owner, Admin, User, Kid, Viewer from `tenancy.rs`), in the cloud and in the node's API | New `crates/freeco-cloud`; the desktop app's sign-in reuses the loopback PKCE flow in `freeco-extensions/src/oauth.rs` (RFC 8252), while the web app keeps tokens server-side; shared types in a new small `freeco-identity` crate (ids, JWK thumbprint, DPoP create and verify, node certificate, envelope, scopes) used by both node and cloud | The X2 node pairs with a staging account by typed code and stays inactive until its owner confirms the account on the node; it shows on the device page; a registration with a changed `enc_key` is refused; revoking it makes the next token request fail; a Viewer session cannot call an Owner route | 3 to 4 weeks |
+| **B. Accounts and the node registry** | New `freeco-cloud` crate (axum): OIDC with Zitadel through a backend-for-frontend, passkeys, accounts and workspaces, terms records; registry tables; pairing start, lookup, approve and token; node token endpoint; trust document with the offline root key; device page with list, rename and revoke; role checks on every API route (Owner, Admin, User, Kid, Viewer from `tenancy.rs`), in the cloud and in the node's API; both pairing paths (6.3); both proof methods: DPoP, and mTLS with X.509 node certificates from the Node CA on the `mtls.` hosts; the two-part trust document with the root-signed key list, standby keys and the daily timestamp | New `crates/freeco-cloud`; the desktop app's sign-in reuses the loopback PKCE flow in `freeco-extensions/src/oauth.rs` (RFC 8252), while the web app keeps tokens server-side; shared types in a new small `freeco-identity` crate (ids, JWK thumbprint, DPoP create and verify, both node certificate forms, envelope, scopes) used by both node and cloud | The X2 node pairs with a staging account once by typed code and once by the app's code, and each time stays inactive until its owner confirms the account on the node; it shows on the device page; it gets tokens over DPoP and over mTLS, and a token bound to one method is refused on the other; a registration with a changed `enc_key` is refused; revoking it makes the next token request fail on both hosts; a Viewer session cannot call an Owner route | 4 to 5 weeks |
 | **C. Relay and local policy** | WebSocket relay with `hello` binding; signed envelopes; the node checks grants and policy; approvals round trip; web chat to the home Concierge; sealed queue; long-poll fallback; hosted cells connect the same way | `freeco-cloud` relay module; a node-link handler in `freeco-kernel` that calls the kernel directly (never through `127.0.0.1:4200`); `approval.rs` | From `app.freeco.ai`, chat with the Concierge on X2 behind NAT with no open port. A request the cloud allows but the node did not grant is refused by the node, and so is a tool call a relayed chat asks for outside its grants. A frame or approval decision altered in transit is refused. Revocation closes the socket within 5 s | 3 to 4 weeks |
 | **D. WhatsApp identity** | Cloud API webhook with signature check; channel links table; host invite codes; provisional accounts; claim link with reverse code; assurance levels enforced; routing to node or cell | `freeco-cloud` channel gateway; `freeco-channels/src/whatsapp.rs` (wire up the allowlist); `freeco-kernel/src/auth.rs` (bindings from links, with assurance) | A test guest scans a host QR code, chats, and claims the account with a passkey; a payment-class approval cannot be given from WhatsApp alone | 2 to 3 weeks, after Meta confirms eligibility |
-| **E. Recovery** | Several passkeys; recovery codes; 72-hour email recovery; recovery quarantine; Recovery Kit and encrypted cloud backups; node replacement and restore | `freeco-cloud`; `freeco-api/src/backup.rs` (encrypt snapshots with the backup key) | A node backup restores on a new machine with only the Recovery Kit; after an account recovery, nodes stay at status-only until confirmed on the node | 2 to 3 weeks |
-| **F. Hardening** | End-to-end signed approvals and approver lists; X.509 node certificates and mTLS for enterprise relays; OFP between a user's nodes with node certificates instead of the shared secret; TPM and App Attest as extra trust signals; a self-hosted registry for sovereign organisations; 2-of-3 recovery | `freeco-wire/src/peer.rs`; `freeco-identity`; `freeco-cloud` | Each item with its own live test | Later, after paid launch |
+| **E. Recovery** | Several passkeys, with a second one asked for at sign-up; recovery codes; manual support recovery with a 72-hour wait, and no email-only path; recovery quarantine; Recovery Kit and encrypted cloud backups; node replacement and restore | `freeco-cloud`; `freeco-api/src/backup.rs` (encrypt snapshots with the backup key) | A node backup restores on a new machine with only the Recovery Kit; after an account recovery, nodes stay at status-only until confirmed on the node | 2 to 3 weeks |
+| **F. Hardening** | End-to-end signed approvals and approver lists; OFP between a user's nodes with node certificates instead of the shared secret; TPM and App Attest as extra trust signals; a self-hosted registry for sovereign organisations; 2-of-3 recovery | `freeco-wire/src/peer.rs`; `freeco-identity`; `freeco-cloud` | Each item with its own live test | Later, after paid launch |
 
-A to C are the critical path, about 7 to 10 weeks in total. D can run beside
+A to C are the critical path, about 8 to 11 weeks in total. Building both
+pairing paths and both proof methods in B adds about a week over a single
+path each. D can run beside
 C once B is done. E must be done before paid launch.
 
 **Where this sits in the development roadmap** (`/mnt/project-files/plans/dev-roadmap-2026-11.md`):
@@ -1025,6 +1128,10 @@ for keys; a JOSE library with EdDSA and ES256 (`jsonwebtoken` or `josekit`);
 Enclave; `hpke` for sealed messages. All are Rust; pick by maintenance and
 audit status at the time.
 
+**For mTLS in Phase B:** `rustls` with a custom signer, so a TPM or Secure
+Enclave key can sign the TLS handshake without leaving the hardware; `rcgen`
+or similar for the Node CA to issue certificates; `x509-parser` to check them.
+
 ---
 
 ## 14. What could go wrong, and how each is handled
@@ -1033,7 +1140,9 @@ audit status at the time.
 |---|---|
 | **Device-code phishing:** someone sends the user a code from the attacker's node | The user types the code rather than clicking a link; the page shows the node's name, platform, approximate location and fingerprint words, and asks the user to compare them with their own screen; a fresh passkey is required |
 | **A code read off someone else's screen:** an attacker approves the victim's node into the attacker's account | The node activates nothing until its own owner confirms on the node which account and workspace it joined (section 6.3); answering no revokes the entry |
-| A node access token leaks | It is DPoP-bound and lasts 10 minutes, so it is useless without the node key |
+| A node access token leaks | It is bound to the node key (DPoP) or to the node certificate (mTLS) and lasts 10 minutes, so it is useless without the node key |
+| A TLS-inspecting proxy on the user's network breaks mTLS | `proof = "auto"` falls back to DPoP, which is bound to the same key, and the device page shows the method in use |
+| The relay or API is put behind a third-party edge that ends TLS | mTLS stays on its own `mtls.` hosts at FreEco's ingress; DPoP hosts can sit behind any edge |
 | A node key is stolen from a software keystore | Revoke on the device page; prefer hardware keys; the device page shows key protection so the user can see which devices are weaker |
 | The relay or edge is compromised | Envelopes and approval decisions are signed with the request key, which the relay does not hold; every node frame is signed by the node and checked by the control plane with session, id and sequence; the registration payload is signed by the node key; trust documents carry a serial that only goes up; the node's grants still apply |
 | The control plane is compromised | It cannot widen node grants without local confirmation and cannot read a personal node's Recovery-Key-protected backups; from Phase F it cannot forge approvals either. Node policy remains the last word. Hosted cells are exposed, as section 11 says, which is why they are labelled |
@@ -1041,22 +1150,28 @@ audit status at the time.
 | Prompt injection asks the node to act | The envelope's `origin` and the agent's taint tracking both reach the approval, which shows where the instruction came from |
 | Replay of a request or proof | `jti` and request id caches (the existing `NonceTracker`), short `exp`, socket binding in `hello_ack` |
 | Bots open fake WhatsApp accounts to burn model budget | Invite codes from hosts, an introduction only for unknown numbers, one account per verified number, and per-account caps at the LLM gateway |
-| The user loses everything | Two passkeys and recovery codes for the account; the Recovery Kit for data; clear words up front that the data cannot be recovered without it |
+| The user loses everything | Two passkeys and recovery codes for the account, asked for at sign-up; a manual support check as the last way back in; the Recovery Kit for data; clear words up front that the data cannot be recovered without it |
+| A hacked mailbox is used to take an account | There is no email-only recovery, so a mailbox alone opens nothing |
+| Someone talks support into a manual recovery | Identity check, then a 72-hour wait with notices to every device and channel, cancellable from any of them; recovery quarantine keeps every node at status-only until confirmed on the node |
+| Free, the only holder of the root key, cannot be reached | Emergencies never need the root key: the timestamp key revokes and standby keys take over (section 3.1). Planned signing happens weeks ahead, and each key list lasts 6 months. The backup key is sealed in a separate place, such as a bank safe deposit box, with a written procedure. Who may open it if Free cannot is worth writing into the company's papers |
 | Hosted cells are less private than home nodes | Labelled on the device page, with a one-tap path to add a home node |
 
 ---
 
 ## 15. Decisions for Free
 
-| # | Decision | Recommendation |
-|---|---|---|
-| 1 | Pairing entry point | The node shows a code and the user types it in the app, as the default (works headless, follows RFC 8628); a QR code from the cloud for the desktop and phone apps |
-| 2 | Node authentication | DPoP as the standard (works through any edge proxy); mTLS only as an enterprise option |
-| 3 | Who issues node credentials | FreEco.ai's own node registry; Zitadel for humans only |
-| 4 | WhatsApp-first accounts | Yes, through host invite codes, limited to `a1` until a passkey is added; unknown numbers get the introduction only |
-| 5 | Hosted cells | Treat them as nodes, labelled "Hosted by FreEco.ai", so one protocol serves every mode |
-| 6 | Email-only account recovery | Allowed, with a 72-hour wait that any device can cancel |
-| 7 | Who holds the offline root key | Two hardware security keys held by two named people in separate places |
+Free answered these on 2026-11-18, one at a time. The "What it changed" column
+says where each answer lives in this document.
+
+| # | Decision | Free's answer | What it changed |
+|---|---|---|---|
+| 1 | Pairing entry point | **Both, equal in standing:** the node shows a code that the user types in the app, or the app shows a code (QR and typed) that the user enters on the node | Section 6.3 offers both on every pairing screen; Phase B builds and live-tests both |
+| 2 | Node authentication | **DPoP and mTLS, both from day one** | Sections 5.1, 6.5, 6.6 and 7.2: X.509 node certificates from a Node CA, `mtls.` hosts, certificate-bound tokens; Phase B instead of F |
+| 3 | Who issues node credentials | **Open.** Recommendation: FreEco.ai's own node registry; Zitadel for humans only | The document is written for the recommendation |
+| 4 | WhatsApp-first accounts | **Yes, as recommended:** through host invite codes, limited to `a1` until a passkey is added; unknown numbers get the introduction only | Sections 6.2 and 8, unchanged |
+| 5 | Hosted cells | **No** to hosted cells that FreEco can read. Free asked for a self-hosted option instead; its exact meaning is being pinned down (hosted but unreadable by FreEco, or self-hosted only) | Sections 3, 11 and 12 still describe readable hosted cells and will change once the meaning is settled |
+| 6 | Email-only account recovery | **No:** only a second passkey or a recovery code; a user who lost both goes through a manual support check | Section 12, Phase E, section 14 |
+| 7 | Who holds the offline root key | **Free alone**, on one hardware key plus a backup | Section 3.1: the trust document now has a root-signed key list and a daily part signed by an online timestamp key, with standby keys, so the root key is used about four times a year and never in an emergency |
 
 ---
 
@@ -1065,7 +1180,8 @@ audit status at the time.
 - OAuth 2.0 Security Best Current Practice, RFC 9700
 - PKCE, RFC 7636; OAuth for native apps, RFC 8252
 - OAuth Device Authorization Grant, RFC 8628
-- DPoP, RFC 9449; mutual-TLS-bound tokens, RFC 8705 (option)
+- DPoP, RFC 9449; mutual-TLS client authentication and certificate-bound tokens, RFC 8705
+- X.509 certificates, RFC 5280
 - JWT bearer assertions, RFC 7523; JWK thumbprint, RFC 7638; EdDSA in JOSE, RFC 8037
 - OpenID Connect Core 1.0; WebAuthn Level 3 (passkeys)
 - HPKE, RFC 9180
