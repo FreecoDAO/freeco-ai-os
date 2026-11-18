@@ -107,7 +107,8 @@ The current state of every feature, with how to check it, is in
   2026-09-15. Next build: the tick loop honours pause, and projects, tasks,
   schedules and CRM tasks wake agents instead of a timer; the CEO governs who
   sleeps.
-- ⬜ **`pause_hand` is dead wiring** — the flag is set and nothing reads it.
+- ✅ **`pause_hand` is dead wiring** — fixed: `pause_hand` stops the hand's
+  background agent and persists the paused state, and boot restores it paused.
 - ⬜ **The SQLite log grows unbounded while the daemon runs.** An open read keeps
   the WAL from being checkpointed (106 MB beside a 24 MB database). Backups
   now checkpoint first; the holder is not found.
@@ -760,6 +761,18 @@ Live now (runtime config, no build needed):
   blocked keyless providers, auto combos hidden).
 - ✅ OmniRoute MCP on (streamable HTTP, loopback); scoped key for the hand;
   registered in config.toml.
+
+In the repo (2026-11-18):
+
+- ✅ The bundled `omniroute` hand uses OmniRoute's MCP tools
+  (`mcp_servers = ["omniroute"]`, no shell) with the generic caretaker prompt;
+  the owner's combos and connections stay in the live override.
+- ✅ `${VAR}` in `[[mcp_servers]] headers` is resolved from the environment or
+  the vault, so the OmniRoute MCP key no longer has to sit in config.toml in
+  plain text. Example in `freeco-ai.toml.example` and `docs/configuration.md`.
+- ✅ `containers` is a bundled agent template (`agents/containers`):
+  podman-only `[exec_policy]`, approval on every `shell_exec`, no host-specific
+  container list.
 
 Open:
 
