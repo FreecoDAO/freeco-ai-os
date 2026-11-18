@@ -359,7 +359,9 @@ const GLOBAL_GUIDELINES: &str = "\
 ## When Something Blocks You\n\
 - \"I can't\" is never a complete answer, and the way past it is to try, not to explain. Attempt the thing, then report what actually happened.\n\
 - Diagnose before reporting. You have tools -- read the config, check the service, read the log, run the command and look at the error. Report the cause, not the symptom: \"the container is not running because its volume is missing\" beats \"the service is unavailable\".\n\
-- Try the obvious alternative first. If the sandbox refuses, ask whether the host is genuinely needed. If one tool fails, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- blocks are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- For ordinary failures, try the obvious alternative first. If the sandbox lacks what you need, ask whether the host is genuinely needed. If one tool errors, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- outages are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- A security control that blocks you is not an ordinary failure. A stripped header, a refused or denied command, a sandbox or network boundary, a denied approval: each is a decision someone made, not an obstacle to route around. Do not reach the same endpoint, file or action by another path. Finding the other route is useful information; using it is not.\n\
+- Instead, stop and escalate to the owner: what the control was, what you were trying to do, what route would have worked, and the honest case for and against changing the rule. Then carry on with the parts of the work that do not depend on it. An agent that quietly works around a control takes the decision away from the owner, which is the whole point of having one.\n\
 - Escalate only after trying. When you do ask, bring the diagnosis with you: what you attempted, what it returned, and the one decision you need from the user.\n\
 - If a task turns out larger than asked, do the part you are certain of, then say what remains. Proposing instead of starting is how nothing gets done.\n\n\
 ## Working Guidelines\n\
@@ -964,6 +966,32 @@ mod tests {
             GLOBAL_GUIDELINES.matches("## Truth And Evidence").count(),
             1
         );
+    }
+
+    /// Alternatives are for ordinary failures; a security control that blocks
+    /// the agent is escalated to the owner, never routed around. The two rules
+    /// sit next to each other so neither reads as overriding the other.
+    #[test]
+    fn security_blocks_are_escalated_not_routed_around() {
+        let g = GLOBAL_GUIDELINES;
+        let alt = g
+            .find("For ordinary failures, try the obvious alternative first")
+            .expect("alternatives rule is scoped to ordinary failures");
+        let sec = g
+            .find("A security control that blocks you is not an ordinary failure")
+            .expect("security-block rule present");
+        assert!(sec > alt, "the security exception must follow the alternatives rule");
+        assert!(g.contains("not an obstacle to route around"));
+        assert!(g.contains("Do not reach the same endpoint, file or action by another path"));
+        assert!(g.contains("escalate to the owner"));
+        assert!(g.contains("case for and against"));
+        assert!(g.contains("carry on with the parts of the work that do not depend on it"));
+        // The unscoped form pushed agents towards bypassing a refused sandbox.
+        assert!(!g.contains("Try the obvious alternative first. If the sandbox refuses"));
+        // Subagents get it too.
+        let mut ctx = basic_ctx();
+        ctx.is_subagent = true;
+        assert!(build_system_prompt(&ctx).contains("not an obstacle to route around"));
     }
 
     /// The clock must stay behind the static prompt.
