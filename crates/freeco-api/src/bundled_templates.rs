@@ -27,6 +27,10 @@ pub fn bundled_templates() -> Vec<(&'static str, &'static str)> {
             include_str!("../../../agents/code-reviewer/agent.toml"),
         ),
         (
+            "containers",
+            include_str!("../../../agents/containers/agent.toml"),
+        ),
+        (
             "customer-support",
             include_str!("../../../agents/customer-support/agent.toml"),
         ),
@@ -113,6 +117,23 @@ mod tests {
                 "template {name}: manifest name mismatch"
             );
         }
+    }
+
+    /// The containers template may only run podman, and only after approval.
+    #[test]
+    fn containers_template_is_podman_only() {
+        let body = bundled_template("containers").expect("containers is bundled");
+        let m: freeco_types::agent::AgentManifest =
+            toml::from_str(body).expect("containers parses as a manifest");
+        let policy = m.exec_policy.expect("containers sets an exec_policy");
+        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Allowlist);
+        assert!(policy.safe_bins.is_empty());
+        assert_eq!(policy.allowed_commands, vec!["podman".to_string()]);
+        assert_eq!(m.model.provider, "default");
+        assert!(!m.capabilities.agent_spawn);
+        // Nothing host-specific in a bundled template.
+        assert!(!body.contains("/home/"));
+        assert!(body.contains("podman ps"));
     }
 
     #[test]
