@@ -297,6 +297,34 @@ mod tests {
         assert!(skill_content.contains(&format!("tar.gz/{PIN}")));
     }
 
+    /// The OmniRoute caretaker works through OmniRoute's MCP tools, not a shell,
+    /// and the gateway stays on loopback.
+    #[test]
+    fn omniroute_hand_uses_mcp_not_shell() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "omniroute")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.mcp_servers, vec!["omniroute".to_string()]);
+        assert!(!def.tools.iter().any(|t| t == "shell_exec"));
+        assert!(def.tools.iter().any(|t| t == "agent_send"));
+        assert!(def.tools.iter().any(|t| t == "mcp_omniroute_omniroute_get_health"));
+        assert!(def
+            .tools
+            .iter()
+            .filter(|t| t.starts_with("mcp_"))
+            .all(|t| t.starts_with("mcp_omniroute_omniroute_")));
+        let container = def.container.as_ref().expect("omniroute is a service hand");
+        assert_eq!(
+            container.env.get("OMNIROUTE_HOSTNAME").map(String::as_str),
+            Some("127.0.0.1")
+        );
+        // Owner-specific combo names stay out of the bundled prompt.
+        assert!(!def.agent.system_prompt.contains("freeco-cc-"));
+        assert!(!def.agent.system_prompt.contains("freeco-agent-"));
+    }
+
     #[test]
     fn all_bundled_hands_parse() {
         for (id, toml_content, skill_content) in bundled_hands() {
