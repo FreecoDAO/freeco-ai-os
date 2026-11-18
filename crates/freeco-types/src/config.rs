@@ -1740,7 +1740,10 @@ pub struct McpServerConfigEntry {
     #[serde(default)]
     pub env: Vec<String>,
     /// Extra HTTP headers for SSE / Streamable-HTTP transports.
-    /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
+    /// Each entry is `"Header-Name: value"`. `${VAR}` in a value is resolved from
+    /// the process environment, then the vault / `.env`, e.g.
+    /// `"Authorization: Bearer ${OMNIROUTE_MCP_KEY}"`, so no key has to sit in
+    /// config.toml. An unresolved variable stops that server from connecting.
     #[serde(default)]
     pub headers: Vec<String>,
 }

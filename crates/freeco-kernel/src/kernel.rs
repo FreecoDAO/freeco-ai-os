@@ -6654,6 +6654,23 @@ impl FreecoKernel {
             .map(|z| z.to_string())
     }
 
+    /// Expand `${VAR}` in an MCP server's `headers`, from the process
+    /// environment first, then the vault / `.env` (the same sources as its
+    /// `env = [...]`). An unresolved variable is an error naming the server
+    /// and the variable; resolved values are never logged.
+    fn resolve_mcp_headers(
+        &self,
+        server: &freeco_types::config::McpServerConfigEntry,
+    ) -> Result<Vec<String>, String> {
+        freeco_kernel_runtime::mcp::expand_header_vars(&server.headers, |name| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| self.resolve_credential(name))
+        })
+        .map_err(|e| format!("MCP server '{}': {e}", server.name))
+    }
+
     /// Store a credential in the vault (best-effort — falls through silently if no vault).
     pub fn store_credential(&self, key: &str, value: &str) {
         let mut resolver = self
@@ -7191,12 +7208,22 @@ impl FreecoKernel {
                 }
             }
 
+            let headers = match self.resolve_mcp_headers(server_config) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(server = %server_config.name, error = %e, "MCP server not connected");
+                    self.extension_health
+                        .report_error(&server_config.name, e.clone());
+                    continue;
+                }
+            };
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
-                headers: server_config.headers.clone(),
+                headers,
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -7301,15 +7328,25 @@ impl FreecoKernel {
                 McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
             };
 
+            self.extension_health.register(&server_config.name);
+
+            let headers = match self.resolve_mcp_headers(server_config) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(server = %server_config.name, error = %e, "MCP server not connected");
+                    self.extension_health
+                        .report_error(&server_config.name, e.clone());
+                    continue;
+                }
+            };
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
-                headers: server_config.headers.clone(),
+                headers,
             };
-
-            self.extension_health.register(&server_config.name);
 
             match McpConnection::connect(mcp_config).await {
                 Ok(conn) => {
@@ -7421,12 +7458,20 @@ impl FreecoKernel {
             McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
         };
 
+        let headers = match self.resolve_mcp_headers(&server_config) {
+            Ok(h) => h,
+            Err(e) => {
+                self.extension_health.report_error(id, e.clone());
+                return Err(e);
+            }
+        };
+
         let mcp_config = McpServerConfig {
             name: server_config.name.clone(),
             transport,
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
-            headers: server_config.headers.clone(),
+            headers,
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -12160,6 +12205,60 @@ mod tests {
             referenced.contains("openai"),
             "MCP env OPENAI_API_KEY must pull in openai ({referenced:?})"
         );
+        kernel.shutdown();
+    }
+
+    /// `${VAR}` in MCP headers comes from the process env (then the vault);
+    /// an unset variable is a per-server error, never a literal `${...}`.
+    #[test]
+    fn mcp_headers_expand_env_vars() {
+        use freeco_types::config::{DefaultModelConfig, McpServerConfigEntry, McpTransportEntry};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-mcp-headers");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "groq".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                api_key_env: "GROQ_API_KEY".to_string(),
+                base_url: None,
+                subprocess_timeout_secs: None,
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+
+        // Unique names so parallel tests cannot collide.
+        std::env::set_var("FREECO_TEST_MCP_HDR_KEY_7f3a", "scoped-test-key");
+        let entry = |headers: Vec<&str>| McpServerConfigEntry {
+            name: "omniroute".to_string(),
+            transport: McpTransportEntry::Http {
+                url: "http://127.0.0.1:20128/api/mcp/stream".to_string(),
+            },
+            timeout_secs: 120,
+            env: vec![],
+            headers: headers.into_iter().map(String::from).collect(),
+        };
+
+        let ok = kernel
+            .resolve_mcp_headers(&entry(vec![
+                "Authorization: Bearer ${FREECO_TEST_MCP_HDR_KEY_7f3a}",
+            ]))
+            .unwrap();
+        assert_eq!(ok, vec!["Authorization: Bearer scoped-test-key".to_string()]);
+
+        let err = kernel
+            .resolve_mcp_headers(&entry(vec![
+                "Authorization: Bearer ${FREECO_TEST_MCP_HDR_UNSET_7f3a}",
+            ]))
+            .unwrap_err();
+        assert!(err.contains("omniroute"));
+        assert!(err.contains("FREECO_TEST_MCP_HDR_UNSET_7f3a"));
+
+        std::env::remove_var("FREECO_TEST_MCP_HDR_KEY_7f3a");
         kernel.shutdown();
     }
 

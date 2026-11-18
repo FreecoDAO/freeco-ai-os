@@ -1224,11 +1224,25 @@ type = "sse"
 url = "https://mcp.example.com/sse"
 ```
 
+OmniRoute's MCP endpoint (used by the bundled `omniroute` hand), over Streamable HTTP with an auth header. Create a scoped MCP key in the OmniRoute dashboard and store it as `OMNIROUTE_MCP_KEY` in the environment or the vault:
+
+```toml
+[[mcp_servers]]
+name = "omniroute"
+timeout_secs = 120
+headers = ["Authorization: Bearer ${OMNIROUTE_MCP_KEY}"]
+
+[mcp_servers.transport]
+type = "http"
+url = "http://127.0.0.1:20128/api/mcp/stream"
+```
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Display name for this MCP server. Tools are namespaced as `mcp_{name}_{tool}`. |
 | `timeout_secs` | u64 | `30` | Request timeout in seconds. |
 | `env` | list of strings | `[]` | Environment variable names to pass through to the subprocess (stdio transport only). |
+| `headers` | list of strings | `[]` | Extra HTTP headers for `sse` / `http` transports, each `"Header-Name: value"`. `${VAR}` in a value is resolved from the process environment, then the vault / `.env`. An unresolved variable stops that server from connecting (the error names the variable, never a value). |
 
 **Transport variants** (tagged union on `type`):
 
@@ -1236,6 +1250,7 @@ url = "https://mcp.example.com/sse"
 |--------|--------|-------------|
 | `stdio` | `command` (string), `args` (list of strings, default `[]`) | Spawn a subprocess, communicate via JSON-RPC over stdin/stdout. |
 | `sse` | `url` (string) | Connect to an HTTP Server-Sent Events endpoint. |
+| `http` | `url` (string) | Connect to a Streamable-HTTP MCP endpoint. |
 
 ---
 
