@@ -380,6 +380,10 @@ pub async fn build_router(
             "/api/channels/whatsapp/qr/status",
             axum::routing::get(routes::whatsapp_qr_status),
         )
+        .route(
+            "/api/channels/whatsapp/status",
+            axum::routing::get(routes::whatsapp_status),
+        )
         // Template endpoints
         .route("/api/templates", axum::routing::get(routes::list_templates))
         .route(

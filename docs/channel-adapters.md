@@ -401,7 +401,65 @@ The Slack adapter uses Socket Mode, which establishes a WebSocket connection to 
 
 ## WhatsApp
 
-### Prerequisites
+Two modes: **WhatsApp Web (QR)**, a local gateway that links your own
+WhatsApp account like WhatsApp Desktop does, and the **Cloud API** (below).
+The allowlist applies to both.
+
+### Allowed chats only
+
+The agent talks only to the chats you list, in both directions:
+
+```toml
+[channels.whatsapp]
+# Numbers in international form and group JIDs. Spaces, "+", "00" and
+# "...@s.whatsapp.net" are all fine: "+41 79 123 45 67", "0041791234567" and
+# "41791234567@s.whatsapp.net" are the same chat.
+allowed_users = ["+41 79 123 45 67", "120363000000000000@g.us"]
+# Your own number: always allowed, even with an empty list.
+owner_number = "+41 79 000 00 00"
+default_agent = "assistant"
+```
+
+- **Empty list = nobody** except `owner_number`. With neither, every
+  incoming message is ignored and every send is refused. There is no
+  wildcard; list each chat.
+- A **group** is allowed as a whole (`…@g.us`): everyone in it is answered.
+  A listed person writing in an unlisted group is not.
+- A number with **one leading zero** (`079 …`) has no country code and is
+  rejected, not guessed. The dashboard lists such entries as "not
+  understood".
+- Incoming: the gateway drops a message from any other chat before reading,
+  downloading or forwarding it (it never sends read receipts), and the daemon
+  checks the same list again when the message arrives (HTTP 403).
+- Outgoing: an agent's `channel_send`, a cron delivery or a reply to a chat
+  off the list fails with an error naming the chat; the gateway refuses it
+  too (HTTP 403 on `/message/send`).
+- One source: the config. The daemon passes the list to its gateway as
+  `WHATSAPP_ALLOWED_NUMBERS` / `WHATSAPP_ALLOWED_GROUPS`; those variables in
+  the daemon's own environment are ignored. Editing the list (in config.toml
+  plus `POST /api/channels/reload`, or in the dashboard) restarts the gateway
+  with it.
+
+### WhatsApp Web (QR) setup
+
+1. Install Node.js 20 or newer.
+2. Dashboard > Channels > WhatsApp: enter the allowed numbers and groups and
+   your own number, then **Save allowed chats**. This writes
+   `[channels.whatsapp]` and starts the gateway; its first start runs
+   `npm install` and can take a minute.
+3. Scan the QR code: WhatsApp on your phone > Linked Devices > Link a Device.
+
+The same panel shows the gateway state, from `GET /api/channels/whatsapp/status`:
+`connected`, `qr_needed`, `connecting`, `starting`, `restarting` (after a
+crash; up to ten restarts with backoff), `gave_up`, `node_missing`,
+`install_failed`, `unreachable`, `stopped` or `not_configured`.
+
+The gateway listens on `127.0.0.1:3009` only and requires a per-start token.
+Set `WHATSAPP_WEB_GATEWAY_URL` to use an external gateway instead; give it
+the same `WHATSAPP_ALLOWED_NUMBERS` / `WHATSAPP_ALLOWED_GROUPS`, since the
+daemon still enforces the config's list on its side.
+
+### Cloud API prerequisites
 
 - A Meta Business account with WhatsApp Cloud API access
 
