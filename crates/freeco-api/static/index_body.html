@@ -2541,6 +2541,39 @@
             <p x-text="loadError"></p>
             <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
           </div>
+          <!-- Security approvals: manifests the Security Agent held because they
+               ask for privileged capabilities. Approve calls
+               POST /api/security/approve/{content_hash}. -->
+          <div x-show="!loading && securityPending.length > 0" class="mb-4" id="security-pending">
+            <h3 class="mb-2">Waiting for security approval</h3>
+            <p class="hint mb-2">These were held because they ask for privileged capabilities. Approving lets the exact same content through when it is submitted again.</p>
+            <div class="card-grid">
+              <template x-for="p in securityPending" :key="p.content_hash">
+                <div class="card approval-card">
+                  <div class="flex justify-between items-center mb-2">
+                    <span class="card-header" style="margin:0" x-text="(p.summary && p.summary.name) || p.subject"></span>
+                    <span class="badge badge-warn" x-text="p.subject"></span>
+                  </div>
+                  <div class="text-xs text-dim mb-2" :title="p.content_hash">Hash: <code x-text="p.content_hash.slice(0, 12) + '…'"></code></div>
+                  <template x-if="p.summary && p.summary.exec_policy_mode">
+                    <div class="text-sm mb-1">Shell policy: <strong x-text="p.summary.exec_policy_mode"></strong></div>
+                  </template>
+                  <template x-for="row in securityCaps(p)" :key="row[0]">
+                    <div class="text-sm mb-1"><span class="text-dim" x-text="row[0] + ':'"></span> <span x-text="row[1]"></span></div>
+                  </template>
+                  <ul class="text-xs text-dim mb-2" style="margin:6px 0 0 16px">
+                    <template x-for="(f, i) in p.findings" :key="i">
+                      <li x-text="f.message"></li>
+                    </template>
+                  </ul>
+                  <div class="text-xs text-dim"><span x-text="timeAgo(p.created_at)"></span></div>
+                  <div class="approval-actions" style="display:flex;gap:8px;margin-top:12px">
+                    <button class="btn btn-success btn-sm" @click="approveSecurity(p)">Approve</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
           <template x-if="!loading && !loadError">
             <div>
               <div class="filter-pills mb-4">

@@ -443,6 +443,10 @@ pub async fn build_router(
             axum::routing::post(routes::scan_security_content),
         )
         .route(
+            "/api/security/pending",
+            axum::routing::get(routes::list_security_pending),
+        )
+        .route(
             "/api/security/approve/{content_hash}",
             axum::routing::post(routes::approve_security_content),
         )

@@ -1411,6 +1411,15 @@ pub async fn list_security_audits(State(state): State<Arc<AppState>>) -> impl In
     Json(serde_json::json!({ "audits": state.security.audits() }))
 }
 
+/// GET /api/security/pending — Content held for approval (warnings, no
+/// critical finding) and not approved yet, one entry per content hash, with
+/// the manifest's name and capabilities when it is a manifest. The dashboard's
+/// Approvals page lists these with an Approve button that calls
+/// `POST /api/security/approve/{content_hash}`.
+pub async fn list_security_pending(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "pending": state.security.pending() }))
+}
+
 /// GET /api/company-chart — Live organization model for the dashboard.
 pub async fn company_chart(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<_> = state

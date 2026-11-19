@@ -294,3 +294,18 @@ const WEBCHAT_HTML: &str = concat!(
     "\n</script>\n",
     "</body></html>"
 );
+
+#[cfg(test)]
+mod security_approval_ui_tests {
+    use super::WEBCHAT_HTML;
+
+    /// The security approve route existed with nothing in the dashboard
+    /// calling it, so a held manifest could not be approved by clicking.
+    #[test]
+    fn approvals_page_lists_and_approves_security_holds() {
+        assert!(WEBCHAT_HTML.contains("/api/security/pending"));
+        assert!(WEBCHAT_HTML.contains("/api/security/approve/"));
+        assert!(WEBCHAT_HTML.contains("approveSecurity(p)"));
+        assert!(WEBCHAT_HTML.contains("securityPending"));
+    }
+}
