@@ -1306,6 +1306,99 @@ async fn wait_healthy(url: &str, budget_secs: u64) -> bool {
     false
 }
 
+/// How long a status check waits for a service's health path. Status is
+/// read by people and by agents; a wedged service must not hang either.
+pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// One HTTP probe of a service hand's `health_path`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HealthProbe {
+    pub url: String,
+    /// HTTP status code; `None` when nothing answered.
+    pub status: Option<u16>,
+    /// Time to the response (or to the failure), in milliseconds.
+    pub latency_ms: u64,
+    /// Answered with a status below 500. A redirect, 401 or 404 still means
+    /// the process is up and handling requests (the activation rule); a 5xx
+    /// means it is up but failing.
+    pub ok: bool,
+    /// Why nothing answered (connection refused, timeout, ...).
+    pub error: Option<String>,
+}
+
+/// The loopback URL of a service hand's health path, or `None` when it
+/// declares no `health_path` or has no numeric port to reach it on.
+pub fn health_url(spec: &HandContainer) -> Option<String> {
+    let path = spec.health_path.as_deref()?.trim();
+    let port: u16 = service_port(spec)?.trim().parse().ok()?;
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    Some(format!("http://127.0.0.1:{port}{path}"))
+}
+
+/// Is `url` an `http://` URL on this machine's loopback interface?
+fn is_loopback_http(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if u.scheme() != "http" {
+        return false;
+    }
+    let host = u.host_str().unwrap_or("");
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// GET `url` once, with `timeout`, and report status and latency. Only
+/// loopback URLs are probed: this runs from a status call any agent can
+/// make, and must not become a way to reach other hosts.
+pub async fn probe_health(url: &str, timeout: Duration) -> HealthProbe {
+    let started = std::time::Instant::now();
+    let failed = |error: String| HealthProbe {
+        url: url.to_string(),
+        status: None,
+        latency_ms: started.elapsed().as_millis() as u64,
+        ok: false,
+        error: Some(error),
+    };
+    if !is_loopback_http(url) {
+        return failed("not a loopback http URL; refused".to_string());
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        // A proxy from the environment would carry a loopback request elsewhere.
+        .no_proxy()
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return failed(e.to_string()),
+    };
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            HealthProbe {
+                url: url.to_string(),
+                status: Some(status),
+                latency_ms: started.elapsed().as_millis() as u64,
+                ok: status < 500,
+                error: None,
+            }
+        }
+        Err(e) => failed(if e.is_timeout() {
+            format!("no answer within {} ms", timeout.as_millis())
+        } else if e.is_connect() {
+            "connection refused or unreachable".to_string()
+        } else {
+            e.to_string()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1601,5 +1694,127 @@ mod tests {
         assert!(msg.contains("/etc/resolv.conf"));
         assert!(msg.contains("Settings > Services"));
         assert!(msg.contains("Nothing was changed"));
+    }
+
+    #[test]
+    fn health_url_is_loopback_with_the_service_port() {
+        assert_eq!(
+            health_url(&spec()).as_deref(),
+            Some("http://127.0.0.1:20128/health")
+        );
+        let mut s = spec();
+        s.health_path = Some("healthz".into());
+        assert_eq!(
+            health_url(&s).as_deref(),
+            Some("http://127.0.0.1:20128/healthz")
+        );
+        // Host-network hand: the port comes from PORT.
+        let mut s = spec();
+        s.ports.clear();
+        s.env.insert("PORT".into(), "3200".into());
+        assert_eq!(
+            health_url(&s).as_deref(),
+            Some("http://127.0.0.1:3200/health")
+        );
+        // No health path, or no usable port: nothing to probe.
+        let mut s = spec();
+        s.health_path = None;
+        assert!(health_url(&s).is_none());
+        let mut s = spec();
+        s.ports = vec!["evil.example:80".into()];
+        assert!(health_url(&s).is_none());
+    }
+
+    /// Serve one canned HTTP response on a loopback port; returns the port.
+    async fn one_shot_server(response: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn probe_reports_status_and_latency() {
+        let port =
+            one_shot_server("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        let url = format!("http://127.0.0.1:{port}/health");
+        let probe = probe_health(&url, Duration::from_secs(3)).await;
+        assert_eq!(probe.status, Some(204));
+        assert!(probe.ok);
+        assert!(probe.error.is_none());
+        assert!(probe.latency_ms < 3000);
+        assert_eq!(probe.url, url);
+    }
+
+    #[tokio::test]
+    async fn probe_counts_redirects_as_up_and_5xx_as_failing() {
+        let port = one_shot_server(
+            "HTTP/1.1 302 Found\r\nLocation: /setup\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
+        assert_eq!(probe.status, Some(302));
+        assert!(probe.ok);
+
+        let port = one_shot_server(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
+        assert_eq!(probe.status, Some(503));
+        assert!(!probe.ok);
+    }
+
+    #[tokio::test]
+    async fn probe_reports_nothing_listening() {
+        // Bind and drop to get a port nothing listens on.
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(2)).await;
+        assert_eq!(probe.status, None);
+        assert!(!probe.ok);
+        assert!(probe.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn probe_times_out_quickly() {
+        // Accepts the connection and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let probe =
+            probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_millis(300)).await;
+        assert_eq!(probe.status, None);
+        assert!(!probe.ok);
+        assert!(probe.latency_ms < 5000);
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_non_loopback_urls() {
+        for url in [
+            "http://example.com/health",
+            "http://10.0.0.1:80/",
+            "https://127.0.0.1:443/",
+            "http://127.0.0.1.evil.example/",
+            "file:///etc/passwd",
+        ] {
+            let probe = probe_health(url, Duration::from_millis(200)).await;
+            assert_eq!(probe.status, None, "{url}");
+            assert!(probe.error.as_deref().unwrap_or("").contains("loopback"), "{url}");
+        }
     }
 }
