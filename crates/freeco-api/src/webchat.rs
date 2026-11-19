@@ -254,6 +254,8 @@ const WEBCHAT_HTML: &str = concat!(
     "\n",
     include_str!("../static/js/pages/teams.js"),
     "\n",
+    include_str!("../static/js/pages/chamber.js"),
+    "\n",
     include_str!("../static/js/pages/sidenav.js"),
     "\n",
     include_str!("../static/js/pages/live.js"),
