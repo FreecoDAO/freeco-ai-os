@@ -527,7 +527,7 @@ pub async fn execute_tool(
         "task_post" => tool_task_post(input, kernel, caller_agent_id).await,
         "task_claim" => tool_task_claim(kernel, caller_agent_id).await,
         "task_complete" => tool_task_complete(input, kernel, caller_agent_id).await,
-        "task_list" => tool_task_list(input, kernel).await,
+        "task_list" => tool_task_list(input, kernel, caller_agent_id).await,
         "event_publish" => tool_event_publish(input, kernel).await,
 
         // Scheduling tools
@@ -1410,23 +1410,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "task_complete".to_string(),
-            description: "Mark a previously claimed task as completed with a result.".to_string(),
+            description: "Mark a previously claimed task as completed with a result. Set review to true to hand it in for review instead: it moves to the board's review column and waits for a person or the team lead to accept it.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "The task ID to complete" },
-                    "result": { "type": "string", "description": "The result or outcome of the task" }
+                    "result": { "type": "string", "description": "The result or outcome of the task" },
+                    "review": { "type": "boolean", "description": "Hand the task in for review rather than marking it done (optional)" }
                 },
                 "required": ["task_id", "result"]
             }),
         },
         ToolDefinition {
             name: "task_list".to_string(),
-            description: "List tasks in the shared queue, optionally filtered by status (pending, in_progress, completed).".to_string(),
+            description: "List tasks in the shared queue, optionally filtered by status (pending, in_progress, review, completed). Name a team to read that team's board instead; you must be on the team.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "status": { "type": "string", "description": "Filter by status: pending, in_progress, completed (optional)" }
+                    "status": { "type": "string", "description": "Filter by status: pending, in_progress, review, completed; on a team board also the column names todo, doing, review, done (optional)" },
+                    "team": { "type": "string", "description": "Team name or ID whose board to list (optional)" }
                 }
             }),
         },
@@ -3412,6 +3414,12 @@ async fn tool_task_complete(
     let result = input["result"]
         .as_str()
         .ok_or("Missing 'result' parameter")?;
+    if input["review"].as_bool() == Some(true) {
+        kh.task_hand_in(task_id, result, caller_agent_id).await?;
+        return Ok(format!(
+            "Task {task_id} handed in for review. It is done once someone accepts it."
+        ));
+    }
     let ready = kh
         .task_complete_by(task_id, result, caller_agent_id)
         .await?;
@@ -3428,10 +3436,19 @@ async fn tool_task_complete(
 async fn tool_task_list(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let status = input["status"].as_str();
-    let tasks = kh.task_list(status).await?;
+    let team = input["team"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let tasks = match team {
+        // A team's board: the kernel checks the caller is on the team.
+        Some(team) => kh.team_task_list(caller_agent_id, team, status).await?,
+        None => kh.task_list(status).await?,
+    };
     if tasks.is_empty() {
         return Ok("No tasks found.".to_string());
     }
@@ -6991,6 +7008,30 @@ mod tests {
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Ok(vec![])
         }
+        // Echoes what it was asked, so a test can see the team scope arrive.
+        async fn team_task_list(
+            &self,
+            agent_id: Option<&str>,
+            team: &str,
+            status: Option<&str>,
+        ) -> Result<Vec<serde_json::Value>, String> {
+            Ok(vec![serde_json::json!({
+                "team": team,
+                "asked_by": agent_id,
+                "status": status,
+            })])
+        }
+        async fn task_hand_in(
+            &self,
+            task_id: &str,
+            _result: &str,
+            by: Option<&str>,
+        ) -> Result<(), String> {
+            match by {
+                Some("holder") => Ok(()),
+                _ => Err(format!("Task {task_id} is not yours to hand in")),
+            }
+        }
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -7041,6 +7082,55 @@ mod tests {
             self.cancelled.lock().unwrap().push(job_id.to_string());
             Ok(())
         }
+    }
+
+    /// `task_list` with a team reads that team's board, asking as the
+    /// calling agent; without one it is the shared queue as before.
+    #[tokio::test]
+    async fn task_list_with_a_team_reads_that_board_as_the_caller() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let handle: Arc<dyn crate::kernel_handle::KernelHandle> = fake.clone();
+        let out = tool_task_list(
+            &serde_json::json!({ "team": " Web ", "status": "review" }),
+            Some(&handle),
+            Some("agent-7"),
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v[0]["team"], "Web");
+        assert_eq!(v[0]["asked_by"], "agent-7");
+        assert_eq!(v[0]["status"], "review");
+
+        let out = tool_task_list(&serde_json::json!({}), Some(&handle), Some("agent-7"))
+            .await
+            .unwrap();
+        assert_eq!(out, "No tasks found.");
+    }
+
+    /// `task_complete` with `review` hands the task in instead of closing
+    /// it, under the same holder-or-poster rule.
+    #[tokio::test]
+    async fn task_complete_with_review_hands_the_task_in() {
+        let fake = Arc::new(FakeKernelHandle::new());
+        let handle: Arc<dyn crate::kernel_handle::KernelHandle> = fake.clone();
+        let input = serde_json::json!({ "task_id": "t1", "result": "draft", "review": true });
+        let out = tool_task_complete(&input, Some(&handle), Some("holder"))
+            .await
+            .unwrap();
+        assert!(out.contains("handed in for review"), "{out}");
+        assert!(tool_task_complete(&input, Some(&handle), Some("stranger"))
+            .await
+            .is_err());
+        // Without review it completes, as before.
+        let out = tool_task_complete(
+            &serde_json::json!({ "task_id": "t1", "result": "done" }),
+            Some(&handle),
+            Some("stranger"),
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("marked as completed"), "{out}");
     }
 
     #[tokio::test]
