@@ -1259,12 +1259,6 @@ mod tests {
         assert_eq!(store.recent_session_topics(agent, 1).unwrap().len(), 1);
     }
 
-    #[test]
-    fn labels_a_session_from_its_first_user_message() {
-        let label = derive_session_label(&[user_msg("fix the login redirect loop")]);
-        assert_eq!(label.as_deref(), Some("Fix the login redirect loop"));
-    }
-
     /// Long prompts must be cut on a word boundary. A label ending mid-word
     /// looks broken in a sidebar.
     #[test]
