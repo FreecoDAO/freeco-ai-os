@@ -52,9 +52,15 @@ async fn connect_accounting(
         );
     }
     if let Err(e) = verify_credentials(&email, &password).await {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e})));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        );
     }
-    for (name, value) in [(EMAIL_ENV, email.as_str()), (PASSWORD_ENV, password.as_str())] {
+    for (name, value) in [
+        (EMAIL_ENV, email.as_str()),
+        (PASSWORD_ENV, password.as_str()),
+    ] {
         if let Err(e) = crate::secret_guard::store_secret(state, name, value) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

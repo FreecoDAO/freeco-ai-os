@@ -1282,7 +1282,12 @@ async fn an_agent_reads_only_its_own_team_board_and_hands_in_for_review() {
         .await
         .is_err());
 
-    let claimed = kernel.memory.task_claim("agent-web").await.unwrap().unwrap();
+    let claimed = kernel
+        .memory
+        .task_claim("agent-web")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(claimed["id"], task.as_str());
     kernel
         .task_hand_in(&task, "draft ready", Some("agent-web"))

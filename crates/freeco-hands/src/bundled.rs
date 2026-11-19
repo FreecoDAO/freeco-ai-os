@@ -309,7 +309,10 @@ mod tests {
         assert_eq!(def.mcp_servers, vec!["omniroute".to_string()]);
         assert!(!def.tools.iter().any(|t| t == "shell_exec"));
         assert!(def.tools.iter().any(|t| t == "agent_send"));
-        assert!(def.tools.iter().any(|t| t == "mcp_omniroute_omniroute_get_health"));
+        assert!(def
+            .tools
+            .iter()
+            .any(|t| t == "mcp_omniroute_omniroute_get_health"));
         assert!(def
             .tools
             .iter()
@@ -595,11 +598,20 @@ mod tests {
         assert!(def.tools.iter().any(|t| t == "accounting_api"));
         assert!(def.agent.system_prompt.contains("accounting_api"));
         assert!(!def.tools.iter().any(|t| t == "shell_exec"));
-        let c = def.container.as_ref().expect("accounting is a service hand");
+        let c = def
+            .container
+            .as_ref()
+            .expect("accounting is a service hand");
         let app = c.services.iter().find(|s| s.name == "app").unwrap();
         assert_eq!(app.env.get("DB_HOST").map(String::as_str), Some("db"));
-        assert_eq!(app.env.get("DB_NAME").map(String::as_str), Some("akaunting"));
-        assert_eq!(app.env.get("DB_DATABASE").map(String::as_str), Some("akaunting"));
+        assert_eq!(
+            app.env.get("DB_NAME").map(String::as_str),
+            Some("akaunting")
+        );
+        assert_eq!(
+            app.env.get("DB_DATABASE").map(String::as_str),
+            Some("akaunting")
+        );
         assert_eq!(app.ports, vec!["8080:80".to_string()]);
     }
 
@@ -618,7 +630,10 @@ mod tests {
             .env
             .get("DATABASE_URL")
             .is_some_and(|u| u.starts_with("postgresql+asyncpg://")));
-        assert!(def.agent.system_prompt.contains("host.containers.internal:8010/v1"));
+        assert!(def
+            .agent
+            .system_prompt
+            .contains("host.containers.internal:8010/v1"));
         assert!(def
             .skill_content
             .as_deref()

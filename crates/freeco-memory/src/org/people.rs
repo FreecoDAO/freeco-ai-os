@@ -361,7 +361,10 @@ mod tests {
         assert!(s.list_companies(false).unwrap().is_empty());
         assert_eq!(s.list_companies(true).unwrap().len(), 1);
 
-        assert!(s.update_company("missing", Some("x"), None, None).unwrap().is_none());
+        assert!(s
+            .update_company("missing", Some("x"), None, None)
+            .unwrap()
+            .is_none());
         assert!(s.delete_company(&c.id).unwrap());
         assert!(!s.delete_company(&c.id).unwrap());
         assert!(s.get_company(&c.id).unwrap().is_none());
@@ -401,7 +404,9 @@ mod tests {
     fn a_team_can_be_renamed_and_archived() {
         let s = store();
         let t = s.create_team("Ops", None).unwrap();
-        assert!(s.update_team(&t.id, Some("Operations"), Some("on call"), None).unwrap());
+        assert!(s
+            .update_team(&t.id, Some("Operations"), Some("on call"), None)
+            .unwrap());
         let team = s.get_team(&t.id).unwrap().unwrap();
         assert_eq!(team["name"], "Operations");
         assert_eq!(team["description"], "on call");
@@ -424,14 +429,20 @@ mod tests {
         assert_eq!(s.team_role_of(&a.id, "nobody").unwrap(), None);
         assert_eq!(
             s.teams_for_person("uma").unwrap(),
-            vec![(a.id.clone(), TeamRole::Lead), (b.id.clone(), TeamRole::Member)]
+            vec![
+                (a.id.clone(), TeamRole::Lead),
+                (b.id.clone(), TeamRole::Member)
+            ]
         );
 
         // Adding again changes the role, it does not add a second row.
         s.add_team_person(&a.id, "kim", TeamRole::Member).unwrap();
         let people = s.team_people(&a.id).unwrap();
         assert_eq!(people.len(), 2);
-        assert_eq!(s.team_role_of(&a.id, "kim").unwrap(), Some(TeamRole::Member));
+        assert_eq!(
+            s.team_role_of(&a.id, "kim").unwrap(),
+            Some(TeamRole::Member)
+        );
 
         assert!(s.remove_team_person(&a.id, "kim").unwrap());
         assert!(!s.remove_team_person(&a.id, "kim").unwrap());

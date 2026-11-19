@@ -194,7 +194,8 @@ macro_rules! call {
         $h.call($who.0, $who.1, Method::$m, &$uri, None).await
     };
     ($h:expr, $who:expr, $m:ident, $uri:expr, $body:expr) => {
-        $h.call($who.0, $who.1, Method::$m, &$uri, Some($body)).await
+        $h.call($who.0, $who.1, Method::$m, &$uri, Some($body))
+            .await
     };
 }
 
@@ -203,13 +204,31 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     let h = harness();
 
     // ── Companies: admins create; others cannot ─────────────────────────
-    let (s, acme) = call!(h, ADMIN, POST, "/api/org/companies", json!({ "name": "Acme" }));
+    let (s, acme) = call!(
+        h,
+        ADMIN,
+        POST,
+        "/api/org/companies",
+        json!({ "name": "Acme" })
+    );
     assert_eq!(s, 200, "{acme}");
     let acme_id = acme["id"].as_str().unwrap().to_string();
-    let (s, globex) = call!(h, OWNER, POST, "/api/org/companies", json!({ "name": "Globex" }));
+    let (s, globex) = call!(
+        h,
+        OWNER,
+        POST,
+        "/api/org/companies",
+        json!({ "name": "Globex" })
+    );
     assert_eq!(s, 200);
     let globex_id = globex["id"].as_str().unwrap().to_string();
-    let (s, _) = call!(h, LEAD, POST, "/api/org/companies", json!({ "name": "Mine" }));
+    let (s, _) = call!(
+        h,
+        LEAD,
+        POST,
+        "/api/org/companies",
+        json!({ "name": "Mine" })
+    );
     assert_eq!(s, 403);
 
     // ── Teams in companies ──────────────────────────────────────────────
@@ -244,15 +263,33 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     let members = format!("/api/org/teams/{web_id}/members");
 
     // ── Members: an admin seats the lead, the lead staffs the team ──────
-    let (s, body) = call!(h, ADMIN, POST, members, json!({ "user": "lena", "role": "lead" }));
+    let (s, body) = call!(
+        h,
+        ADMIN,
+        POST,
+        members,
+        json!({ "user": "lena", "role": "lead" })
+    );
     assert_eq!(s, 200, "{body}");
     let (s, _) = call!(h, LEAD, POST, members, json!({ "user": "mo" }));
     assert_eq!(s, 200, "member is the default role");
-    let (s, _) = call!(h, LEAD, POST, members, json!({ "user": "val", "role": "viewer" }));
+    let (s, _) = call!(
+        h,
+        LEAD,
+        POST,
+        members,
+        json!({ "user": "val", "role": "viewer" })
+    );
     assert_eq!(s, 200);
     let (s, _) = call!(h, LEAD, POST, members, json!({ "user": "ghost" }));
     assert_eq!(s, 404, "only existing accounts");
-    let (s, _) = call!(h, LEAD, POST, members, json!({ "user": "otto", "role": "boss" }));
+    let (s, _) = call!(
+        h,
+        LEAD,
+        POST,
+        members,
+        json!({ "user": "otto", "role": "boss" })
+    );
     assert_eq!(s, 400, "a person's role is lead, member or viewer");
     let (s, _) = call!(h, LEAD, POST, members, json!({}));
     assert_eq!(s, 400);
@@ -283,7 +320,11 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     let (s, list) = call!(h, LEAD, GET, members);
     assert_eq!(s, 200);
     assert_eq!(list["access"], "manage");
-    assert!(list["accounts"].as_array().unwrap().iter().any(|a| a == "otto"));
+    assert!(list["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a == "otto"));
     let (s, _) = call!(h, OUTSIDER, GET, members);
     assert_eq!(s, 403);
 
@@ -374,7 +415,13 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     }
     let (s, _) = call!(h, MEMBER, PUT, card_uri, json!({ "column": "nowhere" }));
     assert_eq!(s, 400);
-    let (s, _) = call!(h, MEMBER, PUT, card_uri, json!({ "assigned_to": "user:otto" }));
+    let (s, _) = call!(
+        h,
+        MEMBER,
+        PUT,
+        card_uri,
+        json!({ "assigned_to": "user:otto" })
+    );
     assert_eq!(s, 400);
     // An agent on the team can be assigned; anyone is the empty string.
     let agent = freeco_types::agent::AgentId::new().to_string();
@@ -405,7 +452,13 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     );
     assert_eq!(s, 200);
     let ops_task = ops_card["id"].as_str().unwrap();
-    let (s, _) = call!(h, LEAD, PUT, format!("{tasks}/{ops_task}"), json!({ "status": "done" }));
+    let (s, _) = call!(
+        h,
+        LEAD,
+        PUT,
+        format!("{tasks}/{ops_task}"),
+        json!({ "status": "done" })
+    );
     assert_eq!(s, 404);
 
     // Deleting is the lead's (or an admin's).

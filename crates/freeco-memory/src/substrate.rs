@@ -833,7 +833,9 @@ impl MemorySubstrate {
         let team_id = team_id.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             let mut sql = format!("SELECT {TASK_COLUMNS} FROM task_queue WHERE 1 = 1");
             let mut params: Vec<String> = Vec::new();
             if let Some(s) = &status {
@@ -871,7 +873,9 @@ impl MemorySubstrate {
         let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             task_get_locked(&db, &task_id)
         })
         .await
@@ -909,7 +913,9 @@ impl MemorySubstrate {
 
         tokio::task::spawn_blocking(move || {
             let now = chrono::Utc::now().to_rfc3339();
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             let current: Option<String> = db
                 .query_row(
                     "SELECT status FROM task_queue WHERE id = ?1",
@@ -1031,7 +1037,9 @@ impl MemorySubstrate {
         let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             let pattern = format!("%\"{task_id}\"%");
             let waiting: i64 = db
                 .query_row(
@@ -1452,15 +1460,31 @@ mod tests {
             status: Some(status.to_string()),
             ..Default::default()
         };
-        let doing = substrate.task_update(&id, moved("doing")).await.unwrap().unwrap();
+        let doing = substrate
+            .task_update(&id, moved("doing"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(doing["status"], "in_progress");
         assert_eq!(doing["column"], "doing");
-        let review = substrate.task_update(&id, moved("review")).await.unwrap().unwrap();
+        let review = substrate
+            .task_update(&id, moved("review"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(review["column"], "review");
-        let done = substrate.task_update(&id, moved("done")).await.unwrap().unwrap();
+        let done = substrate
+            .task_update(&id, moved("done"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(done["status"], "completed");
         assert!(done["completed_at"].is_string());
-        let reopened = substrate.task_update(&id, moved("todo")).await.unwrap().unwrap();
+        let reopened = substrate
+            .task_update(&id, moved("todo"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(reopened["status"], "pending");
         assert!(reopened["completed_at"].is_null(), "reopened is not done");
 
@@ -1497,7 +1521,10 @@ mod tests {
             .await
             .is_err());
         // A card assigned to a person is never claimed by an agent.
-        substrate.org().add_team_member(&team.id, "bot", None).unwrap();
+        substrate
+            .org()
+            .add_team_member(&team.id, "bot", None)
+            .unwrap();
         assert!(substrate.task_claim("bot").await.unwrap().is_none());
     }
 
@@ -1507,9 +1534,19 @@ mod tests {
     async fn handed_in_work_waits_in_review() {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let team = substrate.org().create_team("Docs", None).unwrap();
-        substrate.org().add_team_member(&team.id, "writer", None).unwrap();
+        substrate
+            .org()
+            .add_team_member(&team.id, "writer", None)
+            .unwrap();
         let id = substrate
-            .task_post_on_board("Write the guide", "", None, Some("lead"), Some(&team.id), &[])
+            .task_post_on_board(
+                "Write the guide",
+                "",
+                None,
+                Some("lead"),
+                Some(&team.id),
+                &[],
+            )
             .await
             .unwrap();
         substrate.task_claim("writer").await.unwrap().unwrap();
@@ -1517,13 +1554,22 @@ mod tests {
             .task_hand_in(&id, "draft", Some("someone-else"))
             .await
             .is_err());
-        substrate.task_hand_in(&id, "draft", Some("writer")).await.unwrap();
+        substrate
+            .task_hand_in(&id, "draft", Some("writer"))
+            .await
+            .unwrap();
         let card = substrate.task_get(&id).await.unwrap().unwrap();
         assert_eq!(card["column"], "review");
         assert_eq!(card["result"], "draft");
         assert!(substrate.task_claim("writer").await.unwrap().is_none());
-        substrate.task_complete_by(&id, "accepted", Some("lead")).await.unwrap();
-        assert_eq!(substrate.task_get(&id).await.unwrap().unwrap()["column"], "done");
+        substrate
+            .task_complete_by(&id, "accepted", Some("lead"))
+            .await
+            .unwrap();
+        assert_eq!(
+            substrate.task_get(&id).await.unwrap().unwrap()["column"],
+            "done"
+        );
         assert!(substrate.task_hand_in(&id, "again", None).await.is_err());
     }
 

@@ -126,7 +126,10 @@ mod tests {
         let m: freeco_types::agent::AgentManifest =
             toml::from_str(body).expect("containers parses as a manifest");
         let policy = m.exec_policy.expect("containers sets an exec_policy");
-        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Allowlist);
+        assert_eq!(
+            policy.mode,
+            freeco_types::config::ExecSecurityMode::Allowlist
+        );
         assert!(policy.safe_bins.is_empty());
         assert_eq!(policy.allowed_commands, vec!["podman".to_string()]);
         assert_eq!(m.model.provider, "default");

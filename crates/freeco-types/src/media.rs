@@ -985,14 +985,14 @@ mod mime_parameter_tests {
 
     #[test]
     fn local_only_parses_from_toml() {
-        let unset: MediaConfig = toml::from_str("audio_base_url = \"http://127.0.0.1:8010\"").unwrap();
+        let unset: MediaConfig =
+            toml::from_str("audio_base_url = \"http://127.0.0.1:8010\"").unwrap();
         assert_eq!(unset.local_only, None);
         assert!(unset.local_only_effective());
 
-        let off: MediaConfig = toml::from_str(
-            "audio_base_url = \"http://127.0.0.1:8010\"\nlocal_only = false",
-        )
-        .unwrap();
+        let off: MediaConfig =
+            toml::from_str("audio_base_url = \"http://127.0.0.1:8010\"\nlocal_only = false")
+                .unwrap();
         assert_eq!(off.local_only, Some(false));
         assert!(!off.local_only_effective());
 

@@ -1743,9 +1743,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_reports_status_and_latency() {
-        let port =
-            one_shot_server("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await;
+        let port = one_shot_server(
+            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await;
         let url = format!("http://127.0.0.1:{port}/health");
         let probe = probe_health(&url, Duration::from_secs(3)).await;
         assert_eq!(probe.status, Some(204));
@@ -1761,7 +1762,8 @@ mod tests {
             "HTTP/1.1 302 Found\r\nLocation: /setup\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .await;
-        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
+        let probe =
+            probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
         assert_eq!(probe.status, Some(302));
         assert!(probe.ok);
 
@@ -1769,7 +1771,8 @@ mod tests {
             "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .await;
-        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
+        let probe =
+            probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(3)).await;
         assert_eq!(probe.status, Some(503));
         assert!(!probe.ok);
     }
@@ -1781,7 +1784,8 @@ mod tests {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap().port()
         };
-        let probe = probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(2)).await;
+        let probe =
+            probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_secs(2)).await;
         assert_eq!(probe.status, None);
         assert!(!probe.ok);
         assert!(probe.error.is_some());
@@ -1796,8 +1800,11 @@ mod tests {
             let _held = listener.accept().await;
             tokio::time::sleep(Duration::from_millis(800)).await;
         });
-        let probe =
-            probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_millis(300)).await;
+        let probe = probe_health(
+            &format!("http://127.0.0.1:{port}/"),
+            Duration::from_millis(300),
+        )
+        .await;
         assert_eq!(probe.status, None);
         assert!(!probe.ok);
         assert!(probe.latency_ms < 5000);
@@ -1814,7 +1821,10 @@ mod tests {
         ] {
             let probe = probe_health(url, Duration::from_millis(200)).await;
             assert_eq!(probe.status, None, "{url}");
-            assert!(probe.error.as_deref().unwrap_or("").contains("loopback"), "{url}");
+            assert!(
+                probe.error.as_deref().unwrap_or("").contains("loopback"),
+                "{url}"
+            );
         }
     }
 }

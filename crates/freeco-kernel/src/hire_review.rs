@@ -13,7 +13,12 @@ use freeco_types::agent::AgentManifest;
 
 /// Tools that act on the owner's own machine rather than in a sandbox.
 /// (`sandbox_exec`, once `docker_exec`, runs in a container and is not one.)
-const HOST_TOOLS: &[&str] = &["shell_exec", "process_start", "process_write", "process_kill"];
+const HOST_TOOLS: &[&str] = &[
+    "shell_exec",
+    "process_start",
+    "process_write",
+    "process_kill",
+];
 
 /// Phrases that turn up in prompt-injection and exfiltration attempts.
 const SUSPICIOUS: &[&str] = &[

@@ -249,8 +249,10 @@ mod tests {
         org.set_team_company(&ops.id, Some(&globex.id)).unwrap();
         org.add_team_member(&web.id, "agent-web", None).unwrap();
         org.add_team_member(&ops.id, "agent-ops", None).unwrap();
-        org.add_team_person(&web.id, "lena", TeamRole::Lead).unwrap();
-        org.add_team_person(&web.id, "mo", TeamRole::Member).unwrap();
+        org.add_team_person(&web.id, "lena", TeamRole::Lead)
+            .unwrap();
+        org.add_team_person(&web.id, "mo", TeamRole::Member)
+            .unwrap();
 
         let owner = Caller {
             username: None,
@@ -269,7 +271,10 @@ mod tests {
         assert_eq!(all, both);
         assert_eq!(teams_visible_to(org, &admin).unwrap().len(), 2);
         assert_eq!(teams_visible_to(org, &lead).unwrap(), vec![web.id.clone()]);
-        assert_eq!(teams_visible_to(org, &member).unwrap(), vec![web.id.clone()]);
+        assert_eq!(
+            teams_visible_to(org, &member).unwrap(),
+            vec![web.id.clone()]
+        );
         assert!(teams_visible_to(org, &outsider).unwrap().is_empty());
 
         assert_eq!(
@@ -308,11 +313,9 @@ mod tests {
         );
 
         assert!(require_team_access(org, &member, &web.id, TeamAccess::Work).is_ok());
-        let (code, _) =
-            require_team_access(org, &member, &web.id, TeamAccess::Manage).unwrap_err();
+        let (code, _) = require_team_access(org, &member, &web.id, TeamAccess::Manage).unwrap_err();
         assert_eq!(code, StatusCode::FORBIDDEN);
-        let (code, _) =
-            require_team_access(org, &outsider, &web.id, TeamAccess::Read).unwrap_err();
+        let (code, _) = require_team_access(org, &outsider, &web.id, TeamAccess::Read).unwrap_err();
         assert_eq!(code, StatusCode::FORBIDDEN);
     }
 }

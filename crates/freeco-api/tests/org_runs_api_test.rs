@@ -130,11 +130,7 @@ async fn appointing_a_lead_demotes_the_previous_one_and_is_logged() {
     assert_eq!(unknown.status(), 404);
 
     // Taking a member off goes through main's DELETE route and is logged too.
-    let r = http
-        .delete(format!("{members}/{a}"))
-        .send()
-        .await
-        .unwrap();
+    let r = http.delete(format!("{members}/{a}")).send().await.unwrap();
     assert_eq!(r.status(), 200);
 
     let log: serde_json::Value = http

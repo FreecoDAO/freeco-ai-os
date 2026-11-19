@@ -1155,8 +1155,7 @@ system_prompt = "You are a test agent."
 "#;
         let absent = parse_hand_toml(&format!("{base}{agent}")).unwrap();
         assert!(absent.exec_policy.is_none());
-        let shorthand =
-            parse_hand_toml(&format!("{base}exec_policy = \"deny\"\n{agent}")).unwrap();
+        let shorthand = parse_hand_toml(&format!("{base}exec_policy = \"deny\"\n{agent}")).unwrap();
         assert_eq!(
             shorthand.exec_policy.expect("shorthand").mode,
             freeco_types::config::ExecSecurityMode::Deny
