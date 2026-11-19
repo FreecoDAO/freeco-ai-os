@@ -740,6 +740,32 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   only as a count once the note's budget is full; instructions are kept
   longest. A paid summary for that case is not built.
 
+### Local voice and readable books — 2026-11-19
+
+Written and covered by tests; not yet built or run on a daemon.
+
+- ✅ `[media] local_only`: speech-to-text and text-to-speech never
+  auto-detect or fall back to a cloud provider. A failing local endpoint is a
+  loud error that names the URL. Default: on when the configured speech URLs
+  are all local. Tests cover config parsing, a cloud provider never being
+  chosen, and a closed local port producing that error.
+- ✅ Voice `DATABASE_URL` uses `postgresql+asyncpg://` (board task 6). It was
+  already in the repo and now has a test. The live stack still has to be
+  recreated from the template.
+- ⬜ dograh's own STT/TTS selection lives in dograh's database. The hand and its
+  SKILL say to choose Speaches at `http://host.containers.internal:8010/v1`.
+  Not verified live: whether dograh's container reaches the host's 8010 that
+  way on rootless podman.
+- ✅ Accounting: a read-only `accounting_api` tool, and a Services -> Akaunting
+  Connect step that stores the login in the vault. The hand is wired to the
+  tool.
+- ⬜ Not verified live: Akaunting's API auth (Basic plus `X-Company`) and
+  `/api/ping`.
+- ⬜ Accounting decisions for the owner: country and tax rules, chart of
+  accounts, whether agents may write, pinning the upstream image, and one
+  install path instead of hand plus Services compose. Default proposal: a
+  country-neutral double-entry ledger, read-only for agents.
+
 ### OmniRoute as the one gateway — 2026-11-14
 
 Live now (runtime config, no build needed):

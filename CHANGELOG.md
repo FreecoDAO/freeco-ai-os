@@ -42,6 +42,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Speech can be kept on this machine: `[media] local_only`. With it on,
+  dictation and spoken replies use only the local endpoint (`audio_base_url`,
+  `tts_openai_base_url`, or Parakeet MLX). Groq, OpenAI and ElevenLabs are
+  never picked from their keys and never used as a fallback. If the local
+  service is down, you get an error naming its URL and what failed, and the
+  daemon logs it as an error. When the setting is absent, it is on if the
+  configured speech URLs are all local, for example Speaches at
+  `http://127.0.0.1:8010`. Set it to `false` to allow cloud speech.
+- Agents can read the books. A new read-only `accounting_api` tool reads
+  transactions, invoices, accounts, contacts and reports from the local
+  Akaunting. It sends GET only and cannot record, edit, e-mail or pay. Connect
+  it under Services -> Akaunting with the login from Akaunting's first-run
+  wizard. The login goes to the vault, not into a chat. The accounting hand
+  uses the tool. Before this, its prompt referred to "accounting tools" that
+  did not exist.
+- The Speaches and voice hands now explain how to point dograh's transcriber
+  and voice at the local Speaches. dograh keeps those settings in its own
+  database, and its defaults are cloud providers.
 - Skills install straight from GitHub. The Skills page has a GitHub tab:
   paste `owner/repo/skills` or a link, preview, tick the skills, install.
   Every install is pinned to the commit that was previewed, and every skill
