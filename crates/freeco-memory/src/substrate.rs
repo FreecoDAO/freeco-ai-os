@@ -245,6 +245,14 @@ impl MemorySubstrate {
         self.sessions.list_sessions()
     }
 
+    /// Every conversation not in the trash, without its messages, newest
+    /// first.
+    pub fn list_conversation_summaries(
+        &self,
+    ) -> FreecoResult<Vec<crate::session::ConversationSummary>> {
+        self.sessions.list_conversation_summaries()
+    }
+
     /// List agent conversations (the canonical store) with their names.
     pub fn list_canonical_sessions(&self) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_canonical_sessions()
