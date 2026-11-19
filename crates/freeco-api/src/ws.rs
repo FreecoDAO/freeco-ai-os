@@ -197,7 +197,7 @@ pub(crate) struct WsAuthCtx<'a> {
     pub api_key: &'a str,
     /// Whether dashboard session login is enabled in config.
     pub auth_enabled: bool,
-    /// Secret used to verify session cookies (api_key when set, else password hash).
+    /// Secret used to verify session cookies, from `session_auth::session_secret`.
     pub session_secret: &'a str,
     /// Whether the request originated from a loopback address.
     pub is_loopback: bool,
@@ -285,9 +285,8 @@ pub(crate) fn check_ws_auth(ctx: &WsAuthCtx<'_>) -> Result<(), axum::http::Statu
         return Ok(());
     }
 
-    // Dashboard session cookie (issue #1085). When auth_enabled is on the
-    // session_secret is set by server.rs to either the api_key or the
-    // configured password hash, mirroring the HTTP auth middleware.
+    // Dashboard session cookie (issue #1085), verified with the one session
+    // secret, mirroring the HTTP auth middleware.
     if ctx.auth_enabled && !ctx.session_secret.is_empty() {
         if let Some(token) = crate::session_auth::extract_session_cookie(ctx.headers) {
             if crate::session_auth::verify_session_token(&token, ctx.session_secret).is_some() {
@@ -321,16 +320,9 @@ pub async fn agent_ws(
     let is_loopback = crate::middleware::from_this_device(addr.ip(), &headers);
     let allow_no_auth = crate::middleware::allow_no_auth_from_env();
 
-    // Mirror the session_secret derivation in server.rs::AuthState so cookies
-    // issued by /api/auth/login verify the same way over HTTP and WS.
+    // The same secret login signs with and the HTTP middleware verifies with.
     let auth_enabled = state.kernel.config.auth.enabled;
-    let session_secret_owned: String = if !api_key.is_empty() {
-        api_key.to_string()
-    } else if auth_enabled {
-        state.kernel.config.auth.password_hash.clone()
-    } else {
-        String::new()
-    };
+    let session_secret_owned = crate::session_auth::session_secret(&state.kernel.config);
 
     let auth_ctx = WsAuthCtx {
         api_key,
@@ -1818,7 +1810,12 @@ mod tests {
     fn ws_auth_accepts_session_cookie() {
         // Issue #1085: the dashboard logs in via cookie, so WS must accept it.
         let secret = "shared-secret";
-        let token = crate::session_auth::create_session_token("alice", secret, 1);
+        let token = crate::session_auth::create_session_token(
+            "alice",
+            freeco_types::auth::UserRole::Owner,
+            secret,
+            1,
+        );
         let cookie = format!("foo=bar; freeco_session={token}");
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("cookie", cookie.parse().unwrap());
@@ -1842,7 +1839,12 @@ mod tests {
     fn ws_auth_session_cookie_rejected_when_auth_disabled() {
         // If dashboard auth is off, cookies must not grant access.
         let secret = "shared-secret";
-        let token = crate::session_auth::create_session_token("alice", secret, 1);
+        let token = crate::session_auth::create_session_token(
+            "alice",
+            freeco_types::auth::UserRole::Owner,
+            secret,
+            1,
+        );
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("cookie", format!("freeco_session={token}").parse().unwrap());
         let uri = empty_uri();
@@ -1864,7 +1866,12 @@ mod tests {
     #[test]
     fn ws_auth_rejects_wrong_session_cookie() {
         // Cookie signed with the wrong secret must fail.
-        let bad = crate::session_auth::create_session_token("alice", "other-secret", 1);
+        let bad = crate::session_auth::create_session_token(
+            "alice",
+            freeco_types::auth::UserRole::Owner,
+            "other-secret",
+            1,
+        );
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("cookie", format!("freeco_session={bad}").parse().unwrap());
         let uri = empty_uri();
@@ -1979,7 +1986,12 @@ mod tests {
         // When only dashboard login is configured (no api_key, auth_enabled=true),
         // a valid session cookie must allow non-loopback WS upgrades.
         let secret = "password-hash-style-secret";
-        let token = crate::session_auth::create_session_token("admin", secret, 1);
+        let token = crate::session_auth::create_session_token(
+            "admin",
+            freeco_types::auth::UserRole::Owner,
+            secret,
+            1,
+        );
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("cookie", format!("freeco_session={token}").parse().unwrap());
         let uri = empty_uri();
@@ -2030,7 +2042,12 @@ mod tests {
         // With dashboard auth on, a valid session cookie is the supported
         // credential and must upgrade successfully from loopback too.
         let secret = "password-hash-style-secret";
-        let token = crate::session_auth::create_session_token("admin", secret, 1);
+        let token = crate::session_auth::create_session_token(
+            "admin",
+            freeco_types::auth::UserRole::Owner,
+            secret,
+            1,
+        );
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("cookie", format!("freeco_session={token}").parse().unwrap());
         let uri = empty_uri();
