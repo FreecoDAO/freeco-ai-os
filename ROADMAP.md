@@ -675,6 +675,30 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+### Daemon work rescued from the October container -- ported onto main
+
+From the snapshot `rescue/daemon-work-2026-10`, re-implemented on main's
+mechanisms (main's `agent_delegate`, its team-member routes, its WhatsApp
+allowlist and its fallback report). Checked by unit and API tests, not yet
+on a running daemon.
+
+- 🟨 `agent_sleep`, wake on message, worker copies for `agent_delegate`
+  without an `agent` (max 4, no inherited schedule).
+- 🟨 Team lead appointment (`PUT /api/org/teams/{id}/members`), organisation
+  change log (`GET /api/org/changes`) and their Projects page UI.
+- 🟨 Hire security review on the agent spawn path (held for the owner) and on
+  `POST /api/agents` (reported).
+- 🟨 Prompt-injection marking for outside-content tool results and channel
+  messages.
+- 🟨 Run History from a server-side log (`GET /api/runs/history`).
+- 🟨 Claude Code `<model>@<effort>`, sign-in errors, IPv4-first.
+- 🟨 One retry on a failed connection; clearer hourly quota message.
+- 🟨 WhatsApp gateway restarts, alerts, install marker, media; one allowlist.
+- 🟨 Service backups: 3 runs, 12 GB cap.
+- 🟨 `deploy/daemon/` Podman packaging and runbook; home path remap.
+- 📋 The ws `parallel` flag (a busy agent's worker takes a chat message) is
+  left to the CEO dispatcher work, which owns the socket protocol.
+
 ### Spend limits and secrets.env -- from the 2026-09-14 audit
 
 Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
