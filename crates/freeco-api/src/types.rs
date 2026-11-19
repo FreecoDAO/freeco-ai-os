@@ -53,6 +53,11 @@ pub struct MessageRequest {
     /// switched to -- not necessarily the one the sender is looking at.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Where the message came from, as a gateway reports it
+    /// (`{"channel": "whatsapp", ...}`). A message relayed from a chat channel
+    /// is outside content and is checked for prompt-injection wording.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response from sending a message.

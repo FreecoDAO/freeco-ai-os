@@ -605,10 +605,27 @@ pub async fn send_message(
         None
     };
 
+    // A message relayed from a chat channel (the WhatsApp gateway posts here)
+    // can carry text the sender pasted or forwarded from elsewhere: it is
+    // outside content, marked -- not blocked -- when it reads like an
+    // injection.
+    let text = match req
+        .metadata
+        .as_ref()
+        .and_then(|m| m["channel"].as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        Some(channel) => freeco_kernel_runtime::injection_guard::mark(
+            req.message.clone(),
+            &format!("a {channel} message"),
+        ),
+        None => req.message.clone(),
+    };
     // Every attachment, not only images, goes into the agent's workspace.
     let message = match stage_attachments(&state.kernel, agent_id, &req.attachments) {
-        Some(note) => format!("{}{}", req.message, note),
-        None => req.message.clone(),
+        Some(note) => format!("{text}{note}"),
+        None => text,
     };
 
     let pinned_session = match req.session_id.as_deref().map(str::trim) {
