@@ -3596,6 +3596,37 @@
                 <!-- ═══ QR CODE FLOW (WhatsApp Web style) ═══ -->
                 <template x-if="isQrChannel() && !showBusinessApi">
                   <div>
+                    <!-- WhatsApp: gateway status and allowlist (GET /api/channels/whatsapp/status). All text via x-text, so it is escaped. -->
+                    <div x-show="setupModal.name === 'whatsapp'" class="wa-allowlist" style="border:1px solid var(--border,rgba(148,163,184,0.2));border-radius:8px;padding:0.75rem;margin-bottom:0.75rem">
+                      <div class="flex gap-2" style="align-items:center;justify-content:space-between;flex-wrap:wrap">
+                        <span class="text-sm" style="font-weight:600">Gateway</span>
+                        <span class="badge" :class="waStateLabel().cls" x-text="waStateLabel().text"></span>
+                      </div>
+                      <p class="text-xs text-dim mt-1" x-show="wa.data && wa.data.message" x-text="wa.data && wa.data.message"></p>
+                      <p class="text-xs text-dim mt-1" x-show="wa.data && wa.data.crashes > 0" x-text="wa.data ? ('Crashes in a row: ' + wa.data.crashes) : ''"></p>
+                      <p class="text-xs mt-1" x-show="wa.error" style="color:var(--red,#ef4444)" x-text="wa.error"></p>
+
+                      <div class="text-sm mt-3" style="font-weight:600">Allowed chats</div>
+                      <p class="text-xs text-dim mt-1" x-text="(wa.data && wa.data.allowlist && wa.data.allowlist.rule) || 'Only listed chats, in both directions. An empty list allows nobody but your own number.'"></p>
+                      <ul class="text-xs mt-1" style="padding-left:1.25rem" x-show="waList('numbers').length || waList('groups').length">
+                        <template x-for="n in waList('numbers')" :key="'n' + n">
+                          <li><span x-text="n"></span><span class="text-dim" x-show="wa.data && wa.data.allowlist && wa.data.allowlist.owner_number === n"> (you)</span></li>
+                        </template>
+                        <template x-for="g in waList('groups')" :key="'g' + g">
+                          <li><span x-text="g"></span><span class="text-dim"> (group)</span></li>
+                        </template>
+                      </ul>
+                      <p class="text-xs mt-1" style="color:var(--warning,#facc15)" x-show="waList('rejected').length" x-text="'Not understood, allows nothing: ' + waList('rejected').join(', ') + ' (use international form, e.g. +41 79 123 45 67, or a group JID ending @g.us)'"></p>
+
+                      <label class="text-xs mt-2" style="display:block;margin-bottom:0.25rem">Allowed numbers and groups (comma-separated)</label>
+                      <input class="form-input" type="text" x-model="formValues.allowed_users" placeholder="+41 79 123 45 67, 120363000000000000@g.us">
+                      <label class="text-xs mt-2" style="display:block;margin-bottom:0.25rem">Your own number (always allowed)</label>
+                      <input class="form-input" type="text" x-model="formValues.owner_number" placeholder="+41 79 123 45 67">
+                      <div class="flex gap-2 mt-2" style="justify-content:flex-end">
+                        <button class="btn btn-ghost btn-sm" @click="saveWhatsAppAllowlist()" :disabled="wa.saving" x-text="wa.saving ? 'Saving...' : 'Save allowed chats'"></button>
+                      </div>
+                    </div>
+
                     <!-- QR: Loading -->
                     <div x-show="qr.loading" style="text-align:center;padding:2rem 0">
                       <div class="spinner"></div>
