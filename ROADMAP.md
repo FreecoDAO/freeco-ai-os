@@ -775,7 +775,36 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
 - 🟨 **A message from another agent is marked as not from the user**, so a
   colleague's request cannot pass as the owner's approval.
 - 🟨 **`web_fetch` checks every redirect** against the same SSRF rules as the
-  first URL; the fallback fetch now has them too.
+  first URL; the fallback fetch now has them too. `extract_host` also stops at
+  `?`, `#` and `\` and drops userinfo, so `http://x@169.254.169.254/` and
+  `http://10.0.0.1?x` can no longer slip past it (2026-11-19).
+- 🟨 **`browser_run_js` can no longer bypass that SSRF check.** Expressions
+  are screened for network APIs, dynamic code, escapes and global-object
+  obfuscation before the browser sees them, with an error that points to
+  `web_fetch`; every page request is also intercepted over CDP and failed if
+  it targets a private, loopback, link-local or metadata address. The tool
+  requires approval by default, next to `shell_exec`. Not yet exercised
+  against a running browser (2026-11-19).
+- 🟨 **Secrets stop at the output boundary.** Known secret values (vault,
+  env/`.env` provider keys and channel tokens, MCP header credentials) and
+  well-known key patterns are replaced with `[REDACTED:<name|kind>]` in
+  replies before they are stored or sent to channels and in tool results
+  before they reach the model context and the dashboard; `file_write` and
+  `apply_patch` refuse to write a secret into a file. Pattern detection is
+  deliberately narrower than the data gateway's reversible mask, so slugs,
+  hashes and emails are untouched. Redaction depends on the kernel's
+  `known_secrets`; handles without it still get the pattern rules
+  (2026-11-19).
+- 🟨 **`system_info` tool and a real `/api/version`.** A build script stamps
+  the commit SHA, branch, UTC build time and rustc version into the binary
+  (env `FREECO_GIT_*` first for container builds, then git, then `unknown`);
+  the read-only `system_info` tool reports them plus OS/arch and uptime and
+  is granted to every agent. The Dockerfile takes them as build args and the
+  release workflow passes them (2026-11-19).
+- ✅ **Reported `ghp_` token in a release script: not in this repo.** Checked
+  2026-11-18 over all fetched refs, all 103 local refs and the working tree;
+  no match and no `fix_release.py` ever existed here. Revoking it remains
+  the owner's call — see `SECURITY.md` (2026-11-19).
 - 🟨 **The WhatsApp gateway answers only allowed chats** (groups off unless
   listed, optional number allowlist) and gives each contact a conversation of
   its own. The kernel still keys a conversation's history by agent, so a guest

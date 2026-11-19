@@ -263,6 +263,17 @@ pub trait KernelHandle: Send + Sync {
         Vec::new()
     }
 
+    /// Secret values the kernel knows, as `(name, value)`: vault entries,
+    /// secret-named environment and `.env` variables (provider keys, channel
+    /// tokens), MCP header values. Used only to redact them out of replies,
+    /// tool results and written files (`secret_redact`); never shown.
+    ///
+    /// Defaults to empty, so only the well-known key patterns are redacted
+    /// for a handle that does not provide them.
+    fn known_secrets(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool {
         let _ = tool_name;

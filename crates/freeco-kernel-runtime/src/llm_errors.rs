@@ -657,7 +657,11 @@ mod tests {
             "error sending request for url (https://api.groq.com/openai/v1/chat/completions)",
             "dns error: failed to lookup address information",
         ] {
-            assert_eq!(classify_error(raw, None).category, LlmErrorCategory::Timeout, "{raw}");
+            assert_eq!(
+                classify_error(raw, None).category,
+                LlmErrorCategory::Timeout,
+                "{raw}"
+            );
         }
     }
 

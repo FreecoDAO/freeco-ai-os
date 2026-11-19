@@ -238,6 +238,48 @@ fn refuse_shell_by_policy(
     None
 }
 
+/// Refuse calls whose input is unsafe in itself, before anyone is asked to
+/// approve them: a browser_run_js expression that reaches the network or
+/// hides what it does (`js_guard`), or a file_write / apply_patch that would
+/// put a secret on disk (`secret_redact`).
+fn refuse_unsafe_input(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Option<ToolResult> {
+    let refusal = match tool_name {
+        "browser_run_js" => input["expression"]
+            .as_str()
+            .and_then(|e| crate::js_guard::check_run_js_expression(e).err()),
+        "file_write" | "apply_patch" => {
+            let text = if tool_name == "file_write" {
+                input["content"].as_str().map(str::to_string)
+            } else {
+                input["patch"]
+                    .as_str()
+                    .map(crate::secret_redact::patch_added_text)
+            };
+            text.and_then(|t| {
+                let known = kernel.map(|k| k.known_secrets()).unwrap_or_default();
+                crate::secret_redact::find_secret(&t, &known)
+                    .map(|what| crate::secret_redact::written_secret_error(tool_name, &what))
+            })
+        }
+        _ => None,
+    }?;
+    warn!(tool_name, "Refused unsafe tool input");
+    Some(ToolResult {
+        tool_use_id: tool_use_id.to_string(),
+        content: format!("Error: {refusal}"),
+        is_error: true,
+    })
+}
+
+/// Tools whose input is text the agent sends to someone else, and the field
+/// holding it. Redacted like a reply: a channel message is a reply.
+const OUTBOUND_TEXT_FIELDS: &[(&str, &str)] = &[("channel_send", "message")];
+
 /// Ask a human to approve this call when the tool needs it. Returns the
 /// result to give the model when the call must not run, or `None` to go on.
 async fn approval_gate(
@@ -340,7 +382,9 @@ pub async fn approve_before_deadline(
     exec_policy: Option<&freeco_types::config::ExecPolicy>,
 ) -> Option<ToolResult> {
     let tool_name = normalize_tool_name(tool_name);
-    if refuse_before_approval(tool_use_id, tool_name, allowed_tools).is_some() {
+    if refuse_before_approval(tool_use_id, tool_name, allowed_tools).is_some()
+        || refuse_unsafe_input(tool_use_id, tool_name, input, kernel).is_some()
+    {
         return None;
     }
     if refuse_shell_by_policy(
@@ -419,6 +463,10 @@ pub async fn execute_tool(
         return refused;
     }
 
+    if let Some(refused) = refuse_unsafe_input(tool_use_id, tool_name, input, kernel) {
+        return refused;
+    }
+
     // The agent loop asks for approval before the tool deadline starts and
     // marks the call as approved; anything else is asked here.
     let approved = APPROVED_TOOL_CALL
@@ -438,6 +486,28 @@ pub async fn execute_tool(
             return refused;
         }
     }
+
+    // Known secrets, fetched once per call: for outbound text below and for
+    // the result at the end.
+    let known_secrets = kernel.map(|k| k.known_secrets()).unwrap_or_default();
+    let redacted_input;
+    let input = match OUTBOUND_TEXT_FIELDS.iter().find(|(t, _)| *t == tool_name) {
+        Some((_, field)) => match input[*field].as_str() {
+            Some(text) => {
+                let clean = crate::secret_redact::redact(text, &known_secrets);
+                if matches!(clean, std::borrow::Cow::Owned(_)) {
+                    let mut copy = input.clone();
+                    copy[*field] = serde_json::Value::String(clean.into_owned());
+                    redacted_input = copy;
+                    &redacted_input
+                } else {
+                    input
+                }
+            }
+            None => input,
+        },
+        None => input,
+    };
 
     debug!(tool_name, "Executing tool");
     let result = match tool_name {
@@ -661,6 +731,9 @@ pub async fn execute_tool(
 
         // System time tool
         "system_time" => Ok(tool_system_time()),
+
+        // Build and system information (read-only, available to every agent)
+        "system_info" => Ok(tool_system_info()),
 
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, kernel, caller_agent_id).await,
@@ -992,21 +1065,33 @@ pub async fn execute_tool(
         }
     };
 
+    // Tool output goes into the model's context and onto the dashboard; a
+    // secret a tool read (a config file, an env dump, a page) stops here.
+    let redact = |text: String| -> String {
+        let clean = match crate::secret_redact::redact(&text, &known_secrets) {
+            std::borrow::Cow::Owned(clean) => Some(clean),
+            std::borrow::Cow::Borrowed(_) => None,
+        };
+        clean.unwrap_or(text)
+    };
     match result {
         Ok(content) => ToolResult {
             tool_use_id: tool_use_id.to_string(),
             // Web pages, files and other outside content are checked for
-            // injection wording before the model reads them.
-            content: if crate::injection_guard::reads_outside_content(tool_name) {
-                crate::injection_guard::mark(content, tool_name)
-            } else {
-                content
-            },
+            // injection wording before the model reads them; then known
+            // secrets are redacted, last, so nothing put back leaks one.
+            content: redact(
+                if crate::injection_guard::reads_outside_content(tool_name) {
+                    crate::injection_guard::mark(content, tool_name)
+                } else {
+                    content
+                },
+            ),
             is_error: false,
         },
         Err(err) => ToolResult {
             tool_use_id: tool_use_id.to_string(),
-            content: format!("Error: {err}"),
+            content: redact(format!("Error: {err}")),
             is_error: true,
         },
     }
@@ -1737,7 +1822,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "browser_run_js".to_string(),
-            description: "Run JavaScript on the current browser page and return the result. For advanced interactions that other browser tools cannot handle.".to_string(),
+            description: "Run JavaScript on the current browser page and return the result. Only for reading or interacting with the page's DOM when other browser tools cannot. Network APIs (fetch, XMLHttpRequest, WebSocket, sendBeacon, import()), eval/Function, escapes and global-object tricks are refused: use web_fetch for HTTP requests. Never put credentials in the expression.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2117,6 +2202,16 @@ them.".to_string(),
         ToolDefinition {
             name: "system_time".to_string(),
             description: "Get the current date, time, and timezone. Returns ISO 8601 timestamp, Unix epoch seconds, and timezone info.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        // --- Build / system info tool ---
+        ToolDefinition {
+            name: "system_info".to_string(),
+            description: "Read-only build and system information: version, commit SHA, branch, UTC build time, rustc version, OS/architecture, and process uptime in seconds. Use when asked about versions, deployments, or whether a fix is in the running build. Changes nothing.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -4571,6 +4666,16 @@ async fn tool_location_get() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// Return current date, time, timezone, and Unix epoch.
+/// system_info: build identity and uptime. Never needs approval and changes
+/// nothing; the values come from `build_info`, the same source `/api/version`
+/// reads, so an agent and the dashboard cannot disagree about the build.
+fn tool_system_info() -> String {
+    let text = crate::build_info::info_text();
+    let json = serde_json::to_string_pretty(&crate::build_info::info_json())
+        .unwrap_or_else(|_| "{}".to_string());
+    format!("{text}\n\n{json}")
+}
+
 fn tool_system_time() -> String {
     let now_utc = chrono::Utc::now();
     let now_local = chrono::Local::now();
@@ -6213,10 +6318,18 @@ mod tests {
         };
         let marked = read("page.txt").await;
         assert!(!marked.is_error, "{}", marked.content);
-        assert!(marked.content.starts_with("[FreEco security note"), "{}", marked.content);
+        assert!(
+            marked.content.starts_with("[FreEco security note"),
+            "{}",
+            marked.content
+        );
         assert!(marked.content.contains(body));
         let plain = read("plain.txt").await;
-        assert!(!plain.content.contains("security note"), "{}", plain.content);
+        assert!(
+            !plain.content.contains("security note"),
+            "{}",
+            plain.content
+        );
     }
 
     #[tokio::test]
@@ -7416,9 +7529,8 @@ mod tests {
         let input = serde_json::json!({
             "command": "podman run --privileged --name freeco-x localhost/app"
         });
-        let refused =
-            refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy))
-                .expect("privileged run must be refused");
+        let refused = refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy))
+            .expect("privileged run must be refused");
         assert!(refused.is_error);
         assert!(refused.content.contains("exec_policy.containers"));
 
@@ -7451,14 +7563,172 @@ mod tests {
         let policy = freeco_types::config::ExecPolicy::default();
         let input = serde_json::json!({ "command": "podman run --privileged alpine" });
         assert!(
-            refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy))
-                .is_none()
+            refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy)).is_none()
         );
         // Other tools are never touched.
         let policy = container_exec_policy();
         assert!(
-            refuse_shell_by_policy("t2", "file_read", &input, None, None, Some(&policy))
-                .is_none()
+            refuse_shell_by_policy("t2", "file_read", &input, None, None, Some(&policy)).is_none()
         );
+    }
+
+    // ── Secrets in written files and tool output; unsafe browser JS ─────
+
+    async fn exec_in(tool: &str, input: serde_json::Value, root: Option<&Path>) -> ToolResult {
+        execute_tool(
+            "test-id", tool, &input, None, None, None, None, None, None, None, None, root, None,
+            None, None, None, None,
+        )
+        .await
+    }
+
+    fn fake_github_token() -> String {
+        // Built at runtime so no token-shaped literal sits in the source.
+        format!("{}{}", "ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8")
+    }
+
+    #[tokio::test]
+    async fn file_write_with_a_key_is_refused_and_nothing_is_written() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let content = format!("TOKEN = '{}'\n", fake_github_token());
+        let r = exec_in(
+            "file_write",
+            serde_json::json!({"path": "release.py", "content": content}),
+            Some(tmp.path()),
+        )
+        .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("file_write refused"), "{}", r.content);
+        assert!(r.content.contains("github_token"), "{}", r.content);
+        assert!(r.content.contains("environment variable or the vault"));
+        assert!(
+            !r.content.contains("ghp_a1B2"),
+            "the error must not echo the key"
+        );
+        assert!(!tmp.path().join("release.py").exists());
+    }
+
+    #[tokio::test]
+    async fn file_write_reading_the_key_from_env_is_allowed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let r = exec_in(
+            "file_write",
+            serde_json::json!({
+                "path": "release.py",
+                "content": "import os\nTOKEN = os.environ['GITHUB_TOKEN']\n"
+            }),
+            Some(tmp.path()),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(tmp.path().join("release.py").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_patch_adding_a_key_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let patch = format!(
+            "*** Begin Patch\n*** Add File: k.env\n+GROQ_API_KEY={}\n*** End Patch",
+            "gsk_7Hd82kLmN3pQ9rStUv4wXyZ1"
+        );
+        let r = exec_in(
+            "apply_patch",
+            serde_json::json!({"patch": patch}),
+            Some(tmp.path()),
+        )
+        .await;
+        assert!(r.is_error);
+        assert!(r.content.contains("apply_patch refused"), "{}", r.content);
+        assert!(!tmp.path().join("k.env").exists());
+    }
+
+    #[tokio::test]
+    async fn tool_results_are_redacted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let token = fake_github_token();
+        std::fs::write(tmp.path().join("old.py"), format!("T = '{token}'\n")).unwrap();
+        let r = exec_in(
+            "file_read",
+            serde_json::json!({"path": "old.py"}),
+            Some(tmp.path()),
+        )
+        .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(!r.content.contains(&token), "{}", r.content);
+        assert!(
+            r.content.contains("[REDACTED:github_token]"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_run_js_fetch_is_refused_before_approval_or_browser() {
+        let r = exec_in(
+            "browser_run_js",
+            serde_json::json!({"expression": "fetch('http://169.254.169.254/latest/meta-data/')"}),
+            None,
+        )
+        .await;
+        assert!(r.is_error);
+        assert!(
+            r.content.contains("browser_run_js refused"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("web_fetch"), "{}", r.content);
+        // Refused calls never reach a human approval prompt.
+        let pre = approve_before_deadline(
+            "id",
+            "browser_run_js",
+            &serde_json::json!({"expression": "window['fe'+'tch']('/x')"}),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(pre.is_none());
+    }
+
+    #[tokio::test]
+    async fn system_info_returns_build_identity_and_changes_nothing() {
+        let r = exec_in("system_info", serde_json::json!({}), None).await;
+        assert!(!r.is_error, "{}", r.content);
+        let v = crate::build_info::info_json();
+        for field in [
+            "version",
+            "git_sha",
+            "git_branch",
+            "build_date",
+            "platform",
+            "arch",
+        ] {
+            assert!(r.content.contains(field), "missing {field}: {}", r.content);
+        }
+        assert!(
+            r.content.contains(v["version"].as_str().unwrap()),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("uptime"), "{}", r.content);
+        // Defined for every agent: it is in the always-granted policy list.
+        assert!(
+            crate::tool_policy::ALWAYS_GRANTED_TOOLS.contains(&"system_info"),
+            "system_info must be available to all agents"
+        );
+        // Safe: not in any deny list, no approval required.
+        assert!(!crate::tool_policy::SUBAGENT_DENY_ENFORCED.contains(&"system_info"));
+        // builtin definitions advertise it
+        assert!(builtin_tool_definitions()
+            .iter()
+            .any(|t| t.name == "system_info"));
+    }
+
+    #[test]
+    fn system_info_never_requires_approval_by_default() {
+        // FreecoKernel wires known_secrets; the tool itself is pure output.
+        // Guard against it accidentally landing in an always-ask list.
+        assert!(!ALWAYS_ASK_TOOLS.contains(&"system_info"));
     }
 }

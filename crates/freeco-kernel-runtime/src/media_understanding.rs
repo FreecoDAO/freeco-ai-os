@@ -262,7 +262,10 @@ You already have a {label} key ({env}). It speaks the                          s
                 return Err(local_speech_error(
                     "speech-to-text",
                     &api_url,
-                    &format!("HTTP {status}: {}", crate::str_utils::safe_truncate_str(&body, 500)),
+                    &format!(
+                        "HTTP {status}: {}",
+                        crate::str_utils::safe_truncate_str(&body, 500)
+                    ),
                 ));
             }
             return Err(format!("Transcription API error ({}): {}", status, body));
@@ -270,7 +273,11 @@ You already have a {label} key ({env}). It speaks the                          s
 
         let transcription = resp.text().await.map_err(|e| {
             if local_only {
-                local_speech_error("speech-to-text", &api_url, &format!("reading the reply failed: {e}"))
+                local_speech_error(
+                    "speech-to-text",
+                    &api_url,
+                    &format!("reading the reply failed: {e}"),
+                )
             } else {
                 format!("Failed to read transcription response: {}", e)
             }
@@ -526,7 +533,11 @@ fn local_only_stt_provider(config: &MediaConfig) -> Result<&'static str, String>
 /// endpoint fails while `[media].local_only` is in effect. Names the URL and
 /// what failed, and says plainly that no cloud service was tried instead.
 pub(crate) fn local_speech_error(kind: &str, url: &str, what: &str) -> String {
-    error!(url, failure = what, "local {kind} failed; [media].local_only is on, no cloud fallback");
+    error!(
+        url,
+        failure = what,
+        "local {kind} failed; [media].local_only is on, no cloud fallback"
+    );
     format!(
         "Local {kind} at {url} failed: {what}. [media].local_only is on, so no \
          cloud service was tried. Check that the local Speaches service is running \

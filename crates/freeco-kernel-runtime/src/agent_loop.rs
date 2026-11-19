@@ -838,6 +838,13 @@ pub async fn run_agent_loop(
         if let Some(gw) = gateway.as_ref() {
             restore_response(gw, &mut response);
         }
+        // After the restore, which can put a real secret back into the text:
+        // the reply is stored, shown and sent to channels from here on.
+        let known_secrets = kernel
+            .as_ref()
+            .map(|k| k.known_secrets())
+            .unwrap_or_default();
+        redact_response_text(&mut response, &known_secrets);
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -1597,6 +1604,24 @@ fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut Complet
     }
     for call in &mut response.tool_calls {
         restore_json(gw, &mut call.input);
+    }
+}
+
+/// Replace known secrets and key patterns in the reply's text blocks
+/// (`secret_redact`). Tool-call arguments are left alone: a tool may need a
+/// real value, and file writes that would store one are refused by the tool
+/// runner instead.
+fn redact_response_text(response: &mut CompletionResponse, known: &[(String, String)]) {
+    for block in &mut response.content {
+        if let ContentBlock::Text { text, .. } = block {
+            let clean = match crate::secret_redact::redact(text, known) {
+                std::borrow::Cow::Owned(clean) => Some(clean),
+                std::borrow::Cow::Borrowed(_) => None,
+            };
+            if let Some(clean) = clean {
+                *text = clean;
+            }
+        }
     }
 }
 
@@ -2391,6 +2416,13 @@ pub async fn run_agent_loop_streaming(
         if let Some(gw) = gateway.as_ref() {
             restore_response(gw, &mut response);
         }
+        // After the restore, which can put a real secret back into the text:
+        // the reply is stored, shown and sent to channels from here on.
+        let known_secrets = kernel
+            .as_ref()
+            .map(|k| k.known_secrets())
+            .unwrap_or_default();
+        redact_response_text(&mut response, &known_secrets);
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -6347,8 +6379,13 @@ mod connect_retry_tests {
             .await
             .expect("the retry answers");
         assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
-        assert!(served_by.is_none(), "the same model answered, not a fallback");
-        assert!(matches!(&response.content[0], ContentBlock::Text { text, .. } if text == "back online"));
+        assert!(
+            served_by.is_none(),
+            "the same model answered, not a fallback"
+        );
+        assert!(
+            matches!(&response.content[0], ContentBlock::Text { text, .. } if text == "back online")
+        );
     }
 
     #[tokio::test]
@@ -6361,5 +6398,45 @@ mod connect_retry_tests {
         let result = call_with_retry(&driver, request(), None, None, &[], &mut served_by).await;
         assert!(result.is_err());
         assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A reply that echoes a secret (one the gateway just restored, or one the
+    /// model saw in a file) is stored and sent with the secret replaced.
+    #[test]
+    fn reply_text_is_redacted_but_tool_arguments_are_not() {
+        let known = vec![(
+            "CRM_API_KEY".to_string(),
+            "crm-7f3k9QzLmP2wXa8B".to_string(),
+        )];
+        let mut response = CompletionResponse {
+            content: vec![
+                ContentBlock::Text {
+                    text: "Your key is crm-7f3k9QzLmP2wXa8B and gsk_7Hd82kLmN3pQ9rStUv4wXyZ1"
+                        .into(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "crm_api".into(),
+                    input: serde_json::json!({"key": "crm-7f3k9QzLmP2wXa8B"}),
+                    provider_metadata: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: Vec::new(),
+            usage: TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+        };
+        redact_response_text(&mut response, &known);
+        assert_eq!(
+            response.text(),
+            "Your key is [REDACTED:CRM_API_KEY] and [REDACTED:groq_key]"
+        );
+        let ContentBlock::ToolUse { input, .. } = &response.content[1] else {
+            panic!("expected tool use");
+        };
+        assert_eq!(input["key"], "crm-7f3k9QzLmP2wXa8B");
     }
 }

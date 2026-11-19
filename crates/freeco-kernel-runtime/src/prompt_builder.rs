@@ -787,8 +787,8 @@ pub fn tool_category(name: &str) -> &'static str {
         "memory_store" | "memory_recall" | "memory_delete" | "memory_list" => "Memory",
 
         "agent_send" | "agent_delegate" | "agent_spawn" | "agent_list" | "agent_kill"
-        | "agent_activate" | "agent_sleep" | "agent_describe" | "agent_find" | "agent_set_model"
-        | "agent_skills_set" => "Agents",
+        | "agent_activate" | "agent_sleep" | "agent_describe" | "agent_find"
+        | "agent_set_model" | "agent_skills_set" => "Agents",
 
         "container_list" | "container_logs" | "container_start" | "container_stop"
         | "container_restart" => "Containers",
@@ -995,7 +995,10 @@ mod tests {
         let sec = g
             .find("A security control that blocks you is not an ordinary failure")
             .expect("security-block rule present");
-        assert!(sec > alt, "the security exception must follow the alternatives rule");
+        assert!(
+            sec > alt,
+            "the security exception must follow the alternatives rule"
+        );
         assert!(g.contains("not an obstacle to route around"));
         assert!(g.contains("Do not reach the same endpoint, file or action by another path"));
         assert!(g.contains("escalate to the owner"));

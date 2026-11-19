@@ -2229,15 +2229,14 @@ pub async fn set_agent_mode(
 
 /// GET /api/version — Build & version info.
 pub async fn version() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "name": "freeco",
-        "version": env!("CARGO_PKG_VERSION"),
-        "build_date": option_env!("BUILD_DATE").unwrap_or("dev"),
-        "git_sha": option_env!("GIT_SHA").unwrap_or("unknown"),
-        "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
-        "platform": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-    }))
+    // Same source as the system_info tool: one build identity, set by the
+    // runtime crate's build.rs (git / FREECO_GIT_* env), not option_env! here,
+    // which nothing ever set and which reported "dev" / "unknown" forever.
+    let mut info = freeco_kernel_runtime::build_info::info_json();
+    if let Some(obj) = info.as_object_mut() {
+        obj.insert("name".to_string(), serde_json::json!("freeco"));
+    }
+    Json(info)
 }
 
 // ---------------------------------------------------------------------------

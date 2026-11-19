@@ -161,6 +161,7 @@ impl ApprovalManager {
     pub fn classify_risk(tool_name: &str) -> RiskLevel {
         match tool_name {
             "shell_exec" => RiskLevel::Critical,
+            "browser_run_js" => RiskLevel::High,
             "file_write" | "file_delete" | "skill_install_github" => RiskLevel::High,
             "web_fetch" | "browser_navigate" => RiskLevel::Medium,
             _ => RiskLevel::Low,
@@ -225,7 +226,17 @@ mod tests {
     fn test_requires_approval_default() {
         let mgr = default_manager();
         assert!(mgr.requires_approval("shell_exec"));
+        assert!(mgr.requires_approval("browser_run_js"));
+        assert!(!mgr.requires_approval("browser_read_page"));
         assert!(!mgr.requires_approval("file_read"));
+    }
+
+    #[test]
+    fn test_browser_run_js_is_high_risk() {
+        assert_eq!(
+            ApprovalManager::classify_risk("browser_run_js"),
+            RiskLevel::High
+        );
     }
 
     #[test]
@@ -467,7 +478,10 @@ mod tests {
     fn test_policy_defaults() {
         let mgr = default_manager();
         let policy = mgr.policy();
-        assert_eq!(policy.require_approval, vec!["shell_exec".to_string()]);
+        assert_eq!(
+            policy.require_approval,
+            vec!["shell_exec".to_string(), "browser_run_js".to_string()]
+        );
         // Four hours, not sixty seconds. A minute was long enough only if the
         // user happened to be watching the screen at that moment; otherwise
         // the request auto-denied before it was ever seen, and the agent

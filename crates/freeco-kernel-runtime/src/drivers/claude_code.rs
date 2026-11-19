@@ -1087,7 +1087,8 @@ mod tests {
     /// user is told, with the container command and never a host install.
     #[test]
     fn a_signed_out_cli_says_so_and_how_to_sign_in() {
-        let stdout = r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        let stdout =
+            r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
         let detail = result_text(stdout).expect("the result text is read");
         let msg = failure_message(1, &detail);
         assert!(msg.contains("not signed in"), "{msg}");
@@ -1104,7 +1105,10 @@ mod tests {
         for path in [None, Some("podman:freeco-claude".to_string())] {
             let driver = ClaudeCodeDriver::new(path, true);
             let err = driver
-                .spawn_error(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))
+                .spawn_error(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file",
+                ))
                 .to_string();
             assert!(!err.contains("npm install"), "{err}");
         }

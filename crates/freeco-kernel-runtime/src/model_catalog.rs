@@ -5046,8 +5046,12 @@ mod tests {
         // and each of its five effort levels, and Haiku 4.5, which takes no
         // effort.
         assert_eq!(models.len(), 3 + 3 * 6 + 1);
-        assert!(models.iter().any(|m| m.id == "claude-code/claude-haiku-4-5"));
-        assert!(!models.iter().any(|m| m.id.starts_with("claude-code/claude-haiku-4-5@")));
+        assert!(models
+            .iter()
+            .any(|m| m.id == "claude-code/claude-haiku-4-5"));
+        assert!(!models
+            .iter()
+            .any(|m| m.id.starts_with("claude-code/claude-haiku-4-5@")));
         assert!(models.iter().any(|m| m.id == "claude-code/opus"));
         assert!(models.iter().any(|m| m.id == "claude-code/sonnet"));
         assert!(models.iter().any(|m| m.id == "claude-code/haiku"));

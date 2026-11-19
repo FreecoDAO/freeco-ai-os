@@ -272,24 +272,15 @@ pub fn scan(text: &str) -> Vec<Finding> {
 
         // PEM private key blocks — matched whole, because half a key is still
         // a leak and the header alone tells you the rest follows.
-        if rest.starts_with("-----BEGIN") {
-            if let Some(hdr_end) = rest.find("-----END") {
-                if rest[..hdr_end].contains("PRIVATE KEY") {
-                    let end_marker = rest[hdr_end..]
-                        .find("-----\n")
-                        .or_else(|| rest[hdr_end..].find("-----"))
-                        .map(|p| hdr_end + p + 5)
-                        .unwrap_or(rest.len());
-                    out.push(Finding {
-                        kind: DataKind::PrivateKey,
-                        start: i,
-                        end: i + end_marker,
-                        value: rest[..end_marker].to_string(),
-                    });
-                    i += end_marker;
-                    continue;
-                }
-            }
+        if let Some(end_marker) = pem_private_key_len(rest) {
+            out.push(Finding {
+                kind: DataKind::PrivateKey,
+                start: i,
+                end: i + end_marker,
+                value: rest[..end_marker].to_string(),
+            });
+            i += end_marker;
+            continue;
         }
 
         // Provider API keys.
@@ -370,6 +361,117 @@ pub fn scan(text: &str) -> Vec<Finding> {
         }
 
         i += c.len_utf8();
+    }
+    out
+}
+
+/// Length of a PEM private key block at the start of `rest`, if one is there.
+fn pem_private_key_len(rest: &str) -> Option<usize> {
+    if !rest.starts_with("-----BEGIN") {
+        return None;
+    }
+    let hdr_end = rest.find("-----END")?;
+    if !rest[..hdr_end].contains("PRIVATE KEY") {
+        return None;
+    }
+    Some(
+        rest[hdr_end..]
+            .find("-----\n")
+            .or_else(|| rest[hdr_end..].find("-----"))
+            .map(|p| hdr_end + p + 5)
+            .unwrap_or(rest.len()),
+    )
+}
+
+/// What a credential found by [`scan_credentials`] is, for a
+/// `[REDACTED:<label>]` marker. Never contains any part of the value.
+pub fn credential_label(value: &str) -> &'static str {
+    const LABELS: &[(&str, &str)] = &[
+        ("sk-or-", "openrouter_key"),
+        ("sk-ant-", "anthropic_key"),
+        ("sk-", "openai_key"),
+        ("ghp_", "github_token"),
+        ("gho_", "github_token"),
+        ("github_pat_", "github_token"),
+        ("gsk_", "groq_key"),
+        ("AKIA", "aws_access_key"),
+        ("AIza", "google_key"),
+        ("xoxb-", "slack_token"),
+        ("xoxp-", "slack_token"),
+        ("hf_", "huggingface_token"),
+        ("r8_", "replicate_token"),
+        ("csk-", "cerebras_key"),
+        ("pplx-", "perplexity_key"),
+        ("glpat-", "gitlab_token"),
+    ];
+    if value.starts_with("-----BEGIN") {
+        return "private_key";
+    }
+    LABELS
+        .iter()
+        .find(|(p, _)| value.starts_with(p))
+        .map(|(_, l)| *l)
+        .unwrap_or("api_key")
+}
+
+/// Find provider keys and private keys only, with stricter rules than
+/// [`scan`].
+///
+/// [`scan`] feeds a reversible mask, where a false positive costs nothing
+/// because the value comes back in the reply. This feeds irreversible
+/// redaction and refusals (a file an agent writes, a reply that is stored), so
+/// it must not fire on ordinary text: a key prefix has to start a word (`risk-`
+/// and `task-` end in `sk-`), the body has to be long and mix letters and
+/// digits (slugs such as `sk-learn-tutorial-notes-draft` do not), and no
+/// emails, IPs, JWTs or "key: …" heuristics are reported.
+pub fn scan_credentials(text: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < text.len() {
+        if !text.is_char_boundary(i) {
+            i += 1;
+            continue;
+        }
+        let rest = &text[i..];
+        if let Some(len) = pem_private_key_len(rest) {
+            out.push(Finding {
+                kind: DataKind::PrivateKey,
+                start: i,
+                end: i + len,
+                value: rest[..len].to_string(),
+            });
+            i += len;
+            continue;
+        }
+        let boundary = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|p| !(p.is_ascii_alphanumeric() || p == '_' || p == '-'));
+        if boundary {
+            if let Some(prefix) = KEY_PREFIXES.iter().find(|p| rest.starts_with(**p)) {
+                let body_len = rest[prefix.len()..]
+                    .char_indices()
+                    .find(|(_, c)| !is_key_char(*c))
+                    .map(|(p, _)| p)
+                    .unwrap_or(rest.len() - prefix.len());
+                let body = &rest[prefix.len()..prefix.len() + body_len];
+                let min_len = if prefix.starts_with("sk-") { 20 } else { 16 };
+                let has_digit = body.chars().any(|c| c.is_ascii_digit());
+                let has_alpha = body.chars().any(|c| c.is_ascii_alphabetic());
+                if body.len() >= min_len && has_digit && has_alpha {
+                    let end = prefix.len() + body_len;
+                    out.push(Finding {
+                        kind: DataKind::ApiKey,
+                        start: i,
+                        end: i + end,
+                        value: rest[..end].to_string(),
+                    });
+                    i += end;
+                    continue;
+                }
+            }
+        }
+        i += rest.chars().next().map_or(1, char::len_utf8);
     }
     out
 }
@@ -669,6 +771,60 @@ mod tests {
         let f = scan(t);
         for w in f.windows(2) {
             assert!(w[0].end <= w[1].start, "overlapping findings: {:?}", f);
+        }
+    }
+
+    // ── scan_credentials ────────────────────────────────────────────────
+
+    #[test]
+    fn credentials_finds_prefixed_keys_and_labels_them() {
+        let text =
+            "openai sk-proj-Ab3dEf6hIj9kLm2nOp5qRs8tUv and groq gsk_7Hd82kLmN3pQ9rStUv4wXyZ1";
+        let f = scan_credentials(text);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert_eq!(credential_label(&f[0].value), "openai_key");
+        assert_eq!(credential_label(&f[1].value), "groq_key");
+        assert_eq!(&text[f[1].start..f[1].end], f[1].value);
+    }
+
+    #[test]
+    fn credentials_finds_github_aws_slack_and_pem() {
+        let gh = format!("token={}{}", "ghp_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8");
+        let f = scan_credentials(&gh);
+        assert_eq!(f.len(), 1);
+        assert_eq!(credential_label(&f[0].value), "github_token");
+
+        let f = scan_credentials("aws AKIAIOSFODNN7EXAMPLE end");
+        assert_eq!(credential_label(&f[0].value), "aws_access_key");
+
+        let f = scan_credentials("xoxb-1234567890-abcdefghijkl");
+        assert_eq!(credential_label(&f[0].value), "slack_token");
+
+        let pem = "x\n-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----\ny";
+        let f = scan_credentials(pem);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].kind, DataKind::PrivateKey);
+        assert_eq!(credential_label(&f[0].value), "private_key");
+    }
+
+    #[test]
+    fn credentials_ignores_ordinary_text() {
+        // Words ending in "sk-", slugs without digits, short tokens, emails,
+        // IPs, JWT-looking strings and "key: ..." prose are not credentials.
+        for text in [
+            "risk-assessment-for-the-new-quarter-2026",
+            "task-abcdefghij1234567890",
+            "sk-learn-tutorial-notes-draft-version",
+            "sk-short1",
+            "mail bob@example.com from 10.0.0.1",
+            "the key: 3f2a9c1b7e4d8a6f0c2b9e1d7a3f5c8b",
+            "commit 3f2a9c1b7e4d8a6f0c2b9e1d7a3f5c8b0a1b2c3d",
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
+        ] {
+            assert!(
+                scan_credentials(text).is_empty(),
+                "false positive in {text:?}"
+            );
         }
     }
 }

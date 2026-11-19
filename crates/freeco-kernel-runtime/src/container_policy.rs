@@ -545,9 +545,7 @@ fn check_volume(rest: &[String], policy: &ContainerPolicy) -> Result<(), String>
                                 }
                             };
                             if value != Some("local") {
-                                return Err(refusal(
-                                    "only the 'local' volume driver is allowed.",
-                                ));
+                                return Err(refusal("only the 'local' volume driver is allowed."));
                             }
                         }
                         "-a" | "--all" => {
@@ -568,7 +566,9 @@ fn check_volume(rest: &[String], policy: &ContainerPolicy) -> Result<(), String>
                 i += 1;
             }
             if named == 0 {
-                return Err(refusal("name the volume; generated names are outside the scope."));
+                return Err(refusal(
+                    "name the volume; generated names are outside the scope.",
+                ));
             }
             Ok(())
         }
@@ -954,7 +954,9 @@ fn check_run(
                 }
             }
             "--group-add" if value == "keep-groups" => {
-                return Err(refusal("--group-add keep-groups passes the host's groups in."));
+                return Err(refusal(
+                    "--group-add keep-groups passes the host's groups in.",
+                ));
             }
             "--pid" | "--ipc" | "--uts" | "--userns" | "--cgroupns" | "--network" | "--net" => {
                 check_namespace(flag, value, policy, protected)?;
@@ -1026,10 +1028,14 @@ fn check_exec(
         let (flag, inline) = split_flag(arg);
         match flag {
             "--privileged" => {
-                return Err(refusal("exec --privileged gives the process the whole host."));
+                return Err(refusal(
+                    "exec --privileged gives the process the whole host.",
+                ));
             }
             "--latest" | "-l" => {
-                return Err(refusal("--latest picks a container by age; name it instead."));
+                return Err(refusal(
+                    "--latest picks a container by age; name it instead.",
+                ));
             }
             _ => {}
         }
@@ -1243,7 +1249,9 @@ mod tests {
         refused("podman run --name freeco-x -v/srv:/srv localhost/app");
         refused("podman run --name freeco-x --mount type=bind,source=/,target=/host localhost/app");
         refused("podman run --name freeco-x --mount source=/,target=/host localhost/app");
-        refused("podman run --name freeco-x --mount type=volume,source=pgdata,target=/d localhost/app");
+        refused(
+            "podman run --name freeco-x --mount type=volume,source=pgdata,target=/d localhost/app",
+        );
         refused("podman run --name freeco-x -v pgdata:/var/lib/postgresql localhost/app");
         refused("podman run --name freeco-x -v 'C:\\Users:/u' localhost/app");
     }
@@ -1265,14 +1273,19 @@ mod tests {
     fn host_network_can_be_allowed() {
         let mut p = policy();
         p.allow_host_network = true;
-        assert!(
-            check_command("podman run --name freeco-x --network host localhost/app", &p, &[])
-                .is_ok()
-        );
+        assert!(check_command(
+            "podman run --name freeco-x --network host localhost/app",
+            &p,
+            &[]
+        )
+        .is_ok());
         // Only the network; other host namespaces stay refused.
-        assert!(
-            check_command("podman run --name freeco-x --pid host localhost/app", &p, &[]).is_err()
-        );
+        assert!(check_command(
+            "podman run --name freeco-x --pid host localhost/app",
+            &p,
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1368,12 +1381,22 @@ mod tests {
 
     #[test]
     fn argv_form_is_checked_too() {
-        let argv: Vec<String> = ["podman", "run", "--privileged", "--name", "freeco-x", "localhost/a"]
+        let argv: Vec<String> = [
+            "podman",
+            "run",
+            "--privileged",
+            "--name",
+            "freeco-x",
+            "localhost/a",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(check_argv(&argv, &policy(), &protected()).is_err());
+        let argv: Vec<String> = ["podman", "ps", "-a"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert!(check_argv(&argv, &policy(), &protected()).is_err());
-        let argv: Vec<String> = ["podman", "ps", "-a"].iter().map(|s| s.to_string()).collect();
         assert!(check_argv(&argv, &policy(), &protected()).is_ok());
     }
 
@@ -1407,12 +1430,21 @@ mod tests {
 
     #[test]
     fn wildcard_matching() {
-        assert!(wildcard_match("ghcr.io/freecodao/*", "ghcr.io/freecodao/a:1"));
+        assert!(wildcard_match(
+            "ghcr.io/freecodao/*",
+            "ghcr.io/freecodao/a:1"
+        ));
         assert!(wildcard_match("localhost/*", "localhost/x/y@sha256:abc"));
         assert!(wildcard_match("*", "anything"));
         assert!(wildcard_match("a*c", "abbbc"));
-        assert!(!wildcard_match("ghcr.io/freecodao/*", "ghcr.io/freecodaox/a"));
-        assert!(!wildcard_match("ghcr.io/freecodao/*", "evil/ghcr.io/freecodao/a"));
+        assert!(!wildcard_match(
+            "ghcr.io/freecodao/*",
+            "ghcr.io/freecodaox/a"
+        ));
+        assert!(!wildcard_match(
+            "ghcr.io/freecodao/*",
+            "evil/ghcr.io/freecodao/a"
+        ));
         assert!(!wildcard_match("alpine", "alpine2"));
     }
 }

@@ -492,7 +492,12 @@ mod tests {
 
     #[test]
     fn malformed_header_var_is_an_error() {
-        for bad in ["X: ${OMNIROUTE_MCP_KEY", "X: ${}", "X: ${BAD-NAME}", "X: ${1A}"] {
+        for bad in [
+            "X: ${OMNIROUTE_MCP_KEY",
+            "X: ${}",
+            "X: ${BAD-NAME}",
+            "X: ${1A}",
+        ] {
             assert!(
                 expand_header_vars(&[bad.to_string()], fake_env).is_err(),
                 "{bad} should be rejected"
