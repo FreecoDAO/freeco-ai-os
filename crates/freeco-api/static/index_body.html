@@ -1453,6 +1453,7 @@
                         <div class="chat-side-bar">
                           <button class="btn btn-ghost btn-sm" @click="fileView = null">← Back</button>
                           <span class="text-xs truncate" style="flex:1" x-text="fileView.path"></span>
+                          <a class="btn btn-ghost btn-sm" x-show="isPage(fileView.path)" :href="fileOpenUrl(fileView.path)" target="_blank" rel="noopener">Open</a>
                           <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(fileView.path)">Download</a>
                         </div>
                         <pre class="chat-side-pre" x-show="fileView.content !== null" x-text="fileView.content"></pre>
@@ -1486,6 +1487,7 @@
                       <div class="chat-side-row">
                         <span class="truncate" style="flex:1;cursor:pointer" @click="panelTab = 'files'; openFile(a.path)" x-text="a.path"></span>
                         <span class="text-xs text-dim" x-text="fmtBytes(a.size)"></span>
+                        <a class="btn btn-ghost btn-sm" x-show="isPage(a.path)" :href="fileOpenUrl(a.path)" target="_blank" rel="noopener" title="Open">Open</a>
                         <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(a.path)" title="Download">⭳</a>
                       </div>
                     </template>

@@ -232,6 +232,14 @@ function chatPage() {
       return this._agentUrl('/workspace/file?download=true&path=' + encodeURIComponent(path));
     },
 
+    // A page the agent built -- a map, a report -- opened as a page, in a
+    // sandbox the server sets, instead of as its source.
+    fileOpenUrl(path) {
+      return this._agentUrl('/workspace/file?open=true&path=' + encodeURIComponent(path));
+    },
+
+    isPage(path) { return /\.html?$/i.test(path || ''); },
+
     async loadChanges() {
       try {
         var res = await FreecoAPI.get(this._agentUrl('/workspace/changes?hours=' + this.changesHours));
@@ -542,6 +550,13 @@ function chatPage() {
         if (!self.currentAgent && agents && agents.length) {
           self._restoreActiveAgent();
         }
+      });
+
+      // Keep the unsent draft per agent, so it survives switching chats,
+      // leaving the page or reloading. It lived only in this component, which
+      // a switch or a page change replaced, so a half-written message vanished.
+      this.$watch('inputText', function(val) {
+        if (self.currentAgent) self._saveDraft(self.currentAgent.id, val);
       });
 
       // Watch for slash commands + model autocomplete
@@ -1240,13 +1255,19 @@ function chatPage() {
     },
 
     // Draw the newest `_historyWindow` stored messages, keeping anything typed
-    // but not yet answered: it is not stored until its turn finishes, and
-    // replacing the list outright is what made a just-sent message vanish.
+    // but not yet answered: replacing the list outright is what made a
+    // just-sent message vanish. The daemon now stores a request as its turn
+    // starts, so a pending message already among the stored ones is dropped
+    // here rather than shown twice.
     _showHistoryWindow() {
       var all = this._allHistory || [];
       var start = Math.max(0, all.length - this._historyWindow);
       this.historyHasMore = start > 0;
+      var storedRequests = all.slice(-8)
+        .filter(function(m) { return m.role === 'user'; })
+        .map(function(m) { return (m.text || '').trim(); });
       var pending = this.messages.filter(function(m) {
+        if (m.pending && storedRequests.indexOf((m.text || '').trim()) !== -1) return false;
         return m.pending || m.streaming || m.thinking;
       });
       this.messages = all.slice(start).concat(pending);
@@ -1288,16 +1309,31 @@ function chatPage() {
       this.$nextTick(function() { if (el) el.scrollTop = el.scrollHeight - before; });
     },
 
+    _saveDraft(agentId, text) {
+      try {
+        if (text && text.trim()) localStorage.setItem('freeco-draft:' + agentId, text);
+        else localStorage.removeItem('freeco-draft:' + agentId);
+      } catch (e) { /* storage unavailable: the draft just is not kept */ }
+    },
+
+    _loadDraft(agentId) {
+      try { return localStorage.getItem('freeco-draft:' + agentId) || ''; } catch (e) { return ''; }
+    },
+
     selectAgent(agent) {
       // Another chat: park this one with its run and queue intact, and start
       // the next with its own. The same chat again keeps both.
       if (!this.currentAgent || this.currentAgent.id !== agent.id) {
+        // Keep what was being written to the previous agent; the next one
+        // gets back whatever was left unsent for it.
+        if (this.currentAgent) this._saveDraft(this.currentAgent.id, this.inputText);
         if (this.currentAgent) this._parkCurrentChat();
         this.sessionId = null;
         this.sending = false;
         this.messageQueue = [];
       }
       this.currentAgent = agent;
+      this.inputText = this._loadDraft(agent.id);
       this.messages = [];
       try { localStorage.setItem('of-active-agent', agent.id); } catch(e) { /* ignore */ }
       // Put the conversation back.

@@ -509,10 +509,13 @@ async fn handle_agent_ws(
             }
             _ = tokio::time::sleep(WS_IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
                 info!(agent_id = %id_str, "WebSocket idle timeout (30 min)");
+                // Its own type, not "error": closing an unused socket is
+                // housekeeping. The dashboard reconnects without telling the
+                // user, who otherwise saw a failure in a chat that had none.
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
-                        "type": "error",
+                        "type": "idle_timeout",
                         "content": "Connection closed due to inactivity (30 min timeout)",
                     }),
                 ).await;
@@ -540,7 +543,7 @@ async fn handle_agent_ws(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
-                            "content": "Message too large (max 64KB)",
+                            "content": "Message too large (max 16 MB)",
                         }),
                     )
                     .await;

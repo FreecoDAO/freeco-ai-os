@@ -250,6 +250,9 @@ var FreecoAPI = (function() {
         } catch(parseErr) {
           return; // Ignore malformed JSON frames
         }
+        // The server closes a socket nobody has used for 30 minutes. That is
+        // housekeeping, not a failure: reconnect quietly instead of showing it.
+        if (data && data.type === 'idle_timeout') { socket._idle = true; return; }
         // Dispatch outside try/catch so handler errors are not swallowed
         if (_wsCallbacks.onMessage) _wsCallbacks.onMessage(data);
       };
@@ -260,6 +263,11 @@ var FreecoAPI = (function() {
         if (_ws !== socket) return;
         _wsConnected = false;
         _ws = null;
+        if (socket._idle && _wsAgentId) {
+          _reconnectAttempts = 0;
+          _doConnect(_wsAgentId);
+          return;
+        }
         if (_wsAgentId && _reconnectAttempts < MAX_RECONNECT && e.code !== 1000) {
           _reconnectAttempts++;
           _reconnectAttempt = _reconnectAttempts;
