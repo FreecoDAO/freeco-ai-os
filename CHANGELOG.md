@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Agents can be put to sleep. `agent_sleep` stops an agent's background loop
+  and scheduled work, so it uses no tokens, until a message or
+  `agent_activate` wakes it; the flag survives a restart. Any agent allowed
+  `agent_activate` may use it, and the CEO role brings it.
+- `agent_delegate` without an `agent` hands the task to a worker copy of the
+  caller -- same model, tools and workspace, its own private state -- at most
+  four per agent, reused when idle and put to sleep when done. With every
+  worker busy the task runs in a fresh conversation of the caller, as before.
+  A worker never runs its parent's schedule: a CEO worker used to repeat the
+  CEO's two-minute heartbeat around the clock.
+- Team leads are appointed from the Projects page (`PUT
+  /api/org/teams/{id}/members`): making one member lead makes the previous
+  lead a member. `supervisor` is accepted as another word for lead. Members
+  can be taken off from the same card.
+- An organisation change log. Companies, projects and teams created, members
+  set or taken off, hires made or held -- by the owner or by agents -- are
+  listed under Recent changes on the Projects page (`GET /api/org/changes`,
+  last 300), and the CEO sees the latest in `org_overview`.
+- Hires pass a security review. An agent's hire that runs shell commands,
+  uses host tools, may hire again or carries injection wording in its
+  instructions is held for the owner, and the agent is told why. A hire the
+  owner makes is reviewed too: the findings come back in the response
+  (`security_review`) and in the change log.
+- Outside content is checked for prompt injection. Web pages, files, search
+  results, browser and MCP tool results, and messages from chat channels
+  (Telegram and the rest, and the WhatsApp gateway) that read like an
+  injection reach the agent with a security note in front. Nothing is
+  blocked.
+- Run History lists every unattended run: scheduled jobs, trigger fires and
+  background ticks, with status, error, duration and tokens (`GET
+  /api/runs/history`, last 500). It used to show one line per job at most,
+  nothing for background loops and never a failure.
+- Claude Code models by version and effort: `claude-code/<model>@<effort>`
+  (Opus 5.5, Fable 5.1, Sonnet 5.5 at low to max, and Haiku 4.5) becomes
+  `--model <model> --effort <effort>`.
+- WhatsApp voice notes, images and documents reach the agent. A voice note
+  arrives as its transcript; images and documents are attached. What cannot
+  be passed on (too big, unsupported) is named to the agent rather than
+  replaced with a placeholder.
+- Running the daemon as a Podman container: `deploy/daemon/` (image,
+  `run.sh`, a Windows starter and a migration script) and
+  `docs/operations/podman-runbook.md`. Agent paths under an old FreEco home
+  (Windows to container) are re-rooted into the new home at start.
+
+### Fixed
+
+- A request that never reached the model provider (no connection, DNS gone)
+  is tried once more on the same model before anything else, and "error
+  sending request" and "dns error" count as timeouts, so they fall back to
+  another model when one is configured.
+- The hourly token quota message says how much of the limit was used, when
+  it resets and where to change it, rather than pointing at `/compact`.
+- Claude Code: "Not logged in", which the CLI reports as JSON on stdout, is
+  shown with how to sign in in its container; a CLI that cannot start never
+  advises installing it on the host. The CLI's container connects over IPv4
+  first, which fixes "api.anthropic.com timed out" over a VPN.
+- The WhatsApp gateway keeps itself running: up to ten restarts with backoff
+  (a run of ten minutes or more starts the count again), an alert to the
+  owner and the CEO after three crashes in a row and when it gives up. An
+  interrupted `npm install` no longer leaves it crashing on every start. One
+  socket at a time, an immediate reconnect after pairing, replies to the
+  chat's own id (privacy ids included), and messages addressed by the agent's
+  id rather than its name. Baileys is pinned to 6.7.24; Node 20 or later.
+- `[channels.whatsapp] allowed_users` in config.toml is folded into the
+  gateway's one allowlist, `WHATSAPP_ALLOWED_NUMBERS` and
+  `WHATSAPP_ALLOWED_GROUPS` (entries ending `@g.us` are groups).
+- Service backups keep three runs and at most 12 GB; the newest run always
+  stays. A failed volume export no longer leaves a truncated archive that
+  counted as a backup.
+
 ### Fixed
 
 - Spending limits hold in the chat. The agent's cost quota was checked only

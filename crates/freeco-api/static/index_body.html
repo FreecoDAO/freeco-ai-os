@@ -1226,6 +1226,19 @@
           </template>
         </div>
 
+        <!-- What changed in the organisation, by the owner or by agents:
+             structure created, members set, hires made or held. -->
+        <div class="card" style="margin-top:18px;padding:10px 14px" x-show="changes.length">
+          <div class="font-bold" style="font-size:13px;margin-bottom:6px">Recent changes</div>
+          <template x-for="(c, i) in changes.slice(0, 12)" :key="i">
+            <div class="text-xs" style="display:flex;gap:8px;padding:2px 0">
+              <span class="text-dim" style="white-space:nowrap" x-text="when(c.timestamp)"></span>
+              <strong x-text="c.actor"></strong>
+              <span x-text="c.change" :style="c.change.indexOf('held for the owner') !== -1 ? 'color:var(--warning)' : ''"></span>
+            </div>
+          </template>
+        </div>
+
         <!-- A project's own history: what this whole structure is for. -->
         <div x-show="selected" style="margin-top:26px">
           <h2 style="font-size:1.1rem;margin-bottom:10px">
@@ -1281,8 +1294,21 @@
                     <span class="text-xs text-dim"
                           x-text="t.member_count + ' member' + (t.member_count === 1 ? '' : 's')"></span>
                   </div>
-                  <p class="text-xs" style="margin:4px 0 0"
-                     x-show="t.members && t.members.length" x-text="memberLine(t)"></p>
+                  <!-- Members by name with the lead marked: the owner appoints
+                       the lead or takes a member off here; each change is
+                       logged under Recent changes. -->
+                  <template x-for="m in (t.members || [])" :key="m.agent_id">
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px">
+                      <span x-text="agentName(m.agent_id) || String(m.agent_id).slice(0, 8)"></span>
+                      <span class="badge" x-show="isLead(t, m)" style="font-size:10px">lead</span>
+                      <span class="text-dim" x-show="m.role && !/^(lead|member|supervisor)$/i.test(m.role)" x-text="m.role"></span>
+                      <span style="flex:1"></span>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" x-show="!isLead(t, m)"
+                              @click="makeLead(t, m.agent_id)" title="Make this agent the team's lead">make lead</button>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px"
+                              @click="removeMember(t, m.agent_id)" title="Take off the team" aria-label="Take off the team">&#x2715;</button>
+                    </div>
+                  </template>
                   <p class="text-xs text-dim" style="margin:4px 0 0"
                      x-show="!t.members || !t.members.length">No members yet. Add the agents who will do the work.</p>
                   <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
@@ -3424,20 +3450,21 @@
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
                 <div class="font-bold" style="font-size:13px;margin-bottom:4px">Run History</div>
                 <div class="text-sm text-dim" style="line-height:1.6">
-                  Recent executions of scheduled jobs and event trigger fires. History is aggregated from schedule run counts and trigger fire counts.
+                  Every run that started on its own &mdash; scheduled jobs, trigger fires and background ticks &mdash; newest first, failures included. The last 500 are kept.
                 </div>
               </div>
               <div class="table-wrap" x-show="history.length">
                 <table>
-                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Total Runs</th></tr></thead>
+                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Duration</th><th>Tokens</th></tr></thead>
                   <tbody>
                     <template x-for="(h, idx) in history" :key="idx">
                       <tr>
                         <td class="text-xs" style="white-space:nowrap" x-text="formatTime(h.timestamp)"></td>
                         <td class="font-bold" x-text="h.name"></td>
-                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="h.type === 'schedule' ? 'Cron Job' : 'Trigger'"></span></td>
-                        <td><span class="badge badge-success" x-text="h.status"></span></td>
-                        <td x-text="h.run_count"></td>
+                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="historyType(h.type)"></span></td>
+                        <td><span class="badge" :class="h.status === 'failed' ? 'badge-error' : 'badge-success'" :title="h.error" x-text="h.status"></span></td>
+                        <td class="text-xs" x-text="(h.duration_ms / 1000).toFixed(1) + ' s'"></td>
+                        <td class="text-xs" x-text="h.tokens"></td>
                       </tr>
                     </template>
                   </tbody>
@@ -3445,7 +3472,7 @@
               </div>
               <div class="empty-state" x-show="!history.length">
                 <h4>No run history yet</h4>
-                <p class="hint">Run history will appear here after scheduled jobs or triggers execute.</p>
+                <p class="hint">Run history will appear here after scheduled jobs, triggers or background loops run.</p>
               </div>
             </div>
           </div>

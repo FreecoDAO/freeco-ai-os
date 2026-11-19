@@ -196,17 +196,27 @@ pub async fn spawn_agent(
     };
 
     let name = manifest.name.clone();
+    // The same review an agent's hire passes. Here the owner is the hirer, so
+    // the findings are reported and logged rather than holding the hire.
+    let review = freeco_kernel::hire_review::review(
+        &manifest,
+        req.template.is_some() || freeco_kernel::hire_review::is_catalogue_template(&name),
+    );
     match state.kernel.spawn_agent(manifest) {
         Ok(id) => {
             // Register in channel router so binding resolution finds the new agent
             if let Some(ref mgr) = *state.bridge_manager.lock().await {
                 mgr.router().register_agent(name.clone(), id);
             }
+            state
+                .kernel
+                .record_org_change("owner", format!("hired \"{name}\" ({})", review.summary()));
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!(SpawnResponse {
                     agent_id: id.to_string(),
                     name,
+                    security_review: review.summary(),
                 })),
             )
         }
@@ -605,10 +615,27 @@ pub async fn send_message(
         None
     };
 
+    // A message relayed from a chat channel (the WhatsApp gateway posts here)
+    // can carry text the sender pasted or forwarded from elsewhere: it is
+    // outside content, marked -- not blocked -- when it reads like an
+    // injection.
+    let text = match req
+        .metadata
+        .as_ref()
+        .and_then(|m| m["channel"].as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        Some(channel) => freeco_kernel_runtime::injection_guard::mark(
+            req.message.clone(),
+            &format!("a {channel} message"),
+        ),
+        None => req.message.clone(),
+    };
     // Every attachment, not only images, goes into the agent's workspace.
     let message = match stage_attachments(&state.kernel, agent_id, &req.attachments) {
-        Some(note) => format!("{}{}", req.message, note),
-        None => req.message.clone(),
+        Some(note) => format!("{text}{note}"),
+        None => text,
     };
 
     let pinned_session = match req.session_id.as_deref().map(str::trim) {
@@ -1596,7 +1623,9 @@ pub async fn create_backup(
 /// was not, so a partial backup is never mistaken for a complete one.
 pub async fn backup_service_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let dir = state.kernel.config.home_dir.join("backups");
-    match crate::service_backup::export_service_data(&dir, 7).await {
+    match crate::service_backup::export_service_data(&dir, crate::service_backup::RETENTION_RUNS)
+        .await
+    {
         Ok(report) => {
             let status = if report.failed.is_empty() {
                 StatusCode::CREATED
@@ -13619,6 +13648,12 @@ pub async fn get_agent_deliveries(
 // ---------------------------------------------------------------------------
 // Cron job management endpoints
 // ---------------------------------------------------------------------------
+
+/// GET /api/runs/history — every recorded unattended run (schedules,
+/// triggers, background ticks), newest first, failures included.
+pub async fn run_history(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "runs": state.kernel.run_history(500) }))
+}
 
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
 pub async fn list_cron_jobs(

@@ -123,6 +123,13 @@ pub trait KernelHandle: Send + Sync {
         Err("Agent activation not available".to_string())
     }
 
+    /// Put an agent to sleep: no background loop, no scheduled work, no
+    /// tokens, until a message or `activate_agent` wakes it.
+    fn sleep_agent(&self, agent_id: &str) -> Result<String, String> {
+        let _ = agent_id;
+        Err("Agent sleep not available".to_string())
+    }
+
     /// Store a value in shared memory (cross-agent accessible).
     /// The data gateway, when one is configured.
     ///

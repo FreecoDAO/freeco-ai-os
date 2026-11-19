@@ -11,12 +11,12 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6",
+    "@whiskeysockets/baileys": "6.7.24",
     "qrcode": "^1.5",
     "pino": "^9"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT"
 }

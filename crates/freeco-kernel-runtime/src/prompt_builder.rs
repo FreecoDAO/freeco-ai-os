@@ -773,7 +773,7 @@ pub fn tool_category(name: &str) -> &'static str {
         "memory_store" | "memory_recall" | "memory_delete" | "memory_list" => "Memory",
 
         "agent_send" | "agent_delegate" | "agent_spawn" | "agent_list" | "agent_kill"
-        | "agent_activate" | "agent_describe" | "agent_find" | "agent_set_model"
+        | "agent_activate" | "agent_sleep" | "agent_describe" | "agent_find" | "agent_set_model"
         | "agent_skills_set" => "Agents",
 
         "container_list" | "container_logs" | "container_start" | "container_stop"
@@ -843,6 +843,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         "agent_list" => "list running agents",
         "agent_kill" => "terminate an agent",
         "agent_activate" => "wake up an inactive agent so it can receive work",
+        "agent_sleep" => "put an agent to sleep so it uses no tokens until woken",
         "agent_describe" => "see an agent's model, tools and skills, yours included",
         "agent_set_model" => "switch an agent to another model",
         "agent_skills_set" => "switch skills on or off for an agent",

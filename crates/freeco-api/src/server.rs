@@ -673,7 +673,15 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams/{id}/members",
-            axum::routing::post(crate::org_routes::add_team_member),
+            axum::routing::post(crate::org_routes::add_team_member)
+                .put(crate::org_routes::set_team_member),
+        )
+        // Every unattended run: schedules, triggers, background ticks.
+        .route("/api/runs/history", axum::routing::get(routes::run_history))
+        // What changed in the organisation, and who changed it.
+        .route(
+            "/api/org/changes",
+            axum::routing::get(crate::org_routes::changes),
         )
         .route(
             "/api/org/teams/{id}/run",
@@ -1412,8 +1420,14 @@ fn start_backup_scheduler(
             }
             // The archive above covers ~/.freeco-ai only. Service data lives in
             // container volumes, which it never reached -- so it is saved here,
-            // on the same schedule and with the same retention.
-            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+            // on the same schedule. Its retention is lower: one run can be
+            // gigabytes, where an archive is megabytes.
+            match crate::service_backup::export_service_data(
+                &backups_dir,
+                crate::service_backup::RETENTION_RUNS,
+            )
+            .await
+            {
                 Ok(r) => info!(
                     directory = %r.directory,
                     saved = r.saved.len(),
