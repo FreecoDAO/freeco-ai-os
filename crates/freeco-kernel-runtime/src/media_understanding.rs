@@ -3,11 +3,11 @@
 //! Auto-cascades through available providers based on configured API keys.
 
 use freeco_types::media::{
-    MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
+    is_local_url, MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
 };
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::info;
+use tracing::{error, info};
 
 /// Media understanding engine.
 pub struct MediaEngine {
@@ -61,7 +61,9 @@ impl MediaEngine {
     }
 
     /// Transcribe audio using speech-to-text.
-    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1).
+    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1),
+    /// unless `[media].local_only` is in effect, in which case only the local
+    /// endpoint (or Parakeet MLX) is used and nothing is auto-detected.
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
@@ -71,36 +73,46 @@ impl MediaEngine {
             return Err("Expected audio attachment".into());
         }
 
+        let local_only = self.config.local_only_effective();
+
         // Any OpenAI-compatible transcription endpoint works: when
         // `audio_base_url` is set (a local Whisper server, or a compatible
         // cloud provider such as Novita), fall back to the OpenAI wire format
         // even without a Groq/OpenAI key — local servers accept any bearer.
-        let provider = self
-            .config
-            .audio_provider
-            .as_deref()
-            .or_else(|| detect_audio_provider())
-            .or_else(|| {
-                if self.config.audio_base_url.is_some() {
-                    Some("openai")
-                } else {
-                    None
-                }
-            })
-            .ok_or(STT_UNAVAILABLE)
-            .map_err(|base: &str| {
-                // If they already hold a compatible key, say so. Asking someone
-                // to sign up for another service when a key they already own
-                // would do the job wastes their time and their money.
-                match existing_compatible_key() {
-                    Some((env, label)) => format!(
-                        "{base}
+        let provider: &str = if local_only {
+            // Never auto-detect a cloud provider from its key: audio stays on
+            // this machine or the call fails, loudly.
+            local_only_stt_provider(&self.config).inspect_err(|e| {
+                error!(error = %e, "speech-to-text refused: [media].local_only is on");
+            })?
+        } else {
+            self
+                .config
+                .audio_provider
+                .as_deref()
+                .or_else(|| detect_audio_provider())
+                .or_else(|| {
+                    if self.config.audio_base_url.is_some() {
+                        Some("openai")
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(STT_UNAVAILABLE)
+                .map_err(|base: &str| {
+                    // If they already hold a compatible key, say so. Asking someone
+                    // to sign up for another service when a key they already own
+                    // would do the job wastes their time and their money.
+                    match existing_compatible_key() {
+                        Some((env, label)) => format!(
+                            "{base}
 
 You already have a {label} key ({env}). It speaks the                          same API, so voice can reuse it: set [media].audio_base_url to that                          provider's endpoint and [media].audio_provider = \"openai\".                          No new signup is needed."
-                    ),
-                    None => base.to_string(),
-                }
-            })?;
+                        ),
+                        None => base.to_string(),
+                    }
+                })?
+        };
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
 
@@ -235,21 +247,44 @@ You already have a {label} key ({env}). It speaks the                          s
             .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
-            .map_err(|e| format!("Transcription request failed: {}", e))?;
+            .map_err(|e| {
+                if local_only {
+                    local_speech_error("speech-to-text", &api_url, &format!("request failed: {e}"))
+                } else {
+                    format!("Transcription request failed: {}", e)
+                }
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if local_only {
+                return Err(local_speech_error(
+                    "speech-to-text",
+                    &api_url,
+                    &format!("HTTP {status}: {}", crate::str_utils::safe_truncate_str(&body, 500)),
+                ));
+            }
             return Err(format!("Transcription API error ({}): {}", status, body));
         }
 
-        let transcription = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read transcription response: {}", e))?;
+        let transcription = resp.text().await.map_err(|e| {
+            if local_only {
+                local_speech_error("speech-to-text", &api_url, &format!("reading the reply failed: {e}"))
+            } else {
+                format!("Failed to read transcription response: {}", e)
+            }
+        })?;
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
+            if local_only {
+                return Err(local_speech_error(
+                    "speech-to-text",
+                    &api_url,
+                    "it returned empty text",
+                ));
+            }
             return Err("Transcription returned empty text".into());
         }
 
@@ -442,12 +477,66 @@ print(json.dumps({"text": result.text, "model": "mlx-community/parakeet-tdt-0.6b
     })
 }
 
+/// Explicit opt-in for local Parakeet MLX transcription.
+fn parakeet_mlx_enabled() -> bool {
+    std::env::var("FREECO_AI_ENABLE_PARAKEET_MLX").is_ok()
+        || std::env::var("OPENFANG_ENABLE_PARAKEET_MLX").is_ok()
+}
+
+/// The transcription provider to use when `[media].local_only` is in effect.
+///
+/// Only local choices: Parakeet MLX (configured, or opted into by env), or
+/// the OpenAI/Groq wire format sent to `audio_base_url`, which must itself be
+/// a local address. Never consults GROQ_API_KEY / OPENAI_API_KEY, so a cloud
+/// key in the environment cannot pull audio off the machine.
+fn local_only_stt_provider(config: &MediaConfig) -> Result<&'static str, String> {
+    match config.audio_provider.as_deref() {
+        Some("parakeet-mlx") => return Ok("parakeet-mlx"),
+        None if parakeet_mlx_enabled() => return Ok("parakeet-mlx"),
+        _ => {}
+    }
+    let base = config
+        .audio_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty());
+    match base {
+        None => Err(
+            "Speech-to-text refused: [media].local_only is on, but no local \
+             speech-to-text is configured. Set [media].audio_base_url to the local \
+             Speaches service (for example http://127.0.0.1:8010). No cloud service \
+             was tried."
+                .to_string(),
+        ),
+        Some(url) if !is_local_url(url) => Err(format!(
+            "Speech-to-text refused: [media].local_only is on, but \
+             [media].audio_base_url ({url}) is not a local address, so no audio was \
+             sent to it. Point it at the local Speaches service, or set \
+             [media].local_only = false to allow it."
+        )),
+        Some(_) => match config.audio_provider.as_deref() {
+            None | Some("openai") => Ok("openai"),
+            Some("groq") => Ok("groq"),
+            Some(other) => Err(format!("Unsupported audio provider: {other}")),
+        },
+    }
+}
+
+/// The error returned, and logged at error level, when a local speech
+/// endpoint fails while `[media].local_only` is in effect. Names the URL and
+/// what failed, and says plainly that no cloud service was tried instead.
+pub(crate) fn local_speech_error(kind: &str, url: &str, what: &str) -> String {
+    error!(url, failure = what, "local {kind} failed; [media].local_only is on, no cloud fallback");
+    format!(
+        "Local {kind} at {url} failed: {what}. [media].local_only is on, so no \
+         cloud service was tried. Check that the local Speaches service is running \
+         (hand 'speaches', health: /health)."
+    )
+}
+
 /// Detect which audio transcription provider is available.
 fn detect_audio_provider() -> Option<&'static str> {
-    // Explicit opt-in for local Parakeet MLX transcription
-    if std::env::var("FREECO_AI_ENABLE_PARAKEET_MLX").is_ok()
-        || std::env::var("OPENFANG_ENABLE_PARAKEET_MLX").is_ok()
-    {
+    if parakeet_mlx_enabled() {
         return Some("parakeet-mlx");
     }
     if std::env::var("GROQ_API_KEY").is_ok() {
@@ -778,5 +867,97 @@ mod tests {
         let result = engine.transcribe_audio(&attachment).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read audio file"));
+    }
+
+    fn base64_audio() -> MediaAttachment {
+        MediaAttachment {
+            media_type: MediaType::Audio,
+            mime_type: "audio/wav".into(),
+            source: MediaSource::Base64 {
+                data: "UklGRgAAAABXQVZF".into(),
+                mime_type: "audio/wav".into(),
+            },
+            size_bytes: 12,
+        }
+    }
+
+    #[test]
+    fn local_only_stt_never_picks_a_cloud_provider() {
+        // Nothing local configured: refused, never Groq/OpenAI from a key.
+        let config = MediaConfig {
+            local_only: Some(true),
+            ..Default::default()
+        };
+        if !parakeet_mlx_enabled() {
+            let err = local_only_stt_provider(&config).unwrap_err();
+            assert!(err.contains("local_only"), "{err}");
+            assert!(err.contains("audio_base_url"), "{err}");
+        }
+
+        // Even when the user names a cloud provider, it only ever gets the
+        // local URL.
+        let config = MediaConfig {
+            local_only: Some(true),
+            audio_provider: Some("groq".into()),
+            audio_base_url: Some("http://127.0.0.1:8010".into()),
+            ..Default::default()
+        };
+        assert_eq!(local_only_stt_provider(&config).unwrap(), "groq");
+
+        // A remote audio_base_url is refused under an explicit local_only.
+        let config = MediaConfig {
+            local_only: Some(true),
+            audio_base_url: Some("https://api.groq.com/openai".into()),
+            ..Default::default()
+        };
+        let err = local_only_stt_provider(&config).unwrap_err();
+        assert!(err.contains("not a local address"), "{err}");
+
+        // Parakeet MLX is local, so it stays allowed.
+        let config = MediaConfig {
+            local_only: Some(true),
+            audio_provider: Some("parakeet-mlx".into()),
+            ..Default::default()
+        };
+        assert_eq!(local_only_stt_provider(&config).unwrap(), "parakeet-mlx");
+    }
+
+    #[tokio::test]
+    async fn local_only_transcription_without_local_endpoint_fails_before_any_request() {
+        if parakeet_mlx_enabled() {
+            return;
+        }
+        let engine = MediaEngine::new(MediaConfig {
+            local_only: Some(true),
+            ..Default::default()
+        });
+        let err = engine.transcribe_audio(&base64_audio()).await.unwrap_err();
+        assert!(err.contains("local_only"), "{err}");
+        assert!(err.contains("No cloud service was tried"), "{err}");
+    }
+
+    /// The local Speaches is down: the error names the URL and what failed,
+    /// and says no cloud service was tried. Default rule: a loopback
+    /// audio_base_url alone turns local_only on.
+    #[tokio::test]
+    async fn local_only_surfaces_a_local_transcription_failure() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let base = format!("http://127.0.0.1:{port}");
+        let config = MediaConfig {
+            audio_base_url: Some(base.clone()),
+            ..Default::default()
+        };
+        assert!(config.local_only_effective());
+        let engine = MediaEngine::new(config);
+        let err = engine.transcribe_audio(&base64_audio()).await.unwrap_err();
+        assert!(
+            err.contains(&format!("{base}/v1/audio/transcriptions")),
+            "error must name the URL: {err}"
+        );
+        assert!(err.contains("request failed"), "{err}");
+        assert!(err.contains("no cloud service was tried"), "{err}");
     }
 }

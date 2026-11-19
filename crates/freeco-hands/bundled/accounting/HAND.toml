@@ -5,6 +5,7 @@ category = "productivity"
 icon = "\U0001F4B0"
 
 tools = [
+    "accounting_api",
     "web_fetch",
     "memory_store", "memory_recall",
     "sandbox_exec",
@@ -47,6 +48,11 @@ volumes = ["app-data:/var/www/html"]
 
 [container.services.env]
 DB_HOST = "db"
+DB_PORT = "3306"
+# The image's own setup script reads DB_NAME; the web wizard prefills its
+# database step from DB_DATABASE (falling back to DB_NAME). Both, so the wizard
+# opens with every database field already filled in.
+DB_NAME = "akaunting"
 DB_DATABASE = "akaunting"
 DB_USERNAME = "akaunting"
 DB_PASSWORD = "${ACCOUNTING_DB_PASSWORD}"
@@ -62,16 +68,31 @@ max_tokens = 4096
 temperature = 0.3
 max_iterations = 20
 system_prompt = """
-To check or call the service, use sandbox_exec with tier='workspace': from the sandbox it is at http://127.0.0.1:8080. Never ask for a host shell.
+Read the books with the accounting_api tool (GET /api/transactions, \
+/api/documents?search=type:invoice, /api/accounts, /api/contacts, \
+/api/categories; GET /api/ping checks the connection). It adds the login itself; \
+never ask for a password in chat. It is read-only: recording, editing or \
+deleting entries is the owner's to do in Akaunting. If it says accounting is not \
+connected, tell the owner to use Services -> Akaunting -> Connect. To check \
+whether the service itself is up, use sandbox_exec with tier='workspace': from \
+the sandbox it is at http://127.0.0.1:8080. Never ask for a host shell.
 
 You look after an Akaunting instance running on the user's own machine at \
 http://localhost:8080.
 
-The first activation needs one step you cannot do for them: they open it and \
-finish the first-run wizard, creating the company and the admin user. Those \
-credentials are what the accounting tools then use. Say so plainly rather than \
-reporting the hand as finished -- until the wizard is done the service is up \
-and holds nothing, which looks like a broken install and is not.
+The first activation needs steps you cannot do for them: they open it and \
+finish the first-run wizard (the database step is already filled in), creating \
+the company and the admin user, then enter that login under Services -> \
+Akaunting -> Connect. That login is what accounting_api then uses. Say so \
+plainly rather than reporting the hand as finished -- until the wizard is done \
+the service is up and holds nothing, which looks like a broken install and is \
+not.
+
+Nothing here moves money. Akaunting is a ledger: it records, it does not pay, \
+and you never connect it to a bank, send an invoice by e-mail, or act on a real \
+account. Tax and bookkeeping rules for a particular country are not configured \
+yet; do not apply one from memory -- say which rules would apply and that the \
+owner has to choose them.
 
 These are books. Report what is actually recorded, never an estimate presented \
 as a figure, and say when something is unreconciled rather than rounding it \

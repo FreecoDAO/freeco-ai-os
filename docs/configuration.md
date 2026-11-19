@@ -16,6 +16,7 @@ Complete reference for `config.toml`, covering every configurable field in the F
   - [\[memory\]](#memory)
   - [\[network\]](#network)
   - [\[web\]](#web)
+  - [\[media\]](#media)
   - [\[channels\]](#channels)
   - [\[\[mcp\_servers\]\]](#mcp_servers)
   - [\[a2a\]](#a2a)
@@ -518,6 +519,51 @@ readability = true
 | `max_response_bytes` | usize | `10485760` (10 MB) | Maximum HTTP response body size in bytes. |
 | `timeout_secs` | u64 | `30` | HTTP request timeout in seconds. |
 | `readability` | bool | `true` | Enable HTML-to-Markdown readability extraction. When true, fetched HTML is converted to clean Markdown. |
+
+---
+
+### `[media]`
+
+Speech-to-text, text-to-speech and media understanding. With the bundled
+Speaches hand running, point both speech directions at it:
+
+```toml
+[media]
+audio_base_url = "http://127.0.0.1:8010"
+tts_openai_base_url = "http://127.0.0.1:8010"
+local_audio_api_key_env = "SPEACHES_API_KEY"
+audio_model = "Systran/faster-whisper-small"
+# local_only = true   # implied by the local URLs above; see below
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `audio_provider` | string | auto | `openai`, `groq` or `parakeet-mlx`. Auto-detected from API keys only when `local_only` is off. |
+| `audio_base_url` | string | none | OpenAI-compatible transcription endpoint (`<url>/v1/audio/transcriptions`). |
+| `audio_model` | string | provider default | Model name sent to the transcription endpoint. |
+| `tts_openai_base_url` | string | none | OpenAI-compatible speech endpoint (`<url>/v1/audio/speech`). |
+| `tts_elevenlabs_base_url` | string | none | ElevenLabs-compatible gateway. |
+| `local_audio_api_key_env` | string | none | Env var holding the local service's key; the cloud key is never sent to a custom URL. |
+| `local_only` | bool | see rule | Keep speech on this machine. |
+
+**`local_only` rule.** An explicit `true` or `false` always wins. When it is
+not set, it is **on** if `audio_base_url` and/or `tts_openai_base_url` is set
+and every one of them that is set is a local address (loopback, a private or
+link-local IP, `localhost`, a `.local`/`.lan`/`.internal`/`.home.arpa` name, or
+a single-label container name such as `speaches`); otherwise it is off.
+
+When `local_only` is on:
+
+- Groq, OpenAI and ElevenLabs are never picked from their API keys, and there
+  is no fallback to them.
+- Transcription goes only to `audio_base_url` (or Parakeet MLX); speech only to
+  `tts_openai_base_url` (or `tts_elevenlabs_base_url` with
+  `[tts] provider = "elevenlabs"`). A non-local URL there is refused.
+- If the local service fails, the caller gets an error naming the URL and what
+  failed (connection refused, HTTP status, empty reply), and the daemon logs it
+  at error level.
+
+Set `local_only = false` to allow a cloud speech provider next to a local one.
 
 ---
 

@@ -570,6 +570,9 @@ pub async fn execute_tool(
         // The CRM on this machine: one fixed address, key read from the vault.
         "crm_api" => crate::crm_tool::crm_api(input).await,
 
+        // The books on this machine, read-only: fixed address, login from the vault.
+        "accounting_api" => crate::accounting_tool::accounting_api(input).await,
+
         // Location tool
         "location_get" => tool_location_get().await,
 
@@ -1872,7 +1875,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- TTS/STT tools ---
         ToolDefinition {
             name: "text_to_speech".to_string(),
-            description: "Convert text to speech audio. Auto-selects OpenAI or ElevenLabs. Saves audio to workspace output/ directory.".to_string(),
+            description: "Convert text to speech audio. Uses the local speech service when [media].local_only is on (never a cloud fallback), otherwise OpenAI or ElevenLabs. Saves audio to workspace output/ directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1885,7 +1888,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "speech_to_text".to_string(),
-            description: "Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported formats: mp3, wav, ogg, flac, m4a, webm.".to_string(),
+            description: "Transcribe audio to text using speech-to-text. Uses the local speech service when [media].local_only is on (never a cloud fallback), otherwise Groq Whisper or OpenAI Whisper. Supported formats: mp3, wav, ogg, flac, m4a, webm.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1913,6 +1916,27 @@ TODO, IN_PROGRESS or DONE. Same pattern for /rest/people, /rest/companies, \
                     "method": { "type": "string", "enum": ["GET","POST","PATCH","DELETE"], "description": "HTTP method (default GET)" },
                     "path": { "type": "string", "description": "API path starting with /rest/ or /graphql, including any query string" },
                     "body": { "type": "object", "description": "JSON body for POST/PATCH" }
+                },
+                "required": ["path"]
+            }),
+        },
+        // --- Accounting tool (read-only) ---
+        ToolDefinition {
+            name: "accounting_api".to_string(),
+            description: "Read the owner's books in Akaunting on this machine: \
+transactions (income and expense), invoices and bills, accounts, contacts, \
+categories, taxes, transfers and reports. Read-only: it sends GET only and \
+cannot record, edit, delete, e-mail or pay anything. The login is added by this \
+tool; never ask for it. Examples: GET /api/transactions?search=type:income&limit=20, \
+GET /api/documents?search=type:invoice (invoices; type:bill for bills), GET \
+/api/documents/{id}, GET /api/accounts, GET /api/contacts?search=type:customer, \
+GET /api/categories, GET /api/ping (check the connection). Report only figures \
+this tool returned.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "enum": ["GET"], "description": "Always GET (default)" },
+                    "path": { "type": "string", "description": "API path starting with /api/, including any query string" }
                 },
                 "required": ["path"]
             }),
@@ -5620,6 +5644,8 @@ mod tests {
             tools.len()
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // The accounting hand's read-only tool is a real, offered tool.
+        assert!(names.contains(&"accounting_api"));
         // Original 12
         assert!(names.contains(&"file_read"));
         assert!(names.contains(&"file_write"));
