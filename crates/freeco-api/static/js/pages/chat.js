@@ -198,9 +198,12 @@ function chatPage() {
       if (t === 'files') this.loadFiles(this.filesPath);
       else if (t === 'changes') this.loadChanges();
       else if (t === 'artifacts') this.loadArtifacts();
+      else if (t === 'terminal') this.loadTerminal();
       else if (t === 'browser') this.loadBrowser();
       else if (t === 'background') this.loadBackground();
       else if (t === 'archive') this.loadArchives();
+      else if (t === 'run') this.loadRun();
+      else if (t === 'context') this.loadContext();
     },
 
     async loadFiles(path) {
@@ -291,6 +294,21 @@ function chatPage() {
       try {
         this.backgroundInfo = await FreecoAPI.get(this._agentUrl('/background'));
       } catch (e) { this.backgroundInfo = { processes: [], scheduled: [] }; }
+    },
+
+    async loadRun() {
+      try {
+        var res = await FreecoAPI.get(this._agentUrl('/runs'));
+        this.runHistory = res.runs || [];
+      } catch (e) { this.runHistory = []; }
+    },
+
+    async loadContext() {
+      try {
+        // Get project/team context if available
+        var res = await FreecoAPI.get(this._agentUrl('/context'));
+        this.agentContext = res || {};
+      } catch (e) { this.agentContext = {}; }
     },
 
     fmtBytes(n) {

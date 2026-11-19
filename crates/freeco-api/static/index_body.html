@@ -1,5 +1,35 @@
 <body x-data="app" :data-theme="theme">
 
+<!-- Command Palette (Ctrl/Cmd+K) -->
+<div x-show="$store.app.paletteOpen" x-cloak
+     @keydown.escape="$store.app.closePalette()"
+     @click.self="$store.app.closePalette()"
+     class="palette-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette" x-ref="palette" x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 transform -translate-y-4" x-transition:enter-end="opacity-100 transform translate-y-0">
+    <div class="palette-header">
+      <svg class="palette-icon" viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M12 5v14M5 12h14"/></svg>
+      <input type="search" id="palette-input" x-model="$store.app.paletteQuery" placeholder="Type a command..." autocomplete="off" spellcheck="false" aria-label="Command palette search">
+      <kbd class="palette-hint">⌘K</kbd>
+    </div>
+    <div class="palette-list" role="listbox" aria-label="Commands">
+      <template x-for="(cmd, idx) in $store.app.paletteFilter()" :key="cmd.id">
+        <button type="button" role="option" class="palette-item" :class="{ selected: idx === $store.app.paletteSelected }"
+                @click="$store.app.paletteSelect(idx); $store.app.paletteExecute()"
+                @mouseenter="$store.app.paletteSelect(idx)"
+                :aria-selected="idx === $store.app.paletteSelected">
+          <span class="palette-icon-wrap" x-html="paletteIcon(cmd.icon)"></span>
+          <div class="palette-text">
+            <span class="palette-label" x-text="cmd.label"></span>
+            <span class="palette-hint" x-text="cmd.hint"></span>
+          </div>
+        </button>
+      </template>
+      <div class="palette-empty" x-show="!$store.app.paletteFilter().length">No commands match</div>
+    </div>
+    <div class="palette-footer">Press <kbd>Enter</kbd> to run, <kbd>↑↓</kbd> to navigate, <kbd>Esc</kbd> to close</div>
+  </div>
+</div>
+
 <!-- Alpine backdrop: sky, two ridges, a lake (stars show only at night).
      Colours come from the theme tokens; see .app-backdrop in layout.css. -->
 <svg class="app-backdrop" aria-hidden="true" focusable="false" viewBox="0 0 1440 560" preserveAspectRatio="xMidYMin slice">
@@ -287,6 +317,19 @@
             <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V7l8-4 8 4v14"/><path d="M9 21v-5h6v5"/></svg></span>
             <span class="sn-mi-text"><span class="sn-mi-title">Company</span><span class="sn-mi-hint">Projects and teams under one roof</span></span>
           </button>
+          <div class="sn-menu-sep"></div>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('agent')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Agent</span><span class="sn-mi-hint">Create a new agent (wizard)</span></span>
+          </button>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('scheduled')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Scheduled task</span><span class="sn-mi-hint">Recurring or one-shot on a cron</span></span>
+          </button>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('workflow')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Workflow</span><span class="sn-mi-hint">Multi-agent pipeline with steps</span></span>
+          </button>
         </div>
       </div>
       <button type="button" class="sn-iconbtn" @click="$store.app.toggleSideNav(); $store.app.sideNavMobile = false" title="Hide this sidebar" aria-label="Hide this sidebar">
@@ -383,21 +426,81 @@
       </template>
       <div class="sn-empty" x-show="loaded && !visibleTasks.length">No open tasks.</div>
 
-      <template x-for="g in chatGroups" :key="g.name">
+      <!-- Conversations: filter chips, group by, needs-you pinned, then grouped list -->
+      <div class="sn-sec">
+        <span>Chats</span>
+        <div class="sn-plus-group" style="display:flex;gap:4px;flex-wrap:wrap">
+          <select class="sn-filter-select" x-model="convFilter" aria-label="Filter conversations" style="font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--text)">
+            <option value="all">All</option>
+            <option value="needs-me">Needs me</option>
+            <option value="running">Running</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="done">Done</option>
+          </select>
+          <select class="sn-filter-select" x-model="convGroupBy" aria-label="Group conversations by" style="font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--text)">
+            <option value="date">By date</option>
+            <option value="agent">By agent</option>
+            <option value="team">By team</option>
+            <option value="company">By company</option>
+            <option value="project">By project</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Needs-you (pinned) -->
+      <template x-if="needsYouChats.length && convFilter !== 'done'">
+        <div class="sn-sec"><span>Needs you</span></div>
+        <template x-for="c in needsYouChats" :key="c.id">
+          <button type="button" class="sn-row sn-needs-you" :class="{ active: activeSession === c.id }" @click="openChat(c)" @contextmenu="openContextMenu(c, $event)" :data-conv-id="c.id">
+            <span class="sn-av" aria-hidden="true" x-text="initials(c.agent_name)"></span>
+            <span class="sn-grow sn-trunc" x-text="chatTitle(c)"></span>
+            <span class="sn-dot sn-dot-you" aria-label="needs your input"></span>
+          </button>
+        </template>
+        <div class="sn-sep" style="margin:4px 0;border-top:1px solid var(--border)"></div>
+      </template>
+
+      <template x-for="g in groupedChats" :key="g.name">
         <div>
           <div class="sn-sec"><span x-text="g.name === 'Today' ? 'Chats · Today' : g.name"></span></div>
           <template x-for="c in g.chats" :key="c.id">
-            <button type="button" class="sn-row" :class="{ active: activeSession === c.id }" @click="openChat(c)">
+            <button type="button" class="sn-row" :class="{ active: activeSession === c.id }" @click="openChat(c)" @contextmenu="openContextMenu(c, $event)" :data-conv-id="c.id">
               <span class="sn-av" aria-hidden="true" x-text="initials(c.agent_name)"></span>
               <span class="sn-grow sn-trunc" x-text="chatTitle(c)"></span>
               <span class="sn-dot sn-dot-live" x-show="c.busy" aria-label="working"></span>
+              <span class="sn-dot sn-dot-you" x-show="c.unread > 0" aria-label="unread"></span>
             </button>
           </template>
         </div>
       </template>
-      <div class="sn-sec" x-show="loaded && !chatGroups.length"><span>Chats</span></div>
-      <div class="sn-empty" x-show="loaded && !chatGroups.length">No chats yet. Use New to start one.</div>
+      <div class="sn-sec" x-show="loaded && !groupedChats.length && !needsYouChats.length"><span>Chats</span></div>
+      <div class="sn-empty" x-show="loaded && !groupedChats.length && !needsYouChats.length">No chats yet. Use New to start one.</div>
       <a class="sn-row sn-muted" href="#sessions" @click="$store.app.sideNavMobile = false">All chats and archive</a>
+
+      <!-- Context menu -->
+      <div class="sn-context-menu" x-show="contextMenu.show" x-cloak
+           :style="'left:' + contextMenu.x + 'px; top:' + contextMenu.y + 'px'"
+           @click.outside="contextMenu.show = false" role="menu" aria-label="Conversation actions">
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('open')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 3l6 6-6 6"/></svg> Open
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('split')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> Split view
+        </button>
+        <div class="sn-cm-sep"></div>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('rename')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/></svg> Rename
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('pin')" x-show="false">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 12l3-3 3 3"/></svg> Pin (not supported)
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('archive')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 21V7l-8-4-8 4v14"/><path d="M3 21v-5h18v5"/></svg> Archive
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" style="color:var(--danger)" @click="contextMenuAction('delete')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Delete
+        </button>
+      </div>
     </div>
 
     <!-- New task / project / team / company -->
@@ -1714,7 +1817,7 @@
                  sandbox (never the host), its browser, and its background work. -->
             <aside x-show="panelOpen && currentAgent" x-cloak class="chat-side-panel" x-transition>
               <div class="chat-side-tabs">
-                <template x-for="t in [['files','Files'],['changes','Changes'],['artifacts','Artifacts'],['terminal','Terminal'],['browser','Browser'],['background','Background'],['archive','Archive']]" :key="t[0]">
+                <template x-for="t in [['files','Files'],['changes','Changes'],['artifacts','Artifacts'],['terminal','Terminal'],['browser','Browser'],['background','Background'],['run','Run'],['context','Context'],['archive','Archive']]" :key="t[0]">
                   <button :class="{ active: panelTab === t[0] }" @click="panelTab = t[0]; refreshPanel()" x-text="t[1]"></button>
                 </template>
                 <button class="chat-side-close" @click="panelOpen = false" aria-label="Close panel">&times;</button>
@@ -1846,6 +1949,67 @@
                       </div>
                     </template>
                     <div class="text-xs text-dim" style="padding:12px" x-show="!archivesList.length">Nothing archived.</div>
+                  </div>
+                </template>
+                <!-- Run: agent's run history and current run controls -->
+                <template x-if="panelTab === 'run'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">Run history (last 20)</span>
+                      <button class="btn btn-ghost btn-sm" @click="loadRun()" title="Refresh">⟳</button>
+                    </div>
+                    <template x-if="runHistory && runHistory.length">
+                      <template x-for="r in runHistory" :key="r.id || r.timestamp">
+                        <div class="chat-side-row" :class="r.status === 'completed' ? '' : 'sn-two'">
+                          <span class="truncate" style="flex:1" x-text="r.name || r.source || 'Run'"></span>
+                          <span class="sn-pill" :class="r.status === 'completed' ? '' : 'badge-suspended'" x-text="r.status || 'completed'"></span>
+                          <template x-if="r.status !== 'completed'">
+                            <span class="sn-sub" x-text="fmtAgo(Date.now() - (r.timestamp || Date.now()))"></span>
+                          </template>
+                        </div>
+                      </template>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!runHistory || !runHistory.length">No runs yet.</div>
+
+                    <div class="chat-side-bar" style="margin-top:12px;border-top:1px solid var(--border);padding-top:8px">
+                      <span class="text-xs text-dim">Current run</span>
+                    </div>
+                    <div style="padding:8px">
+                      <button class="btn btn-danger btn-sm" @click="stopAgent()" :disabled="!sending" style="width:100%" x-text="sending ? 'Stop current run' : 'No active run'"></button>
+                    </div>
+                  </div>
+                </template>
+                <!-- Context: project/team info and context pressure -->
+                <template x-if="panelTab === 'context'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">Context & project</span>
+                    </div>
+                    <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+                      <div>
+                        <div class="text-xs text-dim">Context pressure</div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <span style="width:10px;height:10px;border-radius:50%" :style="'background:' + contextDotColor"></span>
+                          <span class="text-sm font-mono" x-text="contextPressure"></span>
+                        </div>
+                        <div class="text-xs text-dim" style="margin-top:4px" x-text="tokenCount ? '≈ ' + tokenCount + ' tokens in current turn' : ''"></div>
+                      </div>
+                      <div style="border-top:1px solid var(--border);padding-top:8px">
+                        <div class="text-xs text-dim">Project / Team</div>
+                        <template x-if="agentContext && (agentContext.project || agentContext.team)">
+                          <div class="sn-row sn-muted" style="padding:6px 0;background:none;border:none">
+                            <span class="sn-grow sn-trunc" x-text="agentContext.project ? '📁 ' + agentContext.project : '👥 ' + agentContext.team"></span>
+                          </div>
+                        </template>
+                        <div class="text-xs text-dim" style="padding:4px 0" x-show="!agentContext || (!agentContext.project && !agentContext.team)">No project or team linked.</div>
+                      </div>
+                      <div style="border-top:1px solid var(--border);padding-top:8px">
+                        <div class="text-xs text-dim">Model</div>
+                        <div class="sn-row sn-muted" style="padding:6px 0;background:none;border:none">
+                          <span class="sn-grow sn-trunc" x-text="currentAgent ? currentAgent.model_provider + ' / ' + currentAgent.model_name : '—'"></span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </template>
               </div>

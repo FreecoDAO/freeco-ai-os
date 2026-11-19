@@ -570,6 +570,101 @@ mod tests {
         assert!(WEBCHAT_HTML.contains("Alpine.data('starnetPage'"));
         assert!(WEBCHAT_HTML.contains("x-data=\"starnetPage\""));
     }
+
+    /// Dashboard UX: second sidebar (sideNav) is registered and included
+    #[test]
+    fn the_dashboard_includes_the_side_nav_panel() {
+        assert!(WEBCHAT_HTML.contains("Alpine.data('sideNav'"));
+        assert!(WEBCHAT_HTML.contains("x-data=\"sideNav\""));
+    }
+
+    /// Dashboard UX: new + menu items are present
+    #[test]
+    fn the_dashboard_plus_menu_has_all_items() {
+        // Original items
+        assert!(WEBCHAT_HTML.contains("startNew('chat')"));
+        assert!(WEBCHAT_HTML.contains("startNew('task')"));
+        assert!(WEBCHAT_HTML.contains("startNew('project')"));
+        assert!(WEBCHAT_HTML.contains("startNew('team')"));
+        assert!(WEBCHAT_HTML.contains("startNew('company')"));
+        // New items
+        assert!(WEBCHAT_HTML.contains("startNew('agent')"));
+        assert!(WEBCHAT_HTML.contains("startNew('scheduled')"));
+        assert!(WEBCHAT_HTML.contains("startNew('workflow')"));
+    }
+
+    /// Dashboard UX: command palette is registered in app store and has HTML
+    #[test]
+    fn the_dashboard_includes_command_palette() {
+        assert!(WEBCHAT_HTML.contains("paletteOpen"));
+        assert!(WEBCHAT_HTML.contains("paletteQuery"));
+        assert!(WEBCHAT_HTML.contains("paletteFilter"));
+        assert!(WEBCHAT_HTML.contains("paletteExecute"));
+        assert!(WEBCHAT_HTML.contains("palette-backdrop"));
+        assert!(WEBCHAT_HTML.contains("palette-list"));
+        assert!(WEBCHAT_HTML.contains("id=\"palette-input\""));
+    }
+
+    /// Dashboard UX: conversation filtering and grouping
+    #[test]
+    fn the_dashboard_has_conversation_filters() {
+        assert!(WEBCHAT_HTML.contains("convFilter"));
+        assert!(WEBCHAT_HTML.contains("convGroupBy"));
+        assert!(WEBCHAT_HTML.contains("needs-me"));
+        assert!(WEBCHAT_HTML.contains("needsYouChats"));
+        assert!(WEBCHAT_HTML.contains("groupedChats"));
+    }
+
+    /// Dashboard UX: context menu for conversations
+    #[test]
+    fn the_dashboard_has_conversation_context_menu() {
+        assert!(WEBCHAT_HTML.contains("contextMenu"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction"));
+        assert!(WEBCHAT_HTML.contains("sn-context-menu"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction('open')"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction('split')"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction('rename')"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction('archive')"));
+        assert!(WEBCHAT_HTML.contains("contextMenuAction('delete')"));
+    }
+
+    /// Dashboard UX: run and context tabs in chat panel
+    #[test]
+    fn the_dashboard_chat_panel_has_run_and_context_tabs() {
+        assert!(WEBCHAT_HTML.contains("panelTab === 'run'"));
+        assert!(WEBCHAT_HTML.contains("panelTab === 'context'"));
+        assert!(WEBCHAT_HTML.contains("loadRun"));
+        assert!(WEBCHAT_HTML.contains("loadContext"));
+        assert!(WEBCHAT_HTML.contains("runHistory"));
+        assert!(WEBCHAT_HTML.contains("agentContext"));
+    }
+
+    /// Dashboard UX: keyboard shortcuts (Ctrl+K for palette, Escape handling)
+    #[test]
+    fn the_dashboard_has_keyboard_shortcuts() {
+        // Ctrl+K opens palette
+        assert!(WEBCHAT_HTML.contains("e.key === 'k'"));
+        assert!(WEBCHAT_HTML.contains("openPalette"));
+        // Escape closes palette, mobile menu, context menus
+        assert!(WEBCHAT_HTML.contains("closePalette"));
+        assert!(WEBCHAT_HTML.contains("e.key === 'Escape'"));
+        // Arrow keys in palette
+        assert!(WEBCHAT_HTML.contains("ArrowDown"));
+        assert!(WEBCHAT_HTML.contains("ArrowUp"));
+    }
+
+    /// Dashboard UX: x-text used for all user-facing text (no innerHTML injection for user text)
+    #[test]
+    fn the_dashboard_uses_x_text_for_user_content() {
+        // Panel titles use x-text
+        assert!(WEBCHAT_HTML.contains("x-text=\"t[1]\""));
+        // Menu item labels use x-text
+        assert!(WEBCHAT_HTML.contains("x-text=\"cmd.label\""));
+        assert!(WEBCHAT_HTML.contains("x-text=\"cmd.hint\""));
+        // Conversation titles use x-text
+        assert!(WEBCHAT_HTML.contains("x-text=\"chatTitle(c)\""));
+        assert!(WEBCHAT_HTML.contains("x-text=\"initials(c.agent_name)\""));
+    }
 }
 
 #[cfg(test)]
