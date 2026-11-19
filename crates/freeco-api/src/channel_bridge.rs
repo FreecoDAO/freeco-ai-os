@@ -19,6 +19,7 @@ use freeco_channels::telegram::TelegramAdapter;
 use freeco_channels::twitch::TwitchAdapter;
 use freeco_channels::types::ChannelAdapter;
 use freeco_channels::whatsapp::WhatsAppAdapter;
+use freeco_channels::whatsapp_allowlist::WhatsAppAllowlist;
 use freeco_channels::xmpp::XmppAdapter;
 use freeco_channels::zulip::ZulipAdapter;
 // Wave 3
@@ -1299,9 +1300,10 @@ pub async fn start_channel_bridge_with_config(
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     if let Some(ref wa_config) = config.whatsapp {
         let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env)
-            .ok()
-            .filter(|u| !u.is_empty());
+        let gateway_url = whatsapp_gateway_url(
+            std::env::var(&wa_config.gateway_url_env).ok(),
+            cloud_token.is_some(),
+        );
 
         if cloud_token.is_some() || gateway_url.is_some() {
             let token = cloud_token.unwrap_or_default();
@@ -1315,6 +1317,10 @@ pub async fn start_channel_bridge_with_config(
                     wa_config.webhook_port,
                     wa_config.allowed_users.clone(),
                 )
+                .with_allowlist(WhatsAppAllowlist::from_config(
+                    &wa_config.allowed_users,
+                    wa_config.owner_number.as_deref(),
+                ))
                 .with_gateway(gateway_url),
             );
             adapters.push((adapter, wa_config.default_agent.clone()));
@@ -1922,6 +1928,27 @@ pub async fn start_channel_bridge_with_config(
     }
 }
 
+/// The URL of the WhatsApp Web gateway the adapter sends through.
+///
+/// The daemon's own gateway sets `WHATSAPP_WEB_GATEWAY_URL` only once Node.js
+/// is found and `npm install` is done -- often after the bridge has started.
+/// Reading only the variable then left a QR-mode setup (no Cloud API token)
+/// without a WhatsApp adapter at all, and `channel_send` failed with
+/// "Channel 'whatsapp' not found" for the whole daemon run. Without a Cloud
+/// token the gateway is the only way out, so its fixed local address is used.
+fn whatsapp_gateway_url(env_value: Option<String>, has_cloud_token: bool) -> Option<String> {
+    let from_env = env_value
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
+    match from_env {
+        Some(url) => Some(url),
+        None if !has_cloud_token => {
+            Some(freeco_kernel::whatsapp_gateway::LOCAL_GATEWAY_URL.to_string())
+        }
+        None => None,
+    }
+}
+
 /// Reload channels from disk config — stops old bridge, starts new one.
 ///
 /// Reads `config.toml` fresh, rebuilds the channel bridge, and stores it
@@ -1974,6 +2001,22 @@ pub async fn reload_channels_from_disk(
     // Update the live channels config so list_channels() reflects reality
     *state.channels_config.write().await = fresh_config.channels.clone();
 
+    // WhatsApp's gateway is a process of its own: start it when WhatsApp was
+    // just set up, restart it when its allowlist changed, stop it when the
+    // section was removed. In the background, since a first start runs
+    // `npm install`.
+    {
+        let kernel = state.kernel.clone();
+        let whatsapp = fresh_config.channels.whatsapp.clone();
+        tokio::spawn(async move {
+            freeco_kernel::whatsapp_gateway::apply_whatsapp_config(&kernel, whatsapp).await;
+        });
+    }
+    if fresh_config.channels.whatsapp.is_none() {
+        // No stale adapter (with the old allowlist) left for channel_send.
+        state.kernel.channel_adapters.remove("whatsapp");
+    }
+
     // Start new bridge with fresh channel config
     let (new_bridge, started) =
         start_channel_bridge_with_config(state.kernel.clone(), &fresh_config.channels).await;
@@ -1992,6 +2035,27 @@ pub async fn reload_channels_from_disk(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whatsapp_qr_mode_has_its_gateway_url_before_the_gateway_sets_it() {
+        use super::whatsapp_gateway_url;
+        // QR mode, gateway still installing: the fixed local address.
+        assert_eq!(
+            whatsapp_gateway_url(None, false).as_deref(),
+            Some("http://127.0.0.1:3009")
+        );
+        assert_eq!(
+            whatsapp_gateway_url(Some("  ".to_string()), false).as_deref(),
+            Some("http://127.0.0.1:3009")
+        );
+        // An external gateway named in the environment wins.
+        assert_eq!(
+            whatsapp_gateway_url(Some("http://10.0.0.2:3009".to_string()), true).as_deref(),
+            Some("http://10.0.0.2:3009")
+        );
+        // Cloud API mode stays Cloud API mode.
+        assert_eq!(whatsapp_gateway_url(None, true), None);
+    }
+
     #[test]
     fn channel_text_and_text_blocks_are_marked_when_they_read_like_an_injection() {
         use freeco_types::message::ContentBlock;

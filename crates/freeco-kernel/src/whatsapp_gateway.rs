@@ -23,6 +23,9 @@ const GATEWAY_ALLOWLIST_JS: &str = include_str!("../../../packages/whatsapp-gate
 /// Default port for the WhatsApp Web gateway.
 const DEFAULT_GATEWAY_PORT: u16 = 3009;
 
+/// Where the daemon's own gateway listens (`DEFAULT_GATEWAY_PORT` on loopback).
+pub const LOCAL_GATEWAY_URL: &str = "http://127.0.0.1:3009";
+
 /// Crashes in a row before giving up.
 const MAX_RESTARTS: u32 = 10;
 
@@ -734,6 +737,10 @@ mod tests {
     #[test]
     fn test_default_gateway_port() {
         assert_eq!(DEFAULT_GATEWAY_PORT, 3009);
+        assert_eq!(
+            LOCAL_GATEWAY_URL,
+            format!("http://127.0.0.1:{DEFAULT_GATEWAY_PORT}")
+        );
     }
 
     #[test]
