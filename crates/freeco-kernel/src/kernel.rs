@@ -1216,7 +1216,13 @@ impl FreecoKernel {
                 config.media.tts_openai_base_url.clone(),
                 config.media.tts_elevenlabs_base_url.clone(),
             )
-            .with_local_api_key_env(config.media.local_audio_api_key_env.clone());
+            .with_local_api_key_env(config.media.local_audio_api_key_env.clone())
+            // `[media].local_only`: speech never auto-detects or falls back
+            // to a cloud provider; see MediaConfig::local_only_effective.
+            .with_local_only(config.media.local_only_effective());
+        if config.media.local_only_effective() {
+            info!("[media].local_only is on: speech-to-text and text-to-speech use local endpoints only, no cloud fallback");
+        }
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback

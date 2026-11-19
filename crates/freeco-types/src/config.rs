@@ -5051,4 +5051,23 @@ shell_env_passthrough = ["*"]
         let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
         assert_eq!(policy.shell_env_passthrough, vec!["*"]);
     }
+
+    #[test]
+    fn media_local_only_is_read_from_the_config_file() {
+        let toml_str = r#"
+[media]
+audio_base_url = "http://127.0.0.1:8010"
+tts_openai_base_url = "http://127.0.0.1:8010"
+local_only = true
+"#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.media.local_only, Some(true));
+        assert!(config.media.local_only_effective());
+
+        // Absent: the default rule applies (local URLs imply local-only).
+        let toml_str = "[media]\naudio_base_url = \"http://127.0.0.1:8010\"\n";
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.media.local_only, None);
+        assert!(config.media.local_only_effective());
+    }
 }

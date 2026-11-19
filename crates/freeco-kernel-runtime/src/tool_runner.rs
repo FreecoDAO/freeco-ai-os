@@ -1844,7 +1844,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- TTS/STT tools ---
         ToolDefinition {
             name: "text_to_speech".to_string(),
-            description: "Convert text to speech audio. Auto-selects OpenAI or ElevenLabs. Saves audio to workspace output/ directory.".to_string(),
+            description: "Convert text to speech audio. Uses the local speech service when [media].local_only is on (never a cloud fallback), otherwise OpenAI or ElevenLabs. Saves audio to workspace output/ directory.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1857,7 +1857,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "speech_to_text".to_string(),
-            description: "Transcribe audio to text using speech-to-text. Auto-selects Groq Whisper or OpenAI Whisper. Supported formats: mp3, wav, ogg, flac, m4a, webm.".to_string(),
+            description: "Transcribe audio to text using speech-to-text. Uses the local speech service when [media].local_only is on (never a cloud fallback), otherwise Groq Whisper or OpenAI Whisper. Supported formats: mp3, wav, ogg, flac, m4a, webm.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

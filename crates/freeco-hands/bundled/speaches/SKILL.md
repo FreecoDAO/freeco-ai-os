@@ -30,8 +30,26 @@ in `SPEACHES_API_KEY`.
   No `/v1` on the end: FreEco.ai appends `/v1/audio/...` itself.
   `local_audio_api_key_env` makes it send this service's key rather than your
   OpenAI key, which must never go to a service other than OpenAI.
-- **dograh voice calls** — in dograh, choose *Speaches* as the transcriber and
-  the voice, with base URL `http://127.0.0.1:8010/v1` and the same key.
+
+  Pointing these at this local address also turns on `[media] local_only`
+  unless it is set to `false`: FreEco.ai then never picks Groq, OpenAI or
+  ElevenLabs from their keys, and if this service is down, dictation and
+  spoken replies fail with an error naming `http://127.0.0.1:8010` instead of
+  quietly sending audio to a cloud provider.
+- **dograh voice calls** — dograh keeps its speech settings in its own
+  database, set in its UI (Settings → models), not in the hand's environment,
+  so they have to be chosen once there. Its default is cloud (Deepgram for
+  speech-to-text, ElevenLabs for the voice). Choose *Local Models (Speaches)*
+  for both, with:
+  - base URL `http://host.containers.internal:8010/v1` — **not** dograh's
+    suggested `http://localhost:8000/v1`: inside dograh's container
+    `localhost` is the container itself, and port 8000 is dograh's own API;
+  - API key: the value of `SPEACHES_API_KEY`;
+  - transcriber model `Systran/faster-whisper-small` (dograh suggests the
+    English-only `faster-distil-whisper-small.en`, which is not loaded here)
+    and the call's language;
+  - voice model and voice as listed by `GET /v1/models` and
+    `GET /v1/audio/voices` here.
 
 ## Models
 
