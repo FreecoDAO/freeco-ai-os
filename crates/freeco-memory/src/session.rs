@@ -40,6 +40,9 @@ pub struct ConversationSummary {
     pub tenant_id: String,
     /// How many messages it holds, tool traffic included.
     pub message_count: usize,
+    /// How many of those are user or assistant messages with text: what a
+    /// reader sees of it.
+    pub text_count: usize,
     /// RFC 3339.
     pub created_at: String,
     /// RFC 3339; changes on every save.
@@ -537,6 +540,9 @@ impl SessionStore {
                 let messages_blob: Vec<u8> = row.get(2)?;
                 let messages =
                     rmp_serde::from_slice::<Vec<Message>>(&messages_blob).unwrap_or_default();
+                let readable =
+                    |m: &Message| m.role != Role::System && !message_text(m).trim().is_empty();
+                let text_count = messages.iter().filter(|m| readable(m)).count();
                 let last = messages.iter().rev().find_map(|m| {
                     if m.role == Role::System {
                         return None;
@@ -553,6 +559,7 @@ impl SessionStore {
                     session_id: row.get(0)?,
                     agent_id: row.get(1)?,
                     message_count: messages.len(),
+                    text_count,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
                     label: row.get(5)?,
@@ -1152,6 +1159,7 @@ mod tests {
         assert_eq!(tg.label.as_deref(), Some("telegram:42"));
         assert_eq!(tg.agent_id, agent.to_string());
         assert_eq!(tg.message_count, 3);
+        assert_eq!(tg.text_count, 2, "the system prompt is not counted");
         assert_eq!(tg.last_role, Some(Role::Assistant));
         assert_eq!(tg.last_text.as_deref(), Some("General Kenobi"));
         assert_eq!(tg.tenant_id, crate::migration::LOCAL_TENANT_ID);
