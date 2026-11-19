@@ -818,6 +818,42 @@ List all active sessions across agents.
 }
 ```
 
+### GET /api/starnet/state
+
+What the dashboard's Starnet page draws, in one read-only poll. Rooms are
+teams (sorted by name), with a last "No team" room for agents on no team;
+every agent appears in exactly one room. `state` is `idle`, `thinking`,
+`tool`, `waiting_on_helper`, `waiting_for_you` or `error` (the agent crashed,
+or its last tool failed less than a minute ago). `task` is the newest
+in-progress task assigned to the agent. `degraded` lists `teams` or `tasks`
+when that part could not be read; the agents are still returned.
+
+**Response** `200 OK`:
+
+```json
+{
+  "now_ms": 1763510400000,
+  "rooms": [
+    { "id": "t1b2...", "name": "Research", "project": "Launch", "agents": ["a1b2c3d4-..."] },
+    { "id": null, "name": "No team", "project": null, "agents": ["e5f6..."] }
+  ],
+  "agents": [
+    {
+      "agent_id": "a1b2c3d4-...",
+      "name": "researcher",
+      "state": "tool",
+      "tool": "web_fetch",
+      "since_ms": 1763510395000,
+      "turns": 1,
+      "waiting_approvals": 0,
+      "task": "Compare three suppliers",
+      "room": "t1b2..."
+    }
+  ],
+  "degraded": []
+}
+```
+
 ### DELETE /api/sessions/{id}
 
 Delete a specific session and its conversation history.
