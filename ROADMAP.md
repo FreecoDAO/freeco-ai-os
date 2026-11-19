@@ -695,6 +695,13 @@ on a running daemon.
 - 🟨 Claude Code `<model>@<effort>`, sign-in errors, IPv4-first.
 - 🟨 One retry on a failed connection; clearer hourly quota message.
 - 🟨 WhatsApp gateway restarts, alerts, install marker, media; one allowlist.
+- 🟨 WhatsApp allowed chats only, end to end: one list from config
+  (`allowed_users` + `owner_number`, empty = nobody but the owner), the same
+  normalisation in Rust and in the gateway, checked by the gateway on the way
+  in and out and by the daemon on receipt and on every send; the gateway
+  starts or restarts on channel reload; QR mode always has its adapter;
+  dashboard status and allowlist. Unit tests (Rust) and `node:test` tests for
+  `allowlist.js`, not yet on a running daemon or a real WhatsApp account.
 - 🟨 Service backups: 3 runs, 12 GB cap.
 - 🟨 `deploy/daemon/` Podman packaging and runbook; home path remap.
 - 📋 The ws `parallel` flag (a busy agent's worker takes a chat message) is

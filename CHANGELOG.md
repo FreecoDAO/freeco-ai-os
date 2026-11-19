@@ -72,12 +72,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket at a time, an immediate reconnect after pairing, replies to the
   chat's own id (privacy ids included), and messages addressed by the agent's
   id rather than its name. Baileys is pinned to 6.7.24; Node 20 or later.
-- `[channels.whatsapp] allowed_users` in config.toml is folded into the
-  gateway's one allowlist, `WHATSAPP_ALLOWED_NUMBERS` and
+- `[channels.whatsapp] allowed_users` in config.toml is the gateway's one
+  allowlist, passed to it as `WHATSAPP_ALLOWED_NUMBERS` and
   `WHATSAPP_ALLOWED_GROUPS` (entries ending `@g.us` are groups).
 - Service backups keep three runs and at most 12 GB; the newest run always
   stays. A failed volume export no longer leaves a truncated archive that
   counted as a backup.
+- WhatsApp settings in the dashboard show the gateway's state (connected,
+  QR scan needed, restarting, stopped after repeated crashes, Node.js
+  missing) and the allowed numbers and groups, which can be edited there
+  (`GET /api/channels/whatsapp/status`). `[channels.whatsapp] owner_number`
+  is the owner's own number, always allowed.
 
 ### Fixed
 
@@ -104,9 +109,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
   stale memory when opening a database with a `-wal` file someone else wrote
   (RUSTSEC-2026-0459).
+- WhatsApp talks to allowed chats only, both ways and in both layers. The
+  gateway drops a message from a chat off the list before reading,
+  downloading or forwarding it (it never sends read receipts), and the daemon
+  refuses it again on receipt (403). An agent's `channel_send`, a cron
+  delivery or a reply to a chat off the list is refused with an error naming
+  the chat, by the daemon and by the gateway. Numbers match however they are
+  written (`+41 79 123 45 67`, `0041…`, `…@s.whatsapp.net`); a national number
+  with one leading zero is rejected rather than guessed.
+- WhatsApp set up from the dashboard works without a daemon restart: saving
+  it starts the gateway, and an edited allowlist restarts it with the new
+  list. In QR mode `channel_send` no longer fails with "Channel 'whatsapp' not
+  found" when the gateway took longer to install than the channels took to
+  start. A daemon listening on `0.0.0.0` is reached by its gateway on
+  `127.0.0.1`.
 
 ### Changed
 
+- The WhatsApp allowlist is `[channels.whatsapp] allowed_users` (numbers and
+  `…@g.us` groups) plus `owner_number`, and nothing else: the daemon passes it
+  to the gateway as `WHATSAPP_ALLOWED_NUMBERS` / `WHATSAPP_ALLOWED_GROUPS`
+  and ignores those variables in its own environment. An empty list now
+  answers nobody but `owner_number`, and nobody at all without one; it used
+  to answer every direct chat. `*` is no longer a wildcard for groups. List
+  each chat you want answered.
 - Release images go to their own private package,
   `ghcr.io/freecodao/freeco-ai-os`. The `freeco-ai` package is public, and the
   release refused to push into it, so v0.9.8 shipped no image. Nothing built
@@ -197,9 +223,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The WhatsApp gateway answers only where it is meant to. Groups are ignored
-  unless listed in `WHATSAPP_ALLOWED_GROUPS` (`*` for all), and
-  `WHATSAPP_ALLOWED_NUMBERS` limits direct chats to the numbers listed. Each
+- The WhatsApp gateway answers only where it is meant to: listed groups and
+  listed numbers (`[channels.whatsapp] allowed_users`, see above). Each
   contact and each group has a conversation of its own, and the agent is told
   who is writing.
 
