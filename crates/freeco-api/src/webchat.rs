@@ -143,8 +143,8 @@ pub async fn font_file(
 }
 
 /// StarNet sprites for the Starnet view (MIT, see
-/// `static/starnet/THIRD_PARTY_NOTICES.md`): six generic characters in four
-/// poses each plus a little furniture, about 83 KB in all.
+/// `static/starnet/THIRD_PARTY_NOTICES.md`): six generic characters in six
+/// poses each plus four pieces of furniture, about 71 KB in all.
 ///
 /// A fixed table, like the fonts: the name in the URL only selects one of
 /// these compiled-in files, so no request can reach the disk.
@@ -250,28 +250,12 @@ const STARNET_FILES: &[(&str, &[u8])] = &[
         include_bytes!("../static/starnet/furniture-chair.png"),
     ),
     (
-        "furniture-coffee.png",
-        include_bytes!("../static/starnet/furniture-coffee.png"),
-    ),
-    (
-        "furniture-console.png",
-        include_bytes!("../static/starnet/furniture-console.png"),
-    ),
-    (
         "furniture-desk.png",
         include_bytes!("../static/starnet/furniture-desk.png"),
     ),
     (
         "furniture-plant.png",
         include_bytes!("../static/starnet/furniture-plant.png"),
-    ),
-    (
-        "furniture-rack.png",
-        include_bytes!("../static/starnet/furniture-rack.png"),
-    ),
-    (
-        "furniture-screens.png",
-        include_bytes!("../static/starnet/furniture-screens.png"),
     ),
     (
         "furniture-whiteboard.png",
@@ -520,16 +504,7 @@ mod tests {
         "gesture_south_4",
         "gesture_south_6",
     ];
-    const FURNITURE: [&str; 8] = [
-        "desk",
-        "chair",
-        "plant",
-        "console",
-        "screens",
-        "coffee",
-        "whiteboard",
-        "rack",
-    ];
+    const FURNITURE: [&str; 4] = ["desk", "chair", "plant", "whiteboard"];
 
     #[test]
     fn every_starnet_sprite_is_a_png() {

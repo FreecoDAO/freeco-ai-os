@@ -48,8 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows a red "!" when it waits for your yes or an error after a failure. A
   speech bubble carries its current task. Click an agent to open its chat.
   It follows the day and night themes and fetches everything from the
-  daemon: one new read-only endpoint, `GET /api/starnet/state`, and 44
-  sprites from StarNet (MIT, about 83 KB) compiled into the binary. The
+  daemon: one new read-only endpoint, `GET /api/starnet/state`, and 40
+  sprites from StarNet (MIT, about 72 KB) compiled into the binary. The
   renderer is FreEco's own; no StarNet code is included.
 - Skills install straight from GitHub. The Skills page has a GitHub tab:
   paste `owner/repo/skills` or a link, preview, tick the skills, install.

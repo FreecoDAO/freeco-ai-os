@@ -747,7 +747,7 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   each agent animates by state (idle, thinking, tool, waiting on a helper,
   waiting for your yes, error), a bubble shows its in-progress task, click
   opens its chat. Data: `GET /api/starnet/state` (read-only, behind the
-  usual auth). Sprites: 44 unmodified StarNet PNGs pinned to commit
+  usual auth). Sprites: 40 unmodified StarNet PNGs pinned to commit
   `fbddbf9`, MIT notice in `crates/freeco-api/static/starnet/`. The audit
   ruled out vendoring StarNet's 35k-line engine; the renderer is our own.
   Unit and integration tests written; not yet built or watched live.

@@ -20,7 +20,7 @@
   // Keep in step with STARNET_FILES in src/webchat.rs (a test checks it).
   var CHARACTERS = ['astronaut', 'robot', 'alien', 'capybara', 'bear', 'skeleton'];
   var POSES = ['sit_south', 'blink_south', 'gesture_south_0', 'gesture_south_2', 'gesture_south_4', 'gesture_south_6'];
-  var FURNITURE = ['desk', 'chair', 'plant', 'console', 'screens', 'coffee', 'whiteboard', 'rack'];
+  var FURNITURE = ['desk', 'chair', 'plant', 'whiteboard'];
   var GESTURE = ['gesture_south_0', 'gesture_south_2', 'gesture_south_4', 'gesture_south_6'];
 
   // Layout, in unzoomed canvas pixels. A desk sprite is 96x72, a character
