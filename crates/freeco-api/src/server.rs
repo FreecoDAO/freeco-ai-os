@@ -673,7 +673,8 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams/{id}/members",
-            axum::routing::post(crate::org_routes::add_team_member),
+            axum::routing::get(crate::teams_routes::list_members)
+                .post(crate::teams_routes::add_member),
         )
         .route(
             "/api/org/teams/{id}/run",
@@ -693,6 +694,24 @@ pub async fn build_router(
             "/api/org/teams/{id}/tasks",
             axum::routing::get(crate::teams_routes::team_tasks)
                 .post(crate::teams_routes::post_team_task),
+        )
+        // Team boards: move, assign, edit or delete a card; and the rest of
+        // companies and teams. Permission is checked per team in the handler
+        // (`team_access`).
+        .route(
+            "/api/org/teams/{id}/tasks/{task_id}",
+            axum::routing::put(crate::teams_routes::update_team_task)
+                .delete(crate::teams_routes::delete_team_task),
+        )
+        .route(
+            "/api/org/teams/{id}",
+            axum::routing::put(crate::teams_routes::update_team),
+        )
+        .route(
+            "/api/org/companies/{id}",
+            axum::routing::get(crate::teams_routes::get_company)
+                .put(crate::teams_routes::update_company)
+                .delete(crate::teams_routes::delete_company),
         )
         .route(
             "/api/sessions/{id}/assign",

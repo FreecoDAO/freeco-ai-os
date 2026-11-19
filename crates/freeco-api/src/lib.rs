@@ -57,6 +57,7 @@ pub mod services;
 pub mod session_auth;
 pub mod stream_chunker;
 pub mod stream_dedup;
+pub mod team_access;
 pub mod teams_routes;
 pub mod types;
 pub mod usage_breakdown;
