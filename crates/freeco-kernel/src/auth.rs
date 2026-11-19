@@ -197,6 +197,7 @@ mod tests {
             api_key_hash: None,
             password_hash: None,
             enabled: false,
+            ..Default::default()
         };
         let manager = AuthManager::new(&[owner]);
         assert!(manager.identify("whatsapp", "+41790000000").is_none());
@@ -215,6 +216,7 @@ mod tests {
             api_key_hash: None,
             password_hash: None,
             enabled: true,
+            ..Default::default()
         };
         let manager = AuthManager::new(&[owner]);
         let id = manager.identify_any("+41790000000").expect("bound");

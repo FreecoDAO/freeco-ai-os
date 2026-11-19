@@ -127,6 +127,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
               <span class="nav-label">Chat</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'chamber' }" @click="navigate('chamber')" :aria-current="page === 'chamber' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
+              <span class="nav-label">Chamber</span>
+            </a>
             <a class="nav-item" :class="{ active: page === 'live' }" @click="navigate('live')" :aria-current="page === 'live' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span>
               <span class="nav-label">Live</span>
@@ -1041,6 +1045,108 @@
           </div>
 
           </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Page: Chamber. Every conversation in one window: agent chats and each
+         person's WhatsApp, Telegram, email, ... conversation. The server
+         shows each caller only what access.rs allows. Message text is always
+         x-text, never x-html: it comes from people outside. -->
+    <template x-if="page === 'chamber'">
+      <div x-data="chamberPage" class="page-body chamber-page">
+        <div class="page-header">
+          <h1 class="page-title">Chamber</h1>
+          <p class="page-subtitle">Every conversation you may see, from every channel, in one place.</p>
+        </div>
+
+        <div x-show="loadError" class="alert alert-error" role="alert" x-text="loadError"></div>
+
+        <div class="chamber">
+          <aside class="chamber-list" aria-label="Conversations">
+            <div class="chamber-filters">
+              <select class="form-select" x-model="filter.channel" @change="load()" aria-label="Channel">
+                <option value="">All channels</option>
+                <template x-for="ch in channels" :key="ch">
+                  <option :value="ch" x-text="channelLabel(ch)"></option>
+                </template>
+              </select>
+              <select class="form-select" x-model="filter.agent" @change="load()" aria-label="Agent">
+                <option value="">All agents</option>
+                <template x-for="a in agents" :key="a.id">
+                  <option :value="a.id" x-text="a.name"></option>
+                </template>
+              </select>
+              <label class="chamber-unread-toggle">
+                <input type="checkbox" x-model="filter.unread" @change="load()">
+                <span>Unread</span>
+              </label>
+            </div>
+
+            <div x-show="loading" class="chamber-empty">Loading…</div>
+            <div x-show="!loading && !conversations.length && !loadError" class="chamber-empty">
+              Nothing here. Conversations you are allowed to see appear as they arrive.
+            </div>
+
+            <ul class="chamber-items" role="listbox" aria-label="Conversations">
+              <template x-for="c in conversations" :key="c.id">
+                <li role="option" :aria-selected="c.id === selectedId">
+                  <button type="button" class="chamber-item" :class="{ 'chamber-item-selected': c.id === selectedId, 'chamber-item-unread': c.unread > 0 }"
+                          @click="openThread(c.id)">
+                    <span class="channel-icon chamber-tag" :class="'chamber-tag-' + c.channel" :title="channelLabel(c.channel)" x-text="tag(c.channel)"></span>
+                    <span class="chamber-item-body">
+                      <span class="chamber-item-top">
+                        <span class="chamber-item-title" x-text="c.title"></span>
+                        <span class="chamber-item-when" x-text="when(c.updated_at)"></span>
+                      </span>
+                      <span class="chamber-item-agent" x-text="c.agent_name"></span>
+                      <span class="chamber-item-preview" x-text="preview(c)"></span>
+                    </span>
+                    <span class="badge badge-swiss" x-show="c.unread > 0" x-text="c.unread" :aria-label="c.unread + ' unread'"></span>
+                  </button>
+                </li>
+              </template>
+            </ul>
+          </aside>
+
+          <section class="chamber-thread" aria-label="Conversation">
+            <div x-show="!selected && !threadLoading" class="chamber-empty chamber-thread-empty">
+              Pick a conversation on the left.
+            </div>
+            <template x-if="selected">
+              <div class="chamber-thread-inner">
+                <header class="chamber-thread-head">
+                  <span class="channel-icon chamber-tag" :class="'chamber-tag-' + selected.channel" x-text="tag(selected.channel)"></span>
+                  <div>
+                    <div class="chamber-thread-title" x-text="selected.title"></div>
+                    <div class="chamber-thread-sub">
+                      <span x-text="channelLabel(selected.channel)"></span>
+                      <span aria-hidden="true">·</span>
+                      <span x-text="selected.agent_name"></span>
+                    </div>
+                  </div>
+                </header>
+                <div x-show="threadError" class="alert alert-error" role="alert" x-text="threadError"></div>
+                <div class="chamber-messages" x-ref="thread" aria-live="polite">
+                  <div x-show="threadLoading" class="chamber-empty">Loading…</div>
+                  <template x-for="m in messages" :key="m.id">
+                    <div class="chamber-msg" :class="m.role === 'user' ? 'chamber-msg-in' : 'chamber-msg-out'">
+                      <div class="chamber-msg-who" x-text="who(m)"></div>
+                      <div class="chamber-msg-text" x-text="m.text"></div>
+                    </div>
+                  </template>
+                </div>
+                <form class="chamber-reply" @submit.prevent="send()">
+                  <textarea class="form-input" rows="2" x-model="draft" :placeholder="replyHint()" :aria-label="replyHint()"
+                            :disabled="!selected.can_reply || sending"
+                            @keydown.enter="if (!$event.shiftKey) { $event.preventDefault(); send(); }"></textarea>
+                  <button type="submit" class="btn btn-primary" :disabled="!selected.can_reply || sending || !draft.trim()">
+                    <span x-text="sending ? 'Sending…' : 'Send'"></span>
+                  </button>
+                </form>
+              </div>
+            </template>
+          </section>
         </div>
       </div>
     </template>

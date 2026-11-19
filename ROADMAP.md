@@ -707,6 +707,27 @@ on a running daemon.
 - 📋 The ws `parallel` flag (a busy agent's worker takes a chat message) is
   left to the CEO dispatcher work, which owns the socket protocol.
 
+### Chamber — one inbox for every channel, filtered per caller
+
+Coded with unit and HTTP tests (`crates/freeco-api/src/access.rs`,
+`crates/freeco-api/tests/chamber_test.rs`, `crates/freeco-api/src/ws.rs`);
+not yet run against a live daemon in this thread (owner rule: one check round
+on the integration branch).
+
+- 🟨 One place decides visibility, `crates/freeco-api/src/access.rs`: owners
+  and admins everything, others their `[[users]]` `agents` and `channels`
+  grants, kids no external channels, viewers read only; a signed-in caller
+  never sees another tenant's data; hidden items are 404.
+- 🟨 `/api/chamber/conversations`, `.../{id}/messages`, `.../{id}/reply` and
+  `/api/chamber/stream`, plus the Chamber page in the dashboard. Channel
+  replies use the existing channel send path, so they go out only from a
+  configured adapter.
+- 🟨 The WebSocket chat checks roles and grants; a viewer can no longer chat
+  over it.
+- ⬜ Open decisions for the owner are in `docs/chamber-access.md` (per-person
+  agent chats, peer display names, team grants, live HTTP history for
+  unlabelled conversations).
+
 ### Spend limits and secrets.env -- from the 2026-09-14 audit
 
 Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the

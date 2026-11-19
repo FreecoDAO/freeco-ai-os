@@ -4144,4 +4144,115 @@ html.widget-mode .freeco-x { display: none !important; }
 .starnet-list button {
   padding: 4px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+
+/* ── Chamber: every conversation in one window ──────────────────────────── */
+/* Two panes inside the page's scroll area, so the message thread scrolls on
+   its own and the reply box stays put. Colours are theme variables only. */
+.chamber-page { overflow: hidden; display: flex; flex-direction: column; }
+.chamber {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+}
+.chamber-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.chamber-filters { display: flex; flex-direction: column; gap: 8px; }
+.chamber-unread-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-dim);
+}
+.chamber-items {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto; flex: 1; min-height: 0;
+}
+.chamber-item {
+  width: 100%;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+}
+.chamber-item:hover { background: var(--bg-hover); }
+.chamber-item-selected { background: var(--accent-subtle); border-color: var(--border); }
+.chamber-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.chamber-item-top { display: flex; justify-content: space-between; gap: 8px; }
+.chamber-item-title {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chamber-item-when { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.chamber-item-agent { font-size: 11px; color: var(--text-dim); }
+.chamber-item-preview {
+  font-size: 12px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  white-space: normal; word-break: break-word;
+}
+.chamber-item-unread .chamber-item-title { font-weight: 700; }
+.chamber-tag { text-transform: uppercase; letter-spacing: 0.02em; }
+.chamber-tag-agent { background: var(--accent-subtle); color: var(--accent-light); }
+.chamber-tag-whatsapp { background: var(--success-subtle); color: var(--success); }
+.chamber-tag-telegram { background: var(--info-subtle); color: var(--info); }
+.chamber-tag-email { background: var(--warning-subtle); color: var(--warning); }
+
+.chamber-thread {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.chamber-thread-inner { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.chamber-thread-empty { margin: auto; }
+.chamber-thread-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.chamber-thread-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.chamber-thread-sub { display: flex; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.chamber-messages {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 18px;
+}
+.chamber-msg { max-width: 78%; }
+.chamber-msg-in { align-self: flex-start; }
+.chamber-msg-out { align-self: flex-end; text-align: left; }
+.chamber-msg-who { font-size: 11px; color: var(--text-dim); margin-bottom: 3px; }
+.chamber-msg-text {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--agent-bg);
+  color: var(--text);
+  font-size: 14px; line-height: 1.5;
+  /* Message text is plain text: keep newlines, wrap anything long. */
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chamber-msg-out .chamber-msg-text { background: var(--user-bg); }
+.chamber-reply {
+  display: flex; align-items: flex-end; gap: 10px;
+  padding: 12px 18px; border-top: 1px solid var(--border);
+}
+.chamber-reply textarea { flex: 1; resize: vertical; min-height: 44px; max-height: 200px; }
+.chamber-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .chamber { grid-template-columns: 1fr; overflow-y: auto; }
+  .chamber-list { max-height: 45vh; }
+  .chamber-thread { min-height: 50vh; }
 }

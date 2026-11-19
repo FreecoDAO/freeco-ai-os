@@ -116,7 +116,7 @@ pub struct Caller {
 }
 
 impl Caller {
-    fn owner(method: AuthMethod) -> Self {
+    pub(crate) fn owner(method: AuthMethod) -> Self {
         Self {
             username: None,
             role: UserRole::Owner,
@@ -205,6 +205,12 @@ fn is_chat(method: &axum::http::Method, path: &str) -> bool {
     }
     if path == "/api/sessions/route" {
         return true;
+    }
+    // Replying in a Chamber conversation; crate::access decides where.
+    if let Some(rest) = path.strip_prefix("/api/chamber/conversations/") {
+        return rest
+            .strip_suffix("/reply")
+            .is_some_and(|id| !id.contains('/'));
     }
     let Some(rest) = path.strip_prefix("/api/agents/") else {
         return false;
@@ -786,6 +792,16 @@ mod tests {
             Some(UserRole::Kid)
         );
         assert_eq!(r(Method::POST, "/api/sessions/route"), Some(UserRole::Kid));
+        // A Chamber reply is chatting; crate::access decides where.
+        assert_eq!(
+            r(Method::POST, "/api/chamber/conversations/x/reply"),
+            Some(UserRole::Kid)
+        );
+        assert_eq!(
+            r(Method::POST, "/api/chamber/conversations/x/y/reply"),
+            Some(UserRole::Admin)
+        );
+        assert_eq!(r(Method::GET, "/api/chamber/conversations"), None);
         assert_eq!(r(Method::POST, "/api/agents"), Some(UserRole::Admin));
         assert_eq!(r(Method::DELETE, "/api/agents/x"), Some(UserRole::Admin));
         assert_eq!(r(Method::PUT, "/api/budget"), Some(UserRole::Admin));

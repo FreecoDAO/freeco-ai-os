@@ -274,6 +274,7 @@ mod tests {
             api_key_hash: None,
             password_hash: Some(format!("$argon2id$hash-of-{name}")),
             enabled,
+            ..Default::default()
         }
     }
 
