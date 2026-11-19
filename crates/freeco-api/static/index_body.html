@@ -1108,7 +1108,7 @@
               <span class="teams-access" x-text="accessLabel(selected().access)"></span>
               <template x-if="manageAll">
                 <select class="form-input teams-company-select" aria-label="Company of this team"
-                        x-model="selected().company_id" @change="moveTeam($event.target.value)">
+                        x-model="selected().company_id" @change="moveTeam()">
                   <option value="">No company</option>
                   <template x-for="c in companies" :key="c.id">
                     <option :value="c.id" x-text="c.name"></option>

@@ -708,7 +708,8 @@ pub async fn update_team(
     if name.is_some_and(str::is_empty) {
         return fail(StatusCode::BAD_REQUEST, "A team needs a name.");
     }
-    if let Some(c) = body.company_id.as_deref().map(str::trim) {
+    if let Some(c) = body.company_id.as_deref() {
+        let c = c.trim();
         let company = (!c.is_empty()).then_some(c);
         if let Err(e) = org.set_team_company(team_id, company) {
             return fail(StatusCode::BAD_REQUEST, e);
