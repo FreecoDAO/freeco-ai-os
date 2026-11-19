@@ -199,6 +199,8 @@ discord = "987654321"
 [[users]]
 name = "Bob"
 role = "user"
+agents = ["assistant"]                # agents Bob may see and chat with ("*" = all)
+channels = ["whatsapp", "email"]      # channel conversations Bob may see ("*" = all)
 [users.channel_bindings]
 slack = "U0123ABCDEF"
 
@@ -1335,6 +1337,8 @@ slack = "U0ABCDEFG"
 | `role` | string | `"user"` | User role in the RBAC hierarchy. |
 | `channel_bindings` | map of string to string | `{}` | Maps channel platform names to platform-specific user IDs, binding this user identity across channels. |
 | `api_key_hash` | string or null | `null` | SHA256 hash of the user's personal API key for authenticated API access. |
+| `agents` | list of strings | `[]` | Agents (name or id, `"*"` for all) this account may see and chat with in the Chamber and the WebSocket chat. Ignored for `owner`/`admin`, who see every agent. See [Chamber access](chamber-access.md). |
+| `channels` | list of strings | `[]` | External channels (`whatsapp`, `telegram`, `email`, ...; `"*"` for all) whose conversations this account may see in the Chamber. Ignored for `owner`/`admin`; a `kid` never sees external channels. |
 
 **Role hierarchy** (highest to lowest privilege):
 

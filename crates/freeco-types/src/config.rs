@@ -193,6 +193,17 @@ pub struct UserConfig {
     /// login and by role resolution (they fall back to least-privileged).
     #[serde(default = "default_user_enabled")]
     pub enabled: bool,
+    /// Agents this account may see and chat with in the dashboard (the
+    /// chamber, the WebSocket chat), by agent name or id; `"*"` is every
+    /// agent. Owners and admins see every agent whatever this says. Empty:
+    /// none. See `freeco-api`'s `access` module for the whole policy.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// External channels (`whatsapp`, `telegram`, `email`, ...) whose
+    /// conversations this account may see; `"*"` is every channel. Owners and
+    /// admins see every channel; a kid never sees one. Empty: none.
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 fn default_role() -> String {
@@ -244,6 +255,8 @@ impl Default for UserConfig {
             api_key_hash: None,
             password_hash: None,
             enabled: true,
+            agents: Vec::new(),
+            channels: Vec::new(),
         }
     }
 }
@@ -4485,6 +4498,34 @@ mod tests {
         assert_eq!(back.name, "Alice");
         assert_eq!(back.role, "owner");
         assert_eq!(back.channel_bindings.get("telegram").unwrap(), "123456");
+    }
+
+    #[test]
+    fn user_grants_are_optional_and_read_from_toml() {
+        let without: KernelConfig = toml::from_str(
+            r#"
+[[users]]
+name = "Bob"
+role = "user"
+"#,
+        )
+        .unwrap();
+        assert!(without.users[0].agents.is_empty());
+        assert!(without.users[0].channels.is_empty());
+
+        let with: KernelConfig = toml::from_str(
+            r#"
+[[users]]
+name = "Bob"
+role = "user"
+agents = ["assistant", "coder"]
+channels = ["whatsapp", "email"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(with.users[0].agents, vec!["assistant", "coder"]);
+        assert_eq!(with.users[0].channels, vec!["whatsapp", "email"]);
+        assert!(UserConfig::default().agents.is_empty());
     }
 
     #[test]
