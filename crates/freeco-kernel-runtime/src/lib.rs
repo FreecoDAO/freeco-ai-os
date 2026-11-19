@@ -30,6 +30,7 @@ pub mod graceful_shutdown;
 pub mod hooks;
 pub mod host_functions;
 pub mod image_gen;
+pub mod js_guard;
 pub mod kernel_handle;
 pub mod link_understanding;
 pub mod llm_driver;

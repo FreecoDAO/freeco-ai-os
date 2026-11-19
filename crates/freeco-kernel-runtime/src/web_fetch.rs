@@ -407,7 +407,18 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 /// ports (80 for HTTP, 443 for HTTPS) when no explicit port is given.
 pub(crate) fn extract_host(url: &str) -> String {
     if let Some(after_scheme) = url.split("://").nth(1) {
-        let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+        // The authority ends at the first '/', '?', '#' or '\\' (browsers and
+        // the url crate treat '\\' as '/'). Without this, `http://10.0.0.1?x`
+        // and `http://10.0.0.1#x` produced the host `10.0.0.1?x`, which does
+        // not resolve, so the SSRF check passed while the client connected to
+        // 10.0.0.1.
+        let authority = after_scheme
+            .split(['/', '?', '#', '\\'])
+            .next()
+            .unwrap_or(after_scheme);
+        // Drop userinfo: in `http://user@169.254.169.254/` the host is the
+        // part after the last '@'.
+        let host_port = authority.rsplit('@').next().unwrap_or(authority);
         // Handle IPv6 bracket notation: [::1]:8080
         if host_port.starts_with('[') {
             // Extract [addr]:port or [addr]
@@ -588,6 +599,30 @@ mod tests {
     fn test_ssrf_blocks_ipv6_localhost() {
         assert!(check_ssrf("http://[::1]/admin", &[]).is_err());
         assert!(check_ssrf("http://[::1]:8080/api", &[]).is_err());
+    }
+
+    #[test]
+    fn test_extract_host_stops_at_query_fragment_and_userinfo() {
+        assert_eq!(extract_host("http://10.0.0.1?x=1"), "10.0.0.1:80");
+        assert_eq!(extract_host("http://10.0.0.1#frag"), "10.0.0.1:80");
+        assert_eq!(extract_host("http://10.0.0.1\\evil.com"), "10.0.0.1:80");
+        assert_eq!(
+            extract_host("https://user:pw@169.254.169.254/"),
+            "169.254.169.254:443"
+        );
+        assert_eq!(
+            extract_host("http://a@b@127.0.0.1:8080/p"),
+            "127.0.0.1:8080"
+        );
+    }
+
+    #[test]
+    fn test_ssrf_blocks_userinfo_and_query_tricks() {
+        assert!(check_ssrf("http://x@169.254.169.254/latest", &[]).is_err());
+        assert!(check_ssrf("http://user:pw@localhost/", &[]).is_err());
+        assert!(check_ssrf("http://169.254.169.254?x", &[]).is_err());
+        assert!(check_ssrf("http://localhost#x", &[]).is_err());
+        assert!(check_ssrf("http://127.0.0.1?x", &[]).is_err());
     }
 
     #[test]

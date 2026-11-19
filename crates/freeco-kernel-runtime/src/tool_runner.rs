@@ -1623,7 +1623,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "browser_run_js".to_string(),
-            description: "Run JavaScript on the current browser page and return the result. For advanced interactions that other browser tools cannot handle.".to_string(),
+            description: "Run JavaScript on the current browser page and return the result. Only for reading or interacting with the page's DOM when other browser tools cannot. Network APIs (fetch, XMLHttpRequest, WebSocket, sendBeacon, import()), eval/Function, escapes and global-object tricks are refused: use web_fetch for HTTP requests. Never put credentials in the expression.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
