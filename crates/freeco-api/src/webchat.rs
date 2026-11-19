@@ -142,6 +142,208 @@ pub async fn font_file(
     }
 }
 
+/// StarNet sprites for the Starnet view (MIT, see
+/// `static/starnet/THIRD_PARTY_NOTICES.md`): six generic characters in four
+/// poses each plus a little furniture, about 83 KB in all.
+///
+/// A fixed table, like the fonts: the name in the URL only selects one of
+/// these compiled-in files, so no request can reach the disk.
+const STARNET_FILES: &[(&str, &[u8])] = &[
+    (
+        "alien-blink_south.png",
+        include_bytes!("../static/starnet/alien-blink_south.png"),
+    ),
+    (
+        "alien-gesture_south_0.png",
+        include_bytes!("../static/starnet/alien-gesture_south_0.png"),
+    ),
+    (
+        "alien-gesture_south_2.png",
+        include_bytes!("../static/starnet/alien-gesture_south_2.png"),
+    ),
+    (
+        "alien-gesture_south_4.png",
+        include_bytes!("../static/starnet/alien-gesture_south_4.png"),
+    ),
+    (
+        "alien-gesture_south_6.png",
+        include_bytes!("../static/starnet/alien-gesture_south_6.png"),
+    ),
+    (
+        "alien-sit_south.png",
+        include_bytes!("../static/starnet/alien-sit_south.png"),
+    ),
+    (
+        "astronaut-blink_south.png",
+        include_bytes!("../static/starnet/astronaut-blink_south.png"),
+    ),
+    (
+        "astronaut-gesture_south_0.png",
+        include_bytes!("../static/starnet/astronaut-gesture_south_0.png"),
+    ),
+    (
+        "astronaut-gesture_south_2.png",
+        include_bytes!("../static/starnet/astronaut-gesture_south_2.png"),
+    ),
+    (
+        "astronaut-gesture_south_4.png",
+        include_bytes!("../static/starnet/astronaut-gesture_south_4.png"),
+    ),
+    (
+        "astronaut-gesture_south_6.png",
+        include_bytes!("../static/starnet/astronaut-gesture_south_6.png"),
+    ),
+    (
+        "astronaut-sit_south.png",
+        include_bytes!("../static/starnet/astronaut-sit_south.png"),
+    ),
+    (
+        "bear-blink_south.png",
+        include_bytes!("../static/starnet/bear-blink_south.png"),
+    ),
+    (
+        "bear-gesture_south_0.png",
+        include_bytes!("../static/starnet/bear-gesture_south_0.png"),
+    ),
+    (
+        "bear-gesture_south_2.png",
+        include_bytes!("../static/starnet/bear-gesture_south_2.png"),
+    ),
+    (
+        "bear-gesture_south_4.png",
+        include_bytes!("../static/starnet/bear-gesture_south_4.png"),
+    ),
+    (
+        "bear-gesture_south_6.png",
+        include_bytes!("../static/starnet/bear-gesture_south_6.png"),
+    ),
+    (
+        "bear-sit_south.png",
+        include_bytes!("../static/starnet/bear-sit_south.png"),
+    ),
+    (
+        "capybara-blink_south.png",
+        include_bytes!("../static/starnet/capybara-blink_south.png"),
+    ),
+    (
+        "capybara-gesture_south_0.png",
+        include_bytes!("../static/starnet/capybara-gesture_south_0.png"),
+    ),
+    (
+        "capybara-gesture_south_2.png",
+        include_bytes!("../static/starnet/capybara-gesture_south_2.png"),
+    ),
+    (
+        "capybara-gesture_south_4.png",
+        include_bytes!("../static/starnet/capybara-gesture_south_4.png"),
+    ),
+    (
+        "capybara-gesture_south_6.png",
+        include_bytes!("../static/starnet/capybara-gesture_south_6.png"),
+    ),
+    (
+        "capybara-sit_south.png",
+        include_bytes!("../static/starnet/capybara-sit_south.png"),
+    ),
+    (
+        "furniture-chair.png",
+        include_bytes!("../static/starnet/furniture-chair.png"),
+    ),
+    (
+        "furniture-coffee.png",
+        include_bytes!("../static/starnet/furniture-coffee.png"),
+    ),
+    (
+        "furniture-console.png",
+        include_bytes!("../static/starnet/furniture-console.png"),
+    ),
+    (
+        "furniture-desk.png",
+        include_bytes!("../static/starnet/furniture-desk.png"),
+    ),
+    (
+        "furniture-plant.png",
+        include_bytes!("../static/starnet/furniture-plant.png"),
+    ),
+    (
+        "furniture-rack.png",
+        include_bytes!("../static/starnet/furniture-rack.png"),
+    ),
+    (
+        "furniture-screens.png",
+        include_bytes!("../static/starnet/furniture-screens.png"),
+    ),
+    (
+        "furniture-whiteboard.png",
+        include_bytes!("../static/starnet/furniture-whiteboard.png"),
+    ),
+    (
+        "robot-blink_south.png",
+        include_bytes!("../static/starnet/robot-blink_south.png"),
+    ),
+    (
+        "robot-gesture_south_0.png",
+        include_bytes!("../static/starnet/robot-gesture_south_0.png"),
+    ),
+    (
+        "robot-gesture_south_2.png",
+        include_bytes!("../static/starnet/robot-gesture_south_2.png"),
+    ),
+    (
+        "robot-gesture_south_4.png",
+        include_bytes!("../static/starnet/robot-gesture_south_4.png"),
+    ),
+    (
+        "robot-gesture_south_6.png",
+        include_bytes!("../static/starnet/robot-gesture_south_6.png"),
+    ),
+    (
+        "robot-sit_south.png",
+        include_bytes!("../static/starnet/robot-sit_south.png"),
+    ),
+    (
+        "skeleton-blink_south.png",
+        include_bytes!("../static/starnet/skeleton-blink_south.png"),
+    ),
+    (
+        "skeleton-gesture_south_0.png",
+        include_bytes!("../static/starnet/skeleton-gesture_south_0.png"),
+    ),
+    (
+        "skeleton-gesture_south_2.png",
+        include_bytes!("../static/starnet/skeleton-gesture_south_2.png"),
+    ),
+    (
+        "skeleton-gesture_south_4.png",
+        include_bytes!("../static/starnet/skeleton-gesture_south_4.png"),
+    ),
+    (
+        "skeleton-gesture_south_6.png",
+        include_bytes!("../static/starnet/skeleton-gesture_south_6.png"),
+    ),
+    (
+        "skeleton-sit_south.png",
+        include_bytes!("../static/starnet/skeleton-sit_south.png"),
+    ),
+];
+
+/// GET /starnet/{name} — serve one of the compiled-in Starnet sprites.
+pub async fn starnet_file(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    match STARNET_FILES.iter().find(|(n, _)| *n == name) {
+        Some((_, bytes)) => (
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            *bytes,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Embedded PWA manifest for installable web app support.
 const MANIFEST_JSON: &str = include_str!("../static/manifest.json");
 
@@ -258,6 +460,8 @@ const WEBCHAT_HTML: &str = concat!(
     "\n",
     include_str!("../static/js/pages/live.js"),
     "\n",
+    include_str!("../static/js/pages/starnet.js"),
+    "\n",
     include_str!("../static/js/pages/workflows.js"),
     "\n",
     include_str!("../static/js/pages/workflow-builder.js"),
@@ -294,3 +498,99 @@ const WEBCHAT_HTML: &str = concat!(
     "\n</script>\n",
     "</body></html>"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The characters and poses `static/js/pages/starnet.js` asks for.
+    const CHARACTERS: [&str; 6] = [
+        "astronaut",
+        "robot",
+        "alien",
+        "capybara",
+        "bear",
+        "skeleton",
+    ];
+    const POSES: [&str; 6] = [
+        "sit_south",
+        "blink_south",
+        "gesture_south_0",
+        "gesture_south_2",
+        "gesture_south_4",
+        "gesture_south_6",
+    ];
+    const FURNITURE: [&str; 8] = [
+        "desk",
+        "chair",
+        "plant",
+        "console",
+        "screens",
+        "coffee",
+        "whiteboard",
+        "rack",
+    ];
+
+    #[test]
+    fn every_starnet_sprite_is_a_png() {
+        for (name, bytes) in STARNET_FILES {
+            assert!(name.ends_with(".png"), "{name}");
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "{name} is not a PNG");
+        }
+    }
+
+    #[test]
+    fn every_sprite_the_page_asks_for_is_served() {
+        let have = |n: &str| STARNET_FILES.iter().any(|(f, _)| *f == n);
+        for c in CHARACTERS {
+            for p in POSES {
+                assert!(have(&format!("{c}-{p}.png")), "{c}-{p}.png");
+            }
+        }
+        for f in FURNITURE {
+            assert!(have(&format!("furniture-{f}.png")), "furniture-{f}.png");
+        }
+        assert_eq!(
+            STARNET_FILES.len(),
+            CHARACTERS.len() * POSES.len() + FURNITURE.len()
+        );
+    }
+
+    /// The page's own lists match the ones above, so the two cannot drift.
+    #[test]
+    fn the_page_names_the_same_sprites() {
+        let js = include_str!("../static/js/pages/starnet.js");
+        for name in CHARACTERS
+            .iter()
+            .chain(POSES.iter())
+            .chain(FURNITURE.iter())
+        {
+            assert!(
+                js.contains(&format!("'{name}'")),
+                "starnet.js does not list {name}"
+            );
+        }
+    }
+
+    /// Kept small enough to compile into the binary without a second thought.
+    #[test]
+    fn the_sprites_stay_small() {
+        let total: usize = STARNET_FILES.iter().map(|(_, b)| b.len()).sum();
+        assert!(total < 2 * 1024 * 1024, "{total} bytes");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_sprite_is_not_found() {
+        let res = starnet_file(axum::extract::Path("../Cargo.toml".to_string())).await;
+        assert_eq!(res.status(), axum::http::StatusCode::NOT_FOUND);
+        let res = starnet_file(axum::extract::Path("robot-sit_south.png".to_string())).await;
+        assert_eq!(res.status(), axum::http::StatusCode::OK);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/png");
+    }
+
+    #[test]
+    fn the_dashboard_includes_the_starnet_page() {
+        assert!(WEBCHAT_HTML.contains("Alpine.data('starnetPage'"));
+        assert!(WEBCHAT_HTML.contains("x-data=\"starnetPage\""));
+    }
+}

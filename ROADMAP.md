@@ -740,6 +740,20 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   only as a count once the note's budget is full; instructions are kept
   longest. A paid summary for that case is not built.
 
+### Starnet view — 2026-11-19
+
+- 🟨 **Starnet page** (`#starnet`): the agent teams' work as a pixel-art
+  station, after StarNet's station view. Rooms are teams, desks are agents,
+  each agent animates by state (idle, thinking, tool, waiting on a helper,
+  waiting for your yes, error), a bubble shows its in-progress task, click
+  opens its chat. Data: `GET /api/starnet/state` (read-only, behind the
+  usual auth). Sprites: 44 unmodified StarNet PNGs pinned to commit
+  `fbddbf9`, MIT notice in `crates/freeco-api/static/starnet/`. The audit
+  ruled out vendoring StarNet's 35k-line engine; the renderer is our own.
+  Unit and integration tests written; not yet built or watched live.
+  Not done: agents walking between desks, hand-off lines between rooms
+  (the Teams and Live pages already show those).
+
 ### OmniRoute as the one gateway — 2026-11-14
 
 Live now (runtime config, no build needed):

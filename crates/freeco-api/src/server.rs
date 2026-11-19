@@ -202,6 +202,7 @@ pub async fn build_router(
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
         .route("/fonts/{name}", axum::routing::get(webchat::font_file))
+        .route("/starnet/{name}", axum::routing::get(webchat::starnet_file))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/manifest.json", axum::routing::get(webchat::manifest_json))

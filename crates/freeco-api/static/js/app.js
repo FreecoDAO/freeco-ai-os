@@ -501,7 +501,7 @@ function app() {
       });
 
       // Hash routing
-      var validPages = ['overview','agents','live','artifacts','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
+      var validPages = ['overview','agents','live','starnet','artifacts','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
       var pageRedirects = {
         'chat': 'agents',
         'templates': 'agents',
