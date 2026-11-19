@@ -201,6 +201,25 @@ system_prompt = "Runs maintenance."
 shell = ["*"]
 tools = ["shell_exec"]
 "#;
+    // A manifest asking for the host shell is held by the Security Agent
+    // first (409); the owner approves that exact content, then the hire goes
+    // through, and the hire review still records what it found.
+    let held = http
+        .post(format!("{}/api/agents", d.base))
+        .json(&serde_json::json!({ "manifest_toml": manifest }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(held.status(), 409);
+    let held: serde_json::Value = held.json().await.unwrap();
+    let hash = held["audit"]["content_hash"].as_str().unwrap().to_string();
+    let ok = http
+        .post(format!("{}/api/security/approve/{hash}", d.base))
+        .json(&serde_json::json!({ "approved_by": "owner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
     let r = http
         .post(format!("{}/api/agents", d.base))
         .json(&serde_json::json!({ "manifest_toml": manifest }))

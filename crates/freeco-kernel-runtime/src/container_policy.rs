@@ -80,6 +80,12 @@ fn check_argv_at(
                  start. Run each container with `podman run`.",
             ));
         }
+        if COMPOSE_BINARIES.contains(&base.as_str()) {
+            return Err(refusal(
+                "compose files are not allowed: the kernel cannot check the containers they \
+                 start. Run each container with `podman run`.",
+            ));
+        }
         if CONTAINER_BINARIES.contains(&base.as_str()) {
             return check_invocation(&argv[i + 1..], policy, protected);
         }
@@ -291,6 +297,7 @@ fn check_targets(
     let mutating = is_mutating(sub);
     let value_flags = target_value_flags(sub);
     let mut inspect_type = "container";
+    let mut inspect_type_given = false;
     let mut positionals: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -302,6 +309,7 @@ fn check_targets(
         if arg.starts_with('-') && arg.len() > 1 {
             let (flag, inline) = split_flag(arg);
             if (flag == "-t" || flag == "--type") && sub == "inspect" {
+                inspect_type_given = true;
                 inspect_type = match inline {
                     Some(v) => v,
                     None => rest.get(i + 1).map(String::as_str).unwrap_or("container"),
@@ -352,6 +360,11 @@ fn check_targets(
             check_name("container", name, policy, protected, mutating)?;
         } else if !inspect_containers && image_allowed(name, policy) {
             continue; // `inspect` also takes image names
+        } else if sub == "inspect" && !inspect_type_given && name.contains(['/', ':']) {
+            // No `--type`: podman resolves the name as a container or an
+            // image. A container name cannot hold '/' or ':', so this one is
+            // an image reference and is held to the image allowlist.
+            check_image(name, policy)?;
         } else {
             check_name("container", name, policy, protected, mutating)?;
         }
@@ -1298,9 +1311,11 @@ mod tests {
         refused("docker-compose up -d");
         refused("docker compose up -d");
         refused("podman run -w,localhost/app");
-        ok("podman run -it localhost/app");
-        ok("podman run localhost/app");
-        ok("podman run -d localhost/app");
+        // Known options pass (the name rule applies as everywhere else).
+        ok("podman run -it --name freeco-x localhost/app");
+        ok("podman run --name freeco-x localhost/app");
+        ok("podman run -d --name freeco-x localhost/app");
+        refused("podman run -d localhost/app");
         refused("podman kube play pod.yaml");
         refused("podman play kube pod.yaml");
         refused("podman cp freeco-x:/etc/passwd .");

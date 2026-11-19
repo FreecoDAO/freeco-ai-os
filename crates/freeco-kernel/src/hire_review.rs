@@ -40,6 +40,7 @@ const CATALOGUE: &[&str] = &[
     "ceo",
     "code-reviewer",
     "coder",
+    "containers",
     "customer-support",
     "data-scientist",
     "debugger",
