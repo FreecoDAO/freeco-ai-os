@@ -157,6 +157,18 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         }
     }
 
+    // Section 7.2 — How to hand the owner a file. Agents named the file
+    // ("geneva-vegan-map.html, in your workspace") and told the owner to
+    // double-click it, which nobody can do from a chat.
+    if let (Some(id), Some(_)) = (&ctx.agent_id, &ctx.workspace_path) {
+        sections.push(format!(
+            "## Sharing Files\nWhen you give the owner a file from your workspace, link it \
+             rather than only naming it: [name](/api/agents/{id}/workspace/file?open=true&path=PATH) \
+             with PATH relative to your workspace and URL-encoded. An HTML page opens as a page; \
+             other files open or download."
+        ));
+    }
+
     // Section 7.5 — Heartbeat checklist (only for autonomous agents)
     if !ctx.is_subagent && ctx.is_autonomous {
         if let Some(ref heartbeat) = ctx.heartbeat_md {
@@ -341,6 +353,8 @@ const GLOBAL_GUIDELINES: &str = "\
 ## How You Work\n\
 - You are here to get things done, not to describe why they cannot be. Ambition and care are the same job: the most useful thing you can do is also the most careful one.\n\
 - Read the request for what it is. Do the whole of it, and say plainly which parts you did not do and why.\n\
+- A message often holds several questions or requests. Before you answer, note each one; answer every one, in order, under its own heading or number when there are more than two. If you cannot answer one yet, say which and why -- never answer the first and drop the rest.\n\
+- The conversation above is yours to use. When the user says \"as above\", \"that\" or \"it\", look back through it and act on what they mean; ask only if it is genuinely ambiguous.\n\
 - Judge by what is true, not by what is easy to say. An accurate \"this is broken and here is the cause\" is worth more than a confident summary that is wrong.\n\n\
 ## You Work In A Team\n\
 - You are one agent among several, not a lone assistant. `agent_list` shows who exists and what model each runs; `org_overview` shows the companies, projects and teams they belong to and what each is accountable for.\n\
@@ -964,6 +978,28 @@ mod tests {
             GLOBAL_GUIDELINES.matches("## Truth And Evidence").count(),
             1
         );
+    }
+
+    /// Agents answered the first of several questions and dropped the rest,
+    /// and said they could not see a conversation that was right above.
+    #[test]
+    fn global_guidelines_answer_every_question_and_use_the_conversation() {
+        assert!(GLOBAL_GUIDELINES.contains("answer every one, in order"));
+        assert!(GLOBAL_GUIDELINES.contains("never answer the first and drop the rest"));
+        assert!(GLOBAL_GUIDELINES.contains("The conversation above is yours to use"));
+    }
+
+    #[test]
+    fn the_prompt_says_how_to_link_a_workspace_file() {
+        let ctx = PromptContext {
+            agent_id: Some("abc".to_string()),
+            workspace_path: Some("/w".to_string()),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("/api/agents/abc/workspace/file?open=true&path=PATH"));
+        let without = build_system_prompt(&PromptContext::default());
+        assert!(!without.contains("## Sharing Files"));
     }
 
     /// The clock must stay behind the static prompt.

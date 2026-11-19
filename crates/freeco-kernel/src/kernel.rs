@@ -648,6 +648,14 @@ fn gethostname() -> Option<String> {
 /// runs in practice.
 const AUTO_COMPACT_AT: usize = 80;
 
+/// Per-agent store key recording where the last compaction of a session
+/// ended: `{"session": <id>, "cursor": <message index>}`.
+const COMPACTION_CURSOR_KEY: &str = "__compaction_cursor";
+
+fn compaction_cursor_value(session_id: SessionId, cursor: usize) -> serde_json::Value {
+    serde_json::json!({ "session": session_id.0.to_string(), "cursor": cursor })
+}
+
 impl FreecoKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
@@ -3135,6 +3143,7 @@ impl FreecoKernel {
                 );
             }
         }
+        self.mark_history_from(&mut manifest, agent_id, session.id);
 
         let memory = Arc::clone(&self.memory);
         // Build link context from user message (auto-extract URLs for the agent)
@@ -3319,21 +3328,15 @@ impl FreecoKernel {
 
                     // Post-loop compaction check: if session now exceeds token threshold,
                     // trigger compaction in background for the next call.
+                    // Measured against this model's own window, and on what
+                    // the model is sent (from the compaction point on).
                     {
-                        use freeco_kernel_runtime::compactor::{
-                            estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
-                        };
-                        let config = CompactionConfig::default();
-                        let estimated = estimate_token_count(&session.messages, None, None);
-                        if needs_compaction_by_tokens(estimated, &config) {
-                            let kc = kernel_clone.clone();
-                            tokio::spawn(async move {
-                                info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
-                                if let Err(e) = kc.compact_agent_session(agent_id).await {
-                                    warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
-                                }
-                            });
-                        }
+                        let kc = kernel_clone.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = kc.compact_agent_session_if_needed(agent_id).await {
+                                warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
+                            }
+                        });
                     }
 
                     Ok(result)
@@ -3769,6 +3772,7 @@ impl FreecoKernel {
                 );
             }
         }
+        self.mark_history_from(&mut manifest, agent_id, session.id);
 
         let is_stable = self.config.mode == freeco_types::config::KernelMode::Stable;
 
@@ -3919,7 +3923,11 @@ impl FreecoKernel {
             if long_enough {
                 if let Some(me) = self.self_handle.get().and_then(|w| w.upgrade()) {
                     tokio::spawn(async move {
-                        match me.compact_agent_session(agent_id).await {
+                        // The canonical memory gets its summary either way;
+                        // what the model is sent moves only near the
+                        // context window.
+                        let near_window = me.window_compaction_due(agent_id).is_some();
+                        match me.compact_agent_session_with(agent_id, near_window).await {
                             Ok(summary) => info!(%agent_id, "auto-compacted session: {summary}"),
                             Err(e) => warn!(%agent_id, "auto-compaction failed: {e}"),
                         }
@@ -4644,14 +4652,126 @@ impl FreecoKernel {
         }
     }
 
+    /// Compaction settings for this agent's model: its real context window
+    /// from the catalog, falling back to 200k when the model is not listed.
+    fn compaction_config_for(
+        &self,
+        manifest: &freeco_types::agent::AgentManifest,
+    ) -> freeco_kernel_runtime::compactor::CompactionConfig {
+        let window = self
+            .model_catalog
+            .read()
+            .ok()
+            .and_then(|cat| {
+                cat.find_model(&manifest.model.model)
+                    .map(|m| m.context_window as usize)
+            })
+            .unwrap_or(0);
+        freeco_kernel_runtime::compactor::CompactionConfig::for_context_window(window)
+    }
+
+    /// Where the last compaction of `session_id` ended, if it was compacted.
+    ///
+    /// Compaction keeps the stored conversation whole (the user can still
+    /// scroll back through all of it) and records its summary separately. The
+    /// model is sent the summary and the messages after this point; without
+    /// it every call carried the whole stored history, and compaction saved
+    /// nothing.
+    fn compaction_cursor(&self, agent_id: AgentId, session_id: SessionId) -> Option<usize> {
+        let v = self
+            .memory
+            .structured_get(agent_id, COMPACTION_CURSOR_KEY)
+            .ok()
+            .flatten()?;
+        if v.get("session")?.as_str()? != session_id.0.to_string() {
+            return None;
+        }
+        v.get("cursor")?.as_u64().map(|c| c as usize)
+    }
+
+    /// Tell the agent loop where the history it sends should start.
+    fn mark_history_from(
+        &self,
+        manifest: &mut freeco_types::agent::AgentManifest,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) {
+        if let Some(cursor) = self.compaction_cursor(agent_id, session_id) {
+            manifest.metadata.insert(
+                freeco_kernel_runtime::agent_loop::HISTORY_FROM_KEY.to_string(),
+                serde_json::json!(cursor),
+            );
+        }
+    }
+
+    /// Compact only when the conversation nears the model's context window.
+    ///
+    /// The automatic path. It used to fire at 30 messages, which one or two
+    /// tool-heavy requests reach, so agents lost what they had just been
+    /// asked; now the whole conversation stays until size makes it necessary.
+    pub async fn compact_agent_session_if_needed(&self, agent_id: AgentId) -> KernelResult<String> {
+        if self.registry.get(agent_id).is_none() {
+            return Err(KernelError::Freeco(FreecoError::AgentNotFound(
+                agent_id.to_string(),
+            )));
+        }
+        match self.window_compaction_due(agent_id) {
+            None => Ok("No compaction needed: the conversation is well within the \
+                        model's context window"
+                .to_string()),
+            Some(estimated) => {
+                info!(agent_id = %agent_id, estimated_tokens = estimated, "Compacting: conversation nears the context window");
+                self.compact_agent_session(agent_id).await
+            }
+        }
+    }
+
+    /// The estimated tokens the model is sent, when that nears its context
+    /// window (`None` otherwise, or when the agent is unknown).
+    fn window_compaction_due(&self, agent_id: AgentId) -> Option<usize> {
+        use freeco_kernel_runtime::compactor::{estimate_token_count, needs_compaction_by_tokens};
+        let entry = self.registry.get(agent_id)?;
+        let mut messages = self
+            .memory
+            .get_session(entry.session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        // Measure what the model is sent, not the whole stored history:
+        // otherwise, once compacted, every message would compact again.
+        if let Some(cursor) = self.compaction_cursor(agent_id, entry.session_id) {
+            messages.drain(..cursor.min(messages.len()));
+        }
+        let config = self.compaction_config_for(&entry.manifest);
+        let estimated = estimate_token_count(
+            &messages,
+            Some(entry.manifest.model.system_prompt.as_str()),
+            None,
+        );
+        needs_compaction_by_tokens(estimated, &config).then_some(estimated)
+    }
+
     /// Compact an agent's session using LLM-based summarization.
     ///
-    /// Replaces the existing text-truncation compaction with an intelligent
-    /// LLM-generated summary of older messages, keeping only recent messages.
+    /// The model is then sent the summary plus the last few requests, whole;
+    /// the stored conversation keeps every message. Asked for (`/compact`),
+    /// it compacts whenever there is anything older than those requests: it
+    /// used to refuse below 30 messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        use freeco_kernel_runtime::compactor::{
-            compact_session, needs_compaction, CompactionConfig,
-        };
+        self.compact_agent_session_with(agent_id, true).await
+    }
+
+    /// Summarise the session into the canonical memory. With `move_cursor`,
+    /// the model is also sent only the summary and what follows from then on;
+    /// without it (canonical-memory upkeep) the model keeps the whole
+    /// conversation.
+    async fn compact_agent_session_with(
+        &self,
+        agent_id: AgentId,
+        move_cursor: bool,
+    ) -> KernelResult<String> {
+        use freeco_kernel_runtime::compactor::compact_session;
 
         let entry = self
             .registry
@@ -4670,15 +4790,7 @@ impl FreecoKernel {
                 label: None,
             });
 
-        let config = CompactionConfig::default();
-
-        if !needs_compaction(&session, &config) {
-            return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
-                session.messages.len(),
-                config.threshold
-            ));
-        }
+        let config = self.compaction_config_for(&entry.manifest);
 
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
@@ -4686,11 +4798,33 @@ impl FreecoKernel {
         let result = compact_session(driver, &model, &session, &config)
             .await
             .map_err(|e| KernelError::Freeco(FreecoError::Internal(e)))?;
+        if result.compacted_count == 0 {
+            return Ok(format!(
+                "Nothing to compact yet: the conversation's last {} requests are \
+                 always kept whole.",
+                config.keep_recent_turns
+            ));
+        }
 
         // Store the LLM summary in the canonical session
         self.memory
             .store_llm_summary(agent_id, &result.summary, result.kept_messages.clone())
             .map_err(KernelError::Freeco)?;
+        // And where it ends, so the model is sent the summary plus what
+        // follows rather than the whole history again.
+        if move_cursor {
+            let _ = self.memory.structured_set(
+                agent_id,
+                COMPACTION_CURSOR_KEY,
+                compaction_cursor_value(
+                    session.id,
+                    session
+                        .messages
+                        .len()
+                        .saturating_sub(result.kept_messages.len()),
+                ),
+            );
+        }
 
         // Post-compaction audit: validate and repair the kept messages
         let (repaired_messages, repair_stats) =
