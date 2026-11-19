@@ -1,0 +1,89 @@
+# FreEco.ai daemon in its own container.
+#
+# Run on the Windows host, the daemon belonged to whatever started it: started
+# from another app, it died when that app closed; started from a shortcut, it
+# opened a console window and still did not come back after a crash. In a
+# container with a restart policy it runs on its own, restarts itself, and
+# sits on the same Linux VM as the services it uses (CRM, Speaches,
+# accounting, OmniRoute, the Claude Code CLI) and the agents' sandboxes.
+#
+# Build (from the repository root, inside the Podman machine):
+#   podman build -t localhost/freeco-daemon:latest -f deploy/daemon/Containerfile .
+# Run: deploy/daemon/run.sh
+#
+# Built for low memory: two compile jobs and no LTO, so building on a 16 GB
+# laptop beside everything else cannot exhaust it. Cache mounts keep the
+# dependency registry and the build tree between builds, so a rebuild after a
+# change compiles only what changed.
+
+FROM rust:1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev perl make \
+    && rm -rf /var/lib/apt/lists/*
+# The pinned toolchain in a step of its own, before the source: it stays cached
+# until rust-toolchain.toml changes. Installed by the build step instead, it
+# was downloaded again (about 300 MB) on every change to the code, and over a
+# slow VPN that download timed out and failed the build. Retried, since one
+# dropped connection should not fail it either.
+COPY rust-toolchain.toml ./
+RUN channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml) \
+    && for attempt in 1 2 3; do \
+         rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy && break; \
+         [ "$attempt" = 3 ] && exit 1; sleep 10; \
+       done
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY xtask ./xtask
+COPY agents ./agents
+COPY packages ./packages
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --bin freeco-ai \
+    && cp target/release/freeco-ai /usr/local/bin/freeco-ai
+
+FROM debian:bookworm-slim
+# What the daemon itself shells out to: git for repositories, python and
+# node for skills and tools, chromium for the browser hand (headless here,
+# there is no screen), and the Podman client, which reaches the VM's Podman
+# through its socket to run the agents' sandboxes and the service containers.
+# Same version as the VM's Podman (`podman version`), so client and API agree.
+ARG PODMAN_REMOTE_VERSION=6.1.0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git jq tini \
+        python3 python3-venv python3-pip \
+        chromium fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL -o /tmp/podman-remote.tar.gz \
+        "https://github.com/containers/podman/releases/download/v${PODMAN_REMOTE_VERSION}/podman-remote-static-linux_amd64.tar.gz" \
+    && tar -xzf /tmp/podman-remote.tar.gz -C /tmp \
+    && install -m 0755 "$(find /tmp -name 'podman-remote-static-linux_amd64' -type f | head -n1)" /usr/local/bin/podman \
+    && ln -s /usr/local/bin/podman /usr/local/bin/docker \
+    && rm -rf /tmp/podman-remote.tar.gz /tmp/bin /tmp/podman-remote-static-linux_amd64
+
+# Node.js 22 (LTS) from the official image. Debian's package is Node 18, and
+# the WhatsApp gateway's Baileys refuses to install below Node 20.
+COPY --from=docker.io/library/node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=docker.io/library/node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node --version && npm --version
+
+COPY --from=builder /usr/local/bin/freeco-ai /usr/local/bin/freeco-ai
+COPY --from=builder /build/agents /opt/freeco-ai/agents
+
+# The data lives on the VM at the same path as inside the container, so the
+# paths the daemon hands to Podman for sandbox mounts are valid on the VM.
+# NODE_OPTIONS: the WhatsApp gateway (Node) connects over IPv4 first. Node's
+# default gives IPv4 250 ms before trying IPv6, which the VM cannot route;
+# over a VPN that failed every connection.
+ENV NODE_OPTIONS="--no-network-family-autoselection --dns-result-order=ipv4first" \
+    FREECO_AI_HOME=/home/user/freeco \
+    XDG_DATA_HOME=/home/user/freeco/xdg \
+    CONTAINER_HOST=unix:///run/podman/podman.sock \
+    CHROME_PATH=/usr/bin/chromium
+EXPOSE 50051
+ENTRYPOINT ["/usr/bin/tini", "--", "freeco-ai"]
+CMD ["start"]
