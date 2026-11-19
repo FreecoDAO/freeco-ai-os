@@ -92,3 +92,48 @@ Security-critical dependencies are pinned and audited:
 | `zeroize` | Secret memory wiping |
 | `rand` | Cryptographic randomness |
 | `governor` | Rate limiting |
+
+## Agent-written code and secrets (2026-11-19)
+
+Three controls landed together, closing the "agent bypassed `web_fetch` SSRF
+via `browser_run_js`" report:
+
+- **`browser_run_js` is not a fetch channel.** Every expression is screened
+  before the browser sees it (`freeco-kernel-runtime/src/js_guard.rs`):
+  network APIs (`fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,
+  `navigator.sendBeacon`, `import()`, `new Request`/`Image`, workers),
+  dynamic code (`eval`, `Function`, `constructor`, `atob`, string timers),
+  escapes, global-object bracket access or aliasing, string-built property
+  names, HTML code injection and navigation sinks are refused. The error
+  points to `web_fetch` (which applies `check_ssrf`) and says credentials
+  belong in connectors, hands or environment variables, never in
+  agent-written code. The tool also requires human approval by default,
+  next to `shell_exec`.
+- **The browser's own requests are intercepted.** Every page request is
+  paused over CDP (`Fetch.requestPaused`) and failed if it targets a
+  private, loopback, link-local or cloud-metadata address, using the same
+  `check_ssrf`. This also covers requests the static screen cannot see.
+  WebSocket connections are not covered by CDP's Fetch domain; the
+  expression screen refuses them instead.
+- **Secrets are redacted out of agent output and refused in written
+  files.** Known secret values (vault entries, provider keys and channel
+  tokens from env/`.env`, MCP header credentials) and well-known key
+  patterns are replaced with `[REDACTED:<name|kind>]` in assistant replies
+  before they are stored or sent to channels, in tool results before they
+  enter the model context and the dashboard, and in outbound channel
+  messages. `file_write` content and `apply_patch` added lines containing
+  a secret are refused with an instruction to read it from env or the
+  vault at runtime.
+
+### Reported `ghp_` token in a release script — checked, not in this repo
+
+A board item reported a GitHub personal access token (`ghp_...`, value not
+reproduced here) committed in a `fix_release.py` history. Checked
+2026-11-18 against every fetched ref: `git log --all -S` for the token, a
+`ghp_[A-Za-z0-9]{36}` regex scan across all 103 local refs, `git log --all
+-- fix_release.py`, and a working-tree scan. **No match**: the token is not
+in this repository's reachable history on any branch we hold, and no such
+file ever existed here. It may live in another repository, or in a
+force-pushed or unfetched ref; GitHub retains unreachable commits.
+**Revoking it is the owner's decision** and is still recommended regardless
+of what this repo contains; this codebase cannot revoke it for you.

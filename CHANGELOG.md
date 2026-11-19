@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- An agent could bypass `web_fetch`'s SSRF protection with `browser_run_js`:
+  the expression was passed to the page untouched, so `fetch()` with an
+  `Authorization` header could reach internal or metadata addresses.
+  Expressions are now screened for network APIs (`fetch`, `XMLHttpRequest`,
+  `WebSocket`, `EventSource`, `sendBeacon`, `import()`, `new Request`/`Image`,
+  workers), dynamic code, escapes and global-object obfuscation, and refused
+  with an error pointing to `web_fetch`; every page request is additionally
+  paused over CDP and failed if it targets a private, loopback, link-local or
+  metadata address (same `check_ssrf`). `browser_run_js` now requires human
+  approval by default, next to `shell_exec`.
+- Secrets no longer reach stored replies, channels, the dashboard or
+  agent-written files. Known secret values (vault entries, provider keys and
+  channel tokens from env/`.env`, MCP header credentials) and well-known key
+  patterns are replaced with `[REDACTED:<name|kind>]` in assistant text and
+  tool results, and `file_write` / `apply_patch` refuse content containing
+  one, telling the agent to read it from env or the vault at runtime.
+
+### Added
+
+- A read-only `system_info` agent tool, available to every agent: version,
+  commit SHA, branch, UTC build time, rustc version, OS/architecture and
+  process uptime. A build script now stamps the build identity into the
+  binary (from `FREECO_GIT_SHA` / `FREECO_GIT_BRANCH` / `FREECO_BUILD_DATE`
+  or `git`), and `/api/version` reports the same values instead of the
+  permanent `"dev"` / `"unknown"`. The Dockerfile accepts them as build args
+  and the release workflow passes them.
+
 ### Fixed
 
 - Spending limits hold in the chat. The agent's cost quota was checked only
