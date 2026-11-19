@@ -394,7 +394,11 @@ pub async fn agent_ws(
     }
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    // Room for a 16 MB message plus its JSON envelope in one frame.
+    let room = crate::routes::MAX_MESSAGE_BYTES + 1024 * 1024;
+    ws.max_frame_size(room)
+        .max_message_size(room)
+        .on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
         .into_response()
 }
 
@@ -528,9 +532,10 @@ async fn handle_agent_ws(
             Message::Text(text) => {
                 last_activity = std::time::Instant::now();
 
-                // SECURITY: Reject oversized WebSocket messages (64KB max)
-                const MAX_WS_MSG_SIZE: usize = 64 * 1024;
-                if text.len() > MAX_WS_MSG_SIZE {
+                // SECURITY: Reject oversized WebSocket messages. Long ones are
+                // accepted and kept in the agent's workspace (see
+                // `stage_long_message`); the cap only guards memory.
+                if text.len() > crate::routes::MAX_MESSAGE_BYTES {
                     let _ = send_json(
                         &sender,
                         &serde_json::json!({
@@ -648,7 +653,7 @@ async fn handle_text_message(
             // Resolve file attachments into image content blocks
             let mut has_images = false;
             let mut ws_content_blocks: Option<Vec<freeco_types::message::ContentBlock>> = None;
-            let mut content = content;
+            let mut content = crate::routes::stage_long_message(&state.kernel, agent_id, &content);
             if let Some(attachments) = parsed["attachments"].as_array() {
                 let refs: Vec<crate::types::AttachmentRef> = attachments
                     .iter()

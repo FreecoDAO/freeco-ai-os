@@ -2232,6 +2232,13 @@ function chatPage() {
         this.recording = true;
         this.recordingTime = 0;
         this._recordingTimer = setInterval(function() { self.recordingTime++; }, 1000);
+        // Type the words into the box while the user is still speaking.
+        // Everything recorded so far is transcribed every two seconds (one
+        // request at a time), so the text grows and corrects itself instead
+        // of appearing only after the button is released.
+        this._dictationBase = (this.inputText || '').trim();
+        this._liveBusy = false;
+        this._liveTimer = setInterval(function() { self._liveTranscribe(); }, 2000);
       } catch(e) {
         if (typeof FreecoToast !== 'undefined') FreecoToast.error('Microphone access denied');
       }
@@ -2243,46 +2250,69 @@ function chatPage() {
       this._mediaRecorder.stop();
       this.recording = false;
       if (this._recordingTimer) { clearInterval(this._recordingTimer); this._recordingTimer = null; }
+      if (this._liveTimer) { clearInterval(this._liveTimer); this._liveTimer = null; }
     },
 
-    // Voice: handle completed recording — upload and transcribe
+    // The words in some audio, from local speech-to-text. Nothing is stored.
+    _transcribeBlob: async function(blob) {
+      var headers = { 'Content-Type': (blob.type || 'audio/webm').split(';')[0] };
+      var token = FreecoAPI.getToken && FreecoAPI.getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      var res = await fetch('/api/transcribe', { method: 'POST', headers: headers, body: blob });
+      var data = {};
+      try { data = await res.json(); } catch (e) { /* not JSON */ }
+      if (!res.ok) throw new Error(data.error || ('transcription failed (' + res.status + ')'));
+      return (data.text || '').trim();
+    },
+
+    _liveTranscribe: async function() {
+      if (!this.recording || this._liveBusy || !this._audioChunks.length) return;
+      this._liveBusy = true;
+      try {
+        var blob = new Blob(this._audioChunks, { type: this._audioChunks[0].type || 'audio/webm' });
+        var said = await this._transcribeBlob(blob);
+        if (this.recording && said) {
+          this.inputText = (this._dictationBase ? this._dictationBase + ' ' : '') + said;
+        }
+      } catch (e) { /* the final pass on release reports any real failure */ }
+      this._liveBusy = false;
+    },
+
+    // Voice: the recording is finished -- transcribe all of it and send.
+    //
+    // The words were already being typed into the box while recording; this
+    // last pass gets the complete text. No file is uploaded or kept.
     _handleRecordingComplete: async function() {
       if (!this._audioChunks.length || !this.currentAgent) return;
       var blob = new Blob(this._audioChunks, { type: this._audioChunks[0].type || 'audio/webm' });
       this._audioChunks = [];
       if (blob.size < 100) return; // too small
 
-      // Show a temporary "Transcribing..." message
-      this.messages.push({ id: ++msgId, role: 'system', text: 'Transcribing audio...', thinking: true, ts: Date.now(), tools: [] });
-      this.scrollToBottom();
-
       try {
-        // Upload audio file
-        var ext = blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp3';
-        var file = new File([blob], 'voice_' + Date.now() + '.' + ext, { type: blob.type });
-        var upload = await FreecoAPI.upload(this.currentAgent.id, file);
-
-        // Remove the "Transcribing..." message
-        this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
-
-        // Use server-side transcription when available. If speech-to-text is not
-        // configured the server now tells us why — surface that instead of
-        // silently sending an opaque "[Voice message]" the agent can't read.
-        var said = (upload.transcription && upload.transcription.trim()) ? upload.transcription.trim() : '';
+        var said = '';
+        var failure = '';
+        try { said = await this._transcribeBlob(blob); } catch (err) { failure = err.message || ''; }
         if (!said) {
           this.messages.push({
             id: ++msgId, role: 'system', ts: Date.now(), tools: [],
-            text: upload.transcription_error
-              ? ('Voice: ' + upload.transcription_error)
+            text: failure
+              ? ('Voice: ' + failure)
               : 'Voice: could not transcribe that audio. Check your speech-to-text setup in Settings.'
           });
           this.scrollToBottom();
           return;
         }
-        this._sendPayload(said, [upload], []);
+        said = (this._dictationBase ? this._dictationBase + ' ' : '') + said;
+        // Only the words, sent exactly as if typed. Attaching the recording
+        // as well made the agent treat dictation as a file to read. And going
+        // straight to the socket skipped the user's own bubble and the queue,
+        // so a dictated message never appeared in the chat and could be sent
+        // over a reply still running.
+        this.inputText = said;
+        this._dictationBase = '';
+        await this.sendMessage();
       } catch(e) {
-        this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
-        if (typeof FreecoToast !== 'undefined') FreecoToast.error('Failed to upload audio: ' + (e.message || 'unknown error'));
+        if (typeof FreecoToast !== 'undefined') FreecoToast.error('Voice failed: ' + (e.message || 'unknown error'));
       }
     },
 

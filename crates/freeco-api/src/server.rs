@@ -250,13 +250,19 @@ pub async fn build_router(
             "/api/agents/{id}/activate",
             axum::routing::post(routes::restart_agent),
         )
+        // Above the 2 MB default body limit, so a long paste reaches the
+        // handler, which keeps it in the agent's workspace.
         .route(
             "/api/agents/{id}/message",
-            axum::routing::post(routes::send_message),
+            axum::routing::post(routes::send_message).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_MESSAGE_BYTES + 1024 * 1024,
+            )),
         )
         .route(
             "/api/agents/{id}/message/stream",
-            axum::routing::post(routes::send_message_stream),
+            axum::routing::post(routes::send_message_stream).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/agents/{id}/session",
@@ -295,6 +301,18 @@ pub async fn build_router(
             "/api/sessions/route",
             axum::routing::post(routes::route_session),
         )
+        // The assistant popup: which conversation a new message belongs in.
+        .route(
+            "/api/dispatch",
+            axum::routing::post(crate::dispatch::dispatch),
+        )
+        // Dictation: the words in a piece of audio, nothing stored.
+        .route(
+            "/api/transcribe",
+            axum::routing::post(routes::transcribe_only).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_UPLOAD_SIZE + 1024 * 1024),
+            ),
+        )
         .route(
             "/api/agents/{id}/model",
             axum::routing::put(routes::set_model),
@@ -302,11 +320,6 @@ pub async fn build_router(
         .route(
             "/api/agents/{id}/tools",
             axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
-        )
-        // The assistant popup: which conversation a new message belongs in.
-        .route(
-            "/api/dispatch",
-            axum::routing::post(crate::dispatch::dispatch),
         )
         .route(
             "/api/agents/{id}/skills",
@@ -342,7 +355,11 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/upload",
-            axum::routing::post(routes::upload_file),
+            // Above the 2 MB default, which refused most documents and
+            // videos (from the dashboard and from WhatsApp) with a 413.
+            axum::routing::post(routes::upload_file).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_UPLOAD_SIZE + 1024 * 1024,
+            )),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         // Upload serving
@@ -779,7 +796,11 @@ pub async fn build_router(
         // Secrets typed into a chat: found before sending, kept in the vault.
         .route(
             "/api/gateway/scan",
-            axum::routing::post(crate::secret_guard::scan),
+            // A long paste is scanned too, or a key inside it is not offered
+            // to the vault.
+            axum::routing::post(crate::secret_guard::scan).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/vault/secrets",

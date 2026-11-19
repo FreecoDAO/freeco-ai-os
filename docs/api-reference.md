@@ -1741,9 +1741,9 @@ delete one explicitly with `DELETE /api/sessions/{id}`.
 
 ```json
 {
-  "status": "reset",
-  "agent_id": "a1b2c3d4-...",
-  "new_session_id": "s5e6f7g8-..."
+  "status": "ok",
+  "message": "New conversation started",
+  "session_id": "s5e6f7g8-..."
 }
 ```
 
