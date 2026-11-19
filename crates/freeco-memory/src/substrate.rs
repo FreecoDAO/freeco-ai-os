@@ -311,6 +311,15 @@ impl MemorySubstrate {
         self.sessions.list_agent_sessions(agent_id)
     }
 
+    /// An agent's most recent conversations with label and last request.
+    pub fn recent_session_topics(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        self.sessions.recent_session_topics(agent_id, limit)
+    }
+
     /// Create a new session with an optional label.
     pub fn create_session_with_label(
         &self,

@@ -737,6 +737,46 @@ async fn handle_text_message(
                     }
                 },
             };
+            // `new_session`: start a conversation named `title` and send there
+            // (the assistant popup's "new task"). Reported back as a
+            // `session` frame so the window knows where it is now. Like a
+            // pinned send, it leaves the agent's current conversation alone.
+            let pinned_session = match pinned_session {
+                Some(sid) => Some(sid),
+                None if parsed["new_session"].as_bool().unwrap_or(false) => {
+                    let title = parsed["title"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.chars().take(60).collect::<String>());
+                    match state
+                        .kernel
+                        .create_agent_session_opts(agent_id, title.as_deref(), false)
+                    {
+                        Ok(v) => {
+                            let _ = send_json(
+                                sender,
+                                &serde_json::json!({
+                                    "type": "session",
+                                    "agent_id": agent_id.to_string(),
+                                    "session_id": v["session_id"],
+                                    "label": v["label"],
+                                }),
+                            )
+                            .await;
+                            v["session_id"]
+                                .as_str()
+                                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                                .map(freeco_types::agent::SessionId)
+                        }
+                        Err(e) => {
+                            warn!(agent_id = %agent_id, "Could not start a new conversation: {e}");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
             let started = match pinned_session {
                 Some(session_id) => state.kernel.send_message_streaming_in_session(
                     agent_id,

@@ -7840,6 +7840,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
          style="margin:0 10px 8px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev, var(--bg))">
       <div class="text-xs text-dim" style="margin-bottom:8px">
         Where should this go?
+        <span x-show="pendingRoute && pendingRoute.reason" x-text="pendingRoute ? ' ' + pendingRoute.reason : ''"></span>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px">
         <template x-for="c in (pendingRoute ? pendingRoute.candidates : [])" :key="c.agent_id">
@@ -7858,6 +7859,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
         </button>
         <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewCompany()">
           <span>🏢 New company…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewTeam()">
+          <span>👥 New team…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewHand()">
+          <span>✋ New hand (automation)…</span>
         </button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm" style="flex:1" @click="routeHere()">Continue here</button>

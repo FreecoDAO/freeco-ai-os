@@ -5123,6 +5123,59 @@ impl FreecoKernel {
         Ok(text.trim().trim_matches('"').trim().to_string())
     }
 
+    /// One completion with an agent's own model and fallback chain.
+    ///
+    /// For the CEO's popup: its routing decisions are made by the model the
+    /// CEO runs on, not the system default, so the popup thinks like the agent
+    /// it is. Falls back to the default model when the agent's chain fails.
+    pub async fn complete_once_as(
+        &self,
+        agent_id: AgentId,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        use freeco_kernel_runtime::llm_driver::CompletionRequest;
+        use freeco_types::message::Message;
+
+        let Some(entry) = self.registry.get(agent_id) else {
+            return self.complete_once(system, user, max_tokens).await;
+        };
+        let driver = match self.resolve_driver(&entry.manifest) {
+            Ok(d) => d,
+            Err(_) => return self.complete_once(system, user, max_tokens).await,
+        };
+        let req = CompletionRequest {
+            model: entry.manifest.model.model.clone(),
+            messages: vec![Message::user(user)],
+            tools: vec![],
+            max_tokens,
+            temperature: 0.0,
+            system: Some(system.to_string()),
+            thinking: None,
+        };
+        match driver.complete(req).await {
+            Ok(resp) => {
+                let text = resp
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        freeco_types::message::ContentBlock::Text { text, .. } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Ok(text.trim().trim_matches('"').trim().to_string())
+            }
+            Err(e) => {
+                warn!(agent = %entry.name, "Agent's model unavailable for a quick completion, using the default: {e}");
+                self.complete_once(system, user, max_tokens).await
+            }
+        }
+    }
+
     /// Start the container behind a service hand, if it has one.
     ///
     /// Returns the container name when one was started, and `None` for a hand

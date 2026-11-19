@@ -303,6 +303,11 @@ pub async fn build_router(
             "/api/agents/{id}/tools",
             axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
         )
+        // The assistant popup: which conversation a new message belongs in.
+        .route(
+            "/api/dispatch",
+            axum::routing::post(crate::dispatch::dispatch),
+        )
         .route(
             "/api/agents/{id}/skills",
             axum::routing::get(routes::get_agent_skills).put(routes::set_agent_skills),
