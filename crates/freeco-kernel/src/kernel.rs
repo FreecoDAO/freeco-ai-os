@@ -6671,6 +6671,76 @@ impl FreecoKernel {
         .map_err(|e| format!("MCP server '{}': {e}", server.name))
     }
 
+    /// Secret values this kernel knows, as `(name, value)`, for redaction
+    /// (`freeco_kernel_runtime::secret_redact`). Never log or return them.
+    ///
+    /// Sources: every vault entry; `.env` and process environment variables
+    /// with secret-like names (`*_API_KEY`, `*_TOKEN`, `*_SECRET`,
+    /// `*PASSWORD`, ... -- provider keys and channel tokens are configured
+    /// that way); the env variable named by `default_model.api_key_env`;
+    /// and the credential part of every `[[mcp_servers]]` header, after
+    /// `${VAR}` expansion. Implausible values (short, numeric, URLs without
+    /// credentials, paths) are dropped by `is_plausible_secret_value`.
+    pub fn known_secrets(&self) -> Vec<(String, String)> {
+        use freeco_kernel_runtime::secret_redact::{
+            header_secret_value, is_plausible_secret_value, is_secret_env_name,
+        };
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |name: &str, value: &str| {
+            let v = value.trim();
+            if is_plausible_secret_value(v) && !out.iter().any(|(_, known)| known == v) {
+                out.push((name.to_string(), v.to_string()));
+            }
+        };
+        {
+            let resolver = self
+                .credential_resolver
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (name, value) in resolver.vault_entries() {
+                push(name.as_str(), value.as_str());
+            }
+            for (name, value) in resolver.dotenv_entries() {
+                if is_secret_env_name(&name) {
+                    push(name.as_str(), value.as_str());
+                }
+            }
+        }
+        // vars_os: std::env::vars panics on a variable that is not UTF-8.
+        for (name, value) in std::env::vars_os() {
+            if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+                if is_secret_env_name(name) {
+                    push(name, value);
+                }
+            }
+        }
+        let model_key_env = self.config.default_model.api_key_env.as_str();
+        if !model_key_env.is_empty() {
+            if let Ok(value) = std::env::var(model_key_env) {
+                push(model_key_env, value.as_str());
+            }
+        }
+        // Effective list: config.toml servers plus installed integrations.
+        let mcp_servers = self
+            .effective_mcp_servers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for server in &mcp_servers {
+            let headers = self
+                .resolve_mcp_headers(server)
+                .unwrap_or_else(|_| server.headers.clone());
+            for header in &headers {
+                if let Some(value) = header_secret_value(header) {
+                    let header_name = header.split(':').next().unwrap_or("header").trim();
+                    let label = format!("mcp:{}:{}", server.name, header_name);
+                    push(label.as_str(), value.as_str());
+                }
+            }
+        }
+        out
+    }
+
     /// Store a credential in the vault (best-effort — falls through silently if no vault).
     pub fn store_credential(&self, key: &str, value: &str) {
         let mut resolver = self
@@ -10020,6 +10090,10 @@ impl KernelHandle for FreecoKernel {
         self.approval_manager.requires_approval(tool_name)
     }
 
+    fn known_secrets(&self) -> Vec<(String, String)> {
+        FreecoKernel::known_secrets(self)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,
@@ -12259,6 +12333,66 @@ mod tests {
         assert!(err.contains("FREECO_TEST_MCP_HDR_UNSET_7f3a"));
 
         std::env::remove_var("FREECO_TEST_MCP_HDR_KEY_7f3a");
+        kernel.shutdown();
+    }
+
+    /// The values redaction works from: secret-named env vars and the
+    /// credential part of MCP headers, never ordinary settings.
+    #[test]
+    fn known_secrets_cover_env_tokens_and_mcp_headers() {
+        use freeco_types::config::{DefaultModelConfig, McpServerConfigEntry, McpTransportEntry};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-known-secrets");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        // Unique names so parallel tests cannot collide.
+        std::env::set_var("FREECO_TEST_KS_BOT_TOKEN_91c2", "ks-token-4f8a2b9c7d1e");
+        std::env::set_var("FREECO_TEST_KS_BASE_URL_91c2", "http://127.0.0.1:9999/v1");
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "groq".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                api_key_env: "GROQ_API_KEY".to_string(),
+                base_url: None,
+                subprocess_timeout_secs: None,
+            },
+            mcp_servers: vec![McpServerConfigEntry {
+                name: "omniroute".to_string(),
+                transport: McpTransportEntry::Http {
+                    url: "http://127.0.0.1:20128/api/mcp/stream".to_string(),
+                },
+                timeout_secs: 120,
+                env: vec![],
+                headers: vec![
+                    "Authorization: Bearer ks-header-7c3e9a1b5d2f".to_string(),
+                    "Accept: application/json".to_string(),
+                ],
+            }],
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+        let known = kernel.known_secrets();
+        let has = |v: &str| known.iter().any(|(_, k)| k == v);
+        assert!(has("ks-token-4f8a2b9c7d1e"), "secret-named env var");
+        assert!(has("ks-header-7c3e9a1b5d2f"), "MCP header credential");
+        assert!(
+            !has("http://127.0.0.1:9999/v1"),
+            "a URL setting is not a secret"
+        );
+        assert!(
+            !has("application/json"),
+            "a non-credential header is not a secret"
+        );
+        let (name, _) = known
+            .iter()
+            .find(|(_, k)| k == "ks-token-4f8a2b9c7d1e")
+            .unwrap();
+        assert_eq!(name, "FREECO_TEST_KS_BOT_TOKEN_91c2");
+
+        std::env::remove_var("FREECO_TEST_KS_BOT_TOKEN_91c2");
+        std::env::remove_var("FREECO_TEST_KS_BASE_URL_91c2");
         kernel.shutdown();
     }
 
