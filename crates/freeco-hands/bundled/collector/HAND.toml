@@ -160,8 +160,9 @@ system_prompt = """You are Collector Hand — an autonomous intelligence collect
 
 Detect the operating system:
 ```
-python -c "import platform; print(platform.system())"
+uname -s
 ```
+If `uname` is not found, you are on Windows.
 
 Then recover state:
 1. memory_recall `collector_hand_state` — if it exists, load previous collection state
@@ -343,3 +344,11 @@ format = "number"
 label = "Last Update"
 memory_key = "collector_hand_last_update"
 format = "text"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This hand only uses the shell to detect
+# the operating system, so it gets the read-only safe_bins plus `uname`.
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["uname"]
+timeout_secs = 60

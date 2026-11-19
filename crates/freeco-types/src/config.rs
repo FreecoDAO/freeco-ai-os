@@ -1182,6 +1182,33 @@ pub struct ExecPolicy {
     /// before the field existed (issue #1169).
     #[serde(default, alias = "env_passthrough", alias = "env_allowlist")]
     pub shell_env_passthrough: Vec<String>,
+    /// Limits on `podman` / `docker` commands run through `shell_exec` or
+    /// `process_start` (`[exec_policy.containers]`). When set, the kernel
+    /// parses every container command and refuses names outside
+    /// `name_prefixes`, images outside `images`, and the flags that reach
+    /// the host (`--privileged`, host mounts, host namespaces, `--cap-add`,
+    /// ports published on every interface). `None` = no container checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containers: Option<ContainerPolicy>,
+}
+
+/// Container limits inside an exec policy (`[exec_policy.containers]`).
+///
+/// An empty `name_prefixes` or `images` list leaves that dimension open; the
+/// host-escape checks (privileged, host mounts, host namespaces, capabilities,
+/// devices, publishing on 0.0.0.0) always apply once the table exists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ContainerPolicy {
+    /// Container (and volume) names must start with one of these, e.g.
+    /// `["freeco-"]`. `run`/`create` must then pass `--name`.
+    pub name_prefixes: Vec<String>,
+    /// Image patterns; `*` matches any run of characters, e.g.
+    /// `["ghcr.io/freecodao/*", "localhost/*"]`. Unqualified names such as
+    /// `alpine` only match a pattern that names them.
+    pub images: Vec<String>,
+    /// Allow `--network host` (off by default).
+    pub allow_host_network: bool,
 }
 
 fn default_no_output_timeout() -> u64 {
@@ -1219,6 +1246,7 @@ impl Default for ExecPolicy {
             max_output_bytes: 100 * 1024,
             no_output_timeout_secs: default_no_output_timeout(),
             shell_env_passthrough: Vec::new(),
+            containers: None,
         }
     }
 }
@@ -5143,5 +5171,31 @@ local_only = true
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.media.local_only, None);
         assert!(config.media.local_only_effective());
+    }
+
+    #[test]
+    fn test_exec_policy_containers_absent_by_default() {
+        assert!(ExecPolicy::default().containers.is_none());
+        let policy: ExecPolicy = toml::from_str("mode = \"allowlist\"").unwrap();
+        assert!(policy.containers.is_none());
+    }
+
+    #[test]
+    fn test_exec_policy_containers_table_deserializes() {
+        let toml_str = r#"
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+
+[containers]
+name_prefixes = ["freeco-"]
+images = ["ghcr.io/freecodao/*", "localhost/*"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        let c = policy.containers.expect("containers table parsed");
+        assert_eq!(c.name_prefixes, vec!["freeco-"]);
+        assert_eq!(c.images, vec!["ghcr.io/freecodao/*", "localhost/*"]);
+        assert!(!c.allow_host_network);
+        assert!(policy.safe_bins.is_empty());
     }
 }

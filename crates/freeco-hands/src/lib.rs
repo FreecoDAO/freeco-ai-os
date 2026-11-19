@@ -544,6 +544,15 @@ pub struct HandDefinition {
     /// MCP server allowlist for the spawned agent (empty = all).
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+    /// Shell policy for the spawned agent (`[exec_policy]`, same shape as in
+    /// agent.toml, including `[exec_policy.containers]`). A hand that lists
+    /// `shell_exec` without one gets shell denied: the kernel no longer
+    /// grants every such hand unrestricted shell.
+    #[serde(
+        default,
+        deserialize_with = "freeco_types::serde_compat::exec_policy_lenient"
+    )]
+    pub exec_policy: Option<freeco_types::config::ExecPolicy>,
     /// Requirements that must be satisfied before activation.
     #[serde(default)]
     pub requires: Vec<HandRequirement>,
@@ -1090,6 +1099,68 @@ metrics = []
         let def = parse_hand_toml(toml_str).unwrap();
         assert_eq!(def.id, "test");
         assert_eq!(def.name, "Test Hand");
+    }
+
+    #[test]
+    fn parse_hand_exec_policy() {
+        let toml_str = r#"
+id = "test"
+name = "Test Hand"
+description = "A test hand"
+category = "content"
+tools = ["shell_exec"]
+
+[agent]
+name = "test-hand"
+description = "Test agent"
+system_prompt = "You are a test agent."
+
+[exec_policy]
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+
+[exec_policy.containers]
+name_prefixes = ["freeco-"]
+images = ["localhost/*"]
+"#;
+        let def = parse_hand_toml(toml_str).unwrap();
+        let policy = def.exec_policy.expect("exec_policy parsed");
+        assert_eq!(
+            policy.mode,
+            freeco_types::config::ExecSecurityMode::Allowlist
+        );
+        assert_eq!(policy.allowed_commands, vec!["podman"]);
+        assert!(policy.safe_bins.is_empty());
+        assert_eq!(
+            policy.containers.expect("containers").name_prefixes,
+            vec!["freeco-"]
+        );
+    }
+
+    #[test]
+    fn parse_hand_exec_policy_shorthand_and_absent() {
+        let base = r#"
+id = "test"
+name = "Test Hand"
+description = "A test hand"
+category = "content"
+tools = ["shell_exec"]
+"#;
+        let agent = r#"
+[agent]
+name = "test-hand"
+description = "Test agent"
+system_prompt = "You are a test agent."
+"#;
+        let absent = parse_hand_toml(&format!("{base}{agent}")).unwrap();
+        assert!(absent.exec_policy.is_none());
+        let shorthand =
+            parse_hand_toml(&format!("{base}exec_policy = \"deny\"\n{agent}")).unwrap();
+        assert_eq!(
+            shorthand.exec_policy.expect("shorthand").mode,
+            freeco_types::config::ExecSecurityMode::Deny
+        );
     }
 
     #[test]

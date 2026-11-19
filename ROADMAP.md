@@ -897,8 +897,30 @@ In the repo (2026-11-18):
   the vault, so the OmniRoute MCP key no longer has to sit in config.toml in
   plain text. Example in `freeco-ai.toml.example` and `docs/configuration.md`.
 - ✅ `containers` is a bundled agent template (`agents/containers`):
-  podman-only `[exec_policy]`, approval on every `shell_exec`, no host-specific
-  container list.
+  podman-only `[exec_policy]` with `[exec_policy.containers]` (FreecoDAO
+  images, `freeco-*` names), approval on every `shell_exec`.
+- ✅ Security approvals have a UI: the Approvals page lists manifests held
+  by the Security Agent (`GET /api/security/pending`: hash, name,
+  capabilities, exec policy mode) with an Approve button that calls
+  `POST /api/security/approve/{hash}`.
+- ✅ Hands have per-hand `[exec_policy]` in HAND.toml, used by
+  `activate_hand` instead of `mode = "full"`. A hand listing `shell_exec`
+  without one gets shell denied. Every bundled shell hand declares what it
+  needs (researcher/lead/collector/predictor are allowlisted; the curl hands
+  keep full explicitly). Hand agents are still rebuilt from HAND.toml on
+  boot, so overrides belong in `~/.freeco-ai/hands/<id>/HAND.toml`.
+- ✅ MCP servers reconnect: every configured server has a health entry, and
+  failures are retried 5 s / 15 s / 60 s / every 5 min until connected or
+  removed from config (`reconnect_max_attempts` still caps it).
+- ✅ `capabilities.shell` is enforced for the builtin `shell_exec` and
+  `process_start`, before approval. Empty list = no restriction from that
+  field (`exec_policy` decides), which keeps today's agents working.
+- ✅ Container scope enforced by the kernel: `[exec_policy.containers]`
+  (`name_prefixes`, `images`, `allow_host_network`) checks every podman/docker
+  command from `shell_exec`/`process_start`, refuses host escapes, and keeps
+  `freeco-daemon` read-only. The `containers` agent uses it.
+- ✅ `hand_status` also probes the hand service's `health_path` over loopback
+  HTTP and reports status, latency and error next to the container state.
 
 Open:
 
@@ -908,32 +930,15 @@ Open:
   with no provider), and to activate the `omniroute` MCP server — then attach
   it to the `omniroute` agent (`PUT /api/agents/{id}/mcp_servers`). Fold in the
   unmerged `claude/project-thread-*` branches first.
-- ⬜ **Security approvals have no UI.** `POST /api/security/approve/{hash}` is
-  never called by the dashboard, so a manifest with `shell_exec` can never be
-  approved by clicking. (The `containers` agent was approved through the API
-  on the owner's chat go-ahead, hash `5e6652e8…`.)
-- ⬜ **Hands cannot safely manage their own containers.** A hand that lists
-  `shell_exec` in HAND.toml gets `exec_policy` mode **Full** (any command;
-  `activate_hand`: "Hands are curated packages"). Needs a per-hand
-  `[exec_policy]` in HAND.toml (e.g. podman-only) and a container-name scope
-  checked by the kernel. Until then the `containers` agent does container
-  work. Also: hand agents are rebuilt from HAND.toml on every boot, so their
-  `agent.toml` edits are silently discarded (overrides go in
-  `~/.freeco-ai/hands/<id>/HAND.toml`; the `omniroute` hand now has one with
-  its OmniRoute MCP tools).
-- ⬜ **MCP servers are connected once at boot, with no retry.** The daemon
-  started 2 s before OmniRoute and never connected; `POST
-  /api/integrations/reload` fixed it by hand.
-- ⬜ **`capabilities.shell` is dead wiring.** It becomes `Capability::ShellExec`
-  and nothing checks it; only the agent's `[exec_policy]` limits commands.
 - 🟨 **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
   approval on every `shell_exec` (verified live), no shell metacharacters,
   `[exec_policy]` allowlist = `podman` only, five tools, no agent spawning.
-  Prompt-only (not enforced) — FreecoDAO images only, `freeco-*` containers
-  only, backup/rollback, 127.0.0.1 binding, never touching `freeco-daemon`.
-  `podman` with any arguments is still powerful (`run --privileged`, host
-  mounts); next: read-only podman without a click, mutating podman with one,
-  and an image/argument allowlist checked by the kernel.
+  Kernel-enforced since then too: FreecoDAO images only, `freeco-*`
+  containers and volumes only, 127.0.0.1 binding, `freeco-daemon` read-only,
+  no privileged/host-mount/host-namespace flags
+  (`[exec_policy.containers]`). Prompt-only: backup/rollback before
+  recreating. Next: read-only podman without a click, mutating podman with
+  one.
 - ⬜ **OmniRoute from the FreecoDAO fork.** `FreecoDAO/OmniRoute` is on
   `release/v3.8.50` (upstream v3.8.54) and its docker-publish run failed
   (2026-08-27); the container still runs `docker.io/diegosouzapw/omniroute`.

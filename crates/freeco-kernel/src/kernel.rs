@@ -5319,9 +5319,9 @@ impl FreecoKernel {
 
     /// Whether the agent is working in any conversation right now.
     pub fn is_busy(&self, agent_id: AgentId) -> bool {
-        self.busy_conversations().into_iter().any(|sid| {
-            matches!(self.memory.get_session(sid), Ok(Some(s)) if s.agent_id == agent_id)
-        })
+        self.busy_conversations().into_iter().any(
+            |sid| matches!(self.memory.get_session(sid), Ok(Some(s)) if s.agent_id == agent_id),
+        )
     }
 
     /// An idle worker copy of `agent_id`, started if there is none yet.
@@ -5356,7 +5356,10 @@ impl FreecoKernel {
             .list()
             .into_iter()
             .filter(|e| {
-                e.manifest.metadata.get(WORKER_OF_KEY).and_then(|v| v.as_str())
+                e.manifest
+                    .metadata
+                    .get(WORKER_OF_KEY)
+                    .and_then(|v| v.as_str())
                     == Some(parent_key.as_str())
             })
             .collect();
@@ -5817,17 +5820,9 @@ impl FreecoKernel {
             },
             skills: def.skills.clone(),
             mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(freeco_types::config::ExecPolicy {
-                    mode: freeco_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
+            // The hand's own [exec_policy]; shell denied when it lists
+            // shell_exec without one (see `hand_exec_policy`).
+            exec_policy: hand_exec_policy(&def),
             tool_blocklist: Vec::new(),
             // Custom profile avoids ToolProfile-based expansion overriding the
             // explicit tool list.
@@ -7890,6 +7885,12 @@ impl FreecoKernel {
             .unwrap_or_default();
 
         for server_config in &servers {
+            // Every server gets a health entry, not only installed
+            // integrations: a [[mcp_servers]] entry that failed at boot (the
+            // daemon started before OmniRoute) is then retried by
+            // `run_extension_health_loop` and its state shows in the UI.
+            self.extension_health.register(&server_config.name);
+
             let transport = match &server_config.transport {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
@@ -8198,37 +8199,71 @@ impl FreecoKernel {
         }
     }
 
-    /// Background loop that checks extension MCP health and auto-reconnects.
+    /// Background loop that reconnects MCP servers whose connection failed.
+    ///
+    /// Each failed server is retried on its own schedule
+    /// ([`mcp_retry_delay`]: 5 s, 15 s, 60 s, then every 5 minutes) until it
+    /// connects, its config is removed, or `extensions.reconnect_max_attempts`
+    /// is used up. `extensions.health_check_interval_secs = 0` or
+    /// `auto_reconnect = false` turns this off. Before, the loop slept the
+    /// backoff inline inside a 60 s tick and only covered installed
+    /// integrations, so a `[[mcp_servers]]` entry that was down at boot stayed
+    /// down until someone called `POST /api/integrations/reload`.
     async fn run_extension_health_loop(self: &Arc<Self>) {
         let interval_secs = self.extension_health.config().check_interval_secs;
         if interval_secs == 0 {
             return;
         }
 
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // When each server was last tried (or first seen failing).
+        let mut last_try: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let mut interval = tokio::time::interval(MCP_RETRY_TICK);
         interval.tick().await; // skip first immediate tick
 
         loop {
             interval.tick().await;
 
-            // Check each registered integration
-            let health_entries = self.extension_health.all_health();
-            for entry in health_entries {
-                // Try reconnect for errored integrations
-                if self.extension_health.should_reconnect(&entry.id) {
-                    let backoff = self
-                        .extension_health
-                        .backoff_duration(entry.reconnect_attempts);
-                    debug!(
-                        server = %entry.id,
-                        attempt = entry.reconnect_attempts + 1,
-                        backoff_secs = backoff.as_secs(),
-                        "Auto-reconnecting extension MCP server"
-                    );
-                    tokio::time::sleep(backoff).await;
+            let configured: std::collections::HashSet<String> = self
+                .effective_mcp_servers
+                .read()
+                .map(|s| s.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            let connected: std::collections::HashSet<String> = self
+                .mcp_connections
+                .lock()
+                .await
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
 
-                    if let Err(e) = self.reconnect_extension_mcp(&entry.id).await {
-                        debug!(server = %entry.id, error = %e, "Auto-reconnect failed");
+            for entry in self.extension_health.all_health() {
+                // Connected, or no longer configured: nothing to retry.
+                if connected.contains(&entry.id) || !configured.contains(&entry.id) {
+                    last_try.remove(&entry.id);
+                    continue;
+                }
+                if !self.extension_health.should_reconnect(&entry.id) {
+                    last_try.remove(&entry.id);
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                let since = *last_try.entry(entry.id.clone()).or_insert(now);
+                if !mcp_reconnect_due(entry.reconnect_attempts, now.duration_since(since)) {
+                    continue;
+                }
+                debug!(
+                    server = %entry.id,
+                    attempt = entry.reconnect_attempts + 1,
+                    "Reconnecting MCP server"
+                );
+                match self.reconnect_extension_mcp(&entry.id).await {
+                    Ok(_) => {
+                        last_try.remove(&entry.id);
+                    }
+                    Err(e) => {
+                        debug!(server = %entry.id, error = %e, "MCP reconnect failed");
+                        last_try.insert(entry.id.clone(), std::time::Instant::now());
                     }
                 }
             }
@@ -9086,6 +9121,54 @@ pub(crate) fn merge_disk_manifest_preserving_kernel_defaults(
         disk.exec_policy = entry.exec_policy.clone();
     }
     disk
+}
+
+/// How often the MCP reconnect loop looks for a server that is due.
+const MCP_RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait before reconnect attempt number `attempts + 1` of a failed MCP
+/// server: 5 s, 15 s, 60 s, then every 5 minutes.
+fn mcp_retry_delay(attempts: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(match attempts {
+        0 => 5,
+        1 => 15,
+        2 => 60,
+        _ => 300,
+    })
+}
+
+/// Is a server that has had `attempts` reconnect attempts, the last one
+/// `since_last` ago, due for the next?
+fn mcp_reconnect_due(attempts: u32, since_last: std::time::Duration) -> bool {
+    since_last >= mcp_retry_delay(attempts)
+}
+
+/// The exec policy a hand's agent runs with.
+///
+/// Hands used to get `mode = "full"` (any command, no approval) just for
+/// listing `shell_exec`. Now the hand's own `[exec_policy]` in HAND.toml is
+/// used as written. A hand that lists `shell_exec` without one gets shell
+/// denied, so a hand nobody gave a policy cannot run anything on the host.
+/// A hand without `shell_exec` keeps `None` and inherits the kernel's policy
+/// like any agent (it has no shell tool to use it with).
+fn hand_exec_policy(
+    def: &freeco_hands::HandDefinition,
+) -> Option<freeco_types::config::ExecPolicy> {
+    if let Some(policy) = &def.exec_policy {
+        return Some(policy.clone());
+    }
+    if def.tools.iter().any(|t| t == "shell_exec") {
+        warn!(
+            hand = %def.id,
+            "Hand lists shell_exec but has no [exec_policy] in HAND.toml; shell is denied for it"
+        );
+        return Some(freeco_types::config::ExecPolicy {
+            mode: freeco_types::config::ExecSecurityMode::Deny,
+            safe_bins: Vec::new(),
+            ..Default::default()
+        });
+    }
+    None
 }
 
 fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
@@ -10501,12 +10584,15 @@ impl KernelHandle for FreecoKernel {
             .find(|i| i.hand_id == hand_id)
             .ok_or_else(|| format!("No active instance found for hand '{hand_id}'"))?;
 
-        let (def_name, def_icon, is_service) = {
+        let (def_name, def_icon, is_service, health_url) = {
             let def = self.hand_registry.get_definition(hand_id);
             (
                 def.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
                 def.as_ref().map(|d| d.icon.clone()).unwrap_or_default(),
                 def.as_ref().map(|d| d.container.is_some()).unwrap_or(false),
+                def.as_ref()
+                    .and_then(|d| d.container.as_ref())
+                    .and_then(freeco_hands::container::health_url),
             )
         };
 
@@ -10522,6 +10608,19 @@ impl KernelHandle for FreecoKernel {
             None
         };
 
+        // A running container is not a working service: ask its health_path
+        // too (loopback only, short timeout), alongside the container state.
+        let health = match &health_url {
+            Some(url) => Some(
+                freeco_hands::container::probe_health(
+                    url,
+                    freeco_hands::container::HEALTH_PROBE_TIMEOUT,
+                )
+                .await,
+            ),
+            None => None,
+        };
+
         Ok(serde_json::json!({
             "hand_id": hand_id,
             "name": def_name,
@@ -10532,6 +10631,9 @@ impl KernelHandle for FreecoKernel {
             // null for a non-service hand; true/false only when there is a
             // container whose state could be checked.
             "serving": serving,
+            // null when the hand declares no health_path; otherwise
+            // {url, status, latency_ms, ok, error} from one HTTP probe.
+            "health": health,
             "agent_id": instance.agent_id.map(|a| a.to_string()),
             "agent_name": instance.agent_name,
             "activated_at": instance.activated_at.to_rfc3339(),
@@ -10818,6 +10920,20 @@ impl KernelHandle for FreecoKernel {
             self.stop_hand_service(&hand_id, &uuid).await?;
         }
         Ok(())
+    }
+
+    fn shell_patterns(&self, agent_id: &str) -> Vec<String> {
+        let Ok(id) = agent_id.parse::<AgentId>() else {
+            return Vec::new();
+        };
+        self.capabilities
+            .list(id)
+            .into_iter()
+            .filter_map(|c| match c {
+                Capability::ShellExec(pattern) => Some(pattern),
+                _ => None,
+            })
+            .collect()
     }
 
     fn requires_approval(&self, tool_name: &str) -> bool {
@@ -11602,6 +11718,106 @@ mod tests {
         assert_eq!(remap_home_path(&home.join("workspaces"), home), None);
     }
 
+    fn hand_toml(tools: &str, extra: &str) -> freeco_hands::HandDefinition {
+        let toml_str = format!(
+            r#"
+id = "h"
+name = "H"
+description = "d"
+category = "content"
+tools = {tools}
+
+[agent]
+name = "h"
+description = "d"
+system_prompt = "p"
+{extra}
+"#
+        );
+        freeco_hands::parse_hand_toml(&toml_str).expect("hand parses")
+    }
+
+    #[test]
+    fn mcp_retry_schedule_is_5s_15s_60s_then_5min() {
+        use std::time::Duration;
+        assert_eq!(mcp_retry_delay(0), Duration::from_secs(5));
+        assert_eq!(mcp_retry_delay(1), Duration::from_secs(15));
+        assert_eq!(mcp_retry_delay(2), Duration::from_secs(60));
+        assert_eq!(mcp_retry_delay(3), Duration::from_secs(300));
+        assert_eq!(mcp_retry_delay(50), Duration::from_secs(300));
+        assert_eq!(mcp_retry_delay(u32::MAX), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn mcp_reconnect_due_follows_the_schedule() {
+        use std::time::Duration;
+        assert!(!mcp_reconnect_due(0, Duration::from_secs(4)));
+        assert!(mcp_reconnect_due(0, Duration::from_secs(5)));
+        assert!(!mcp_reconnect_due(1, Duration::from_secs(14)));
+        assert!(mcp_reconnect_due(1, Duration::from_secs(15)));
+        assert!(!mcp_reconnect_due(2, Duration::from_secs(59)));
+        assert!(mcp_reconnect_due(2, Duration::from_secs(60)));
+        assert!(!mcp_reconnect_due(7, Duration::from_secs(299)));
+        assert!(mcp_reconnect_due(7, Duration::from_secs(300)));
+        // The tick is short enough to hit the first retry on time.
+        assert!(MCP_RETRY_TICK <= mcp_retry_delay(0));
+    }
+
+    #[test]
+    fn hand_with_shell_and_no_exec_policy_is_denied_not_full() {
+        let def = hand_toml(r#"["shell_exec", "file_read"]"#, "");
+        let policy = hand_exec_policy(&def).expect("a shell hand gets a policy");
+        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Deny);
+        assert!(policy.safe_bins.is_empty());
+    }
+
+    #[test]
+    fn hand_exec_policy_from_hand_toml_is_used_as_written() {
+        let def = hand_toml(
+            r#"["shell_exec"]"#,
+            r#"
+[exec_policy]
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+timeout_secs = 120
+
+[exec_policy.containers]
+name_prefixes = ["freeco-"]
+images = ["ghcr.io/freecodao/*"]
+"#,
+        );
+        let policy = hand_exec_policy(&def).expect("policy");
+        assert_eq!(
+            policy.mode,
+            freeco_types::config::ExecSecurityMode::Allowlist
+        );
+        assert_eq!(policy.allowed_commands, vec!["podman"]);
+        assert!(policy.safe_bins.is_empty());
+        assert_eq!(policy.timeout_secs, 120);
+        let c = policy.containers.expect("containers parsed");
+        assert_eq!(c.name_prefixes, vec!["freeco-"]);
+    }
+
+    #[test]
+    fn hand_without_shell_inherits_kernel_policy() {
+        let def = hand_toml(r#"["file_read"]"#, "");
+        assert!(hand_exec_policy(&def).is_none());
+    }
+
+    #[test]
+    fn no_bundled_shell_hand_silently_loses_or_gains_shell() {
+        for (id, toml_content, skill) in freeco_hands::bundled::bundled_hands() {
+            let def = freeco_hands::bundled::parse_bundled(id, toml_content, skill).unwrap();
+            if def.tools.iter().any(|t| t == "shell_exec") {
+                assert!(
+                    def.exec_policy.is_some(),
+                    "bundled hand '{id}' lists shell_exec but has no [exec_policy]"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
@@ -12372,7 +12588,10 @@ mod tests {
 
         let log = kernel.org_changes(10);
         assert_eq!(log[0]["actor"], "boss");
-        assert!(log[0]["change"].as_str().unwrap().starts_with("hired \"researcher\""));
+        assert!(log[0]["change"]
+            .as_str()
+            .unwrap()
+            .starts_with("hired \"researcher\""));
         assert!(log[1]["change"]
             .as_str()
             .unwrap()
@@ -13284,7 +13503,10 @@ mod tests {
                 "Authorization: Bearer ${FREECO_TEST_MCP_HDR_KEY_7f3a}",
             ]))
             .unwrap();
-        assert_eq!(ok, vec!["Authorization: Bearer scoped-test-key".to_string()]);
+        assert_eq!(
+            ok,
+            vec!["Authorization: Bearer scoped-test-key".to_string()]
+        );
 
         let err = kernel
             .resolve_mcp_headers(&entry(vec![

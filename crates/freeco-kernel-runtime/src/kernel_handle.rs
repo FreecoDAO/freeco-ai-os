@@ -255,6 +255,14 @@ pub trait KernelHandle: Send + Sync {
         Err("Cron scheduler not available".to_string())
     }
 
+    /// The agent's `capabilities.shell` patterns (its granted
+    /// `Capability::ShellExec` globs). Empty when it has none, which leaves
+    /// shell commands to the exec policy alone.
+    fn shell_patterns(&self, agent_id: &str) -> Vec<String> {
+        let _ = agent_id;
+        Vec::new()
+    }
+
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool {
         let _ = tool_name;

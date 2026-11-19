@@ -171,8 +171,9 @@ system_prompt = """You are Researcher Hand — an autonomous deep research agent
 
 Detect the operating system:
 ```
-python -c "import platform; print(platform.system())"
+uname -s
 ```
+If `uname` is not found, you are on Windows.
 
 Then load context:
 1. memory_recall `researcher_hand_state` — load cumulative research stats
@@ -398,3 +399,11 @@ format = "number"
 label = "Active Investigations"
 memory_key = "researcher_hand_active_investigations"
 format = "number"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This hand only uses the shell to detect
+# the operating system, so it gets the read-only safe_bins plus `uname`.
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["uname"]
+timeout_secs = 60

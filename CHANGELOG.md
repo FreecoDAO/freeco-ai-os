@@ -244,6 +244,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Speaches and voice hands now explain how to point dograh's transcriber
   and voice at the local Speaches. dograh keeps those settings in its own
   database, and its defaults are cloud providers.
+- Container commands now have enforced limits. `[exec_policy.containers]`
+  (`name_prefixes`, `images`, `allow_host_network`), in an agent's manifest
+  or a HAND.toml, makes the kernel parse every `podman`/`docker` command from
+  `shell_exec` and `process_start` and refuse container names outside the
+  prefix, images outside the allowlist, `--privileged`, `--cap-add`,
+  `--device`, host-path mounts, host network/PID/IPC namespaces, ports
+  published on every interface, and subcommands it cannot check. FreEco's own
+  container stays readable but cannot be stopped, removed or committed. The
+  bundled `containers` agent uses it.
+- Hands declare their shell policy. HAND.toml takes the same `[exec_policy]`
+  as agent.toml and `activate_hand` uses it, instead of granting every hand
+  that lists `shell_exec` unrestricted shell. A shell hand without a policy
+  gets shell denied; every bundled hand declares what it needs.
+- `capabilities.shell` is enforced for the builtin tools, not only in the WASM
+  sandbox: the command must match one of the globs before an approval is
+  requested. An empty list leaves `exec_policy` to decide, as before.
+- The dashboard Approvals page shows content held by the Security Agent
+  (`GET /api/security/pending`, with the manifest's name and capabilities)
+  and approves it with `POST /api/security/approve/{content_hash}`. Until now
+  that route had no caller, so a held manifest could not be approved by
+  clicking.
+- MCP servers reconnect on their own. Every configured server has a health
+  entry, and a failed one is retried after 5 s, 15 s, 60 s and then every
+  5 minutes until it connects or its config is removed, so a daemon that
+  started before its gateway no longer needs a manual reload.
+- `hand_status` also probes the service's `health_path` over loopback HTTP
+  and reports its status code, latency and error, next to the container state.
+
+### Added
+
 - Skills install straight from GitHub. The Skills page has a GitHub tab:
   paste `owner/repo/skills` or a link, preview, tick the skills, install.
   Every install is pinned to the commit that was previewed, and every skill
