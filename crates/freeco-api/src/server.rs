@@ -679,6 +679,24 @@ pub async fn build_router(
             "/api/org/teams/{id}/run",
             axum::routing::post(crate::org_routes::run_team),
         )
+        // The Chamber: every conversation (agent chats and every channel)
+        // in one inbox, filtered for the caller by crate::access.
+        .route(
+            "/api/chamber/conversations",
+            axum::routing::get(crate::chamber::list_conversations),
+        )
+        .route(
+            "/api/chamber/conversations/{id}/messages",
+            axum::routing::get(crate::chamber::conversation_messages),
+        )
+        .route(
+            "/api/chamber/conversations/{id}/reply",
+            axum::routing::post(crate::chamber::reply),
+        )
+        .route(
+            "/api/chamber/stream",
+            axum::routing::get(crate::chamber::stream),
+        )
         // The Teams floor: who is on each team, who is working right now,
         // each team's task board and the latest hand-offs between agents.
         .route(

@@ -32,8 +32,10 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+pub mod access;
 pub mod backup;
 pub mod bundled_templates;
+pub mod chamber;
 pub mod channel_bridge;
 pub mod chat_tools;
 pub mod crm;
