@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chamber**: one window with every communication channel — agent chats and
+  each person's conversation on WhatsApp, Telegram, email and every other
+  channel FreEco has. `GET /api/chamber/conversations` lists them (filters
+  for channel, agent and unread), `.../{id}/messages` opens one,
+  `.../{id}/reply` writes in it (a channel reply goes through the existing
+  channel send path), and `/api/chamber/stream` streams changes per caller.
+  The dashboard has a Chamber page with channel icons, filters and a thread
+  view, in the day/night design.
+- **One access policy for all of it**, `crates/freeco-api/src/access.rs`:
+  owners and admins see everything; other accounts see what `[[users]]`
+  grants them — the new optional `agents = [...]` and `channels = [...]`
+  (`"*"` for all); a kid sees only granted agents and no external channels;
+  a viewer reads granted items but cannot write. A signed-in caller never
+  sees another tenant's conversations, and a channel conversation with an
+  owner- or admin-bound peer stays with admins. Anything hidden answers 404.
+  The proposed defaults and the open questions are in `docs/chamber-access.md`.
+- Read marks per account: opening a conversation in the Chamber clears its
+  unread count, kept in `<data_dir>/chamber_read.json`.
+
 ### Fixed
+
+- **The WebSocket chat had no role check**: a viewer could chat over the
+  socket although HTTP refused them. The upgrade now resolves the caller's
+  role like the HTTP middleware, an agent the caller may not see answers 404,
+  sending needs at least a kid and a granted agent, switching the model needs
+  an admin, a named conversation must be one the caller may write in, and the
+  agent list pushed over the socket shows only the caller's agents.
+
 
 - Spending limits hold in the chat. The agent's cost quota was checked only
   on the non-streaming path, which background ticks use; the dashboard chat,
