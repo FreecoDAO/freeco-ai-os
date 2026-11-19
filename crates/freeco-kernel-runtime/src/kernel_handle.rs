@@ -208,6 +208,32 @@ pub trait KernelHandle: Send + Sync {
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
 
+    /// One team's board (team by id or name), optionally one column
+    /// (`todo`, `doing`, `review`, `done`) or status. With `agent_id` set,
+    /// only an agent on the team may read it.
+    async fn team_task_list(
+        &self,
+        agent_id: Option<&str>,
+        team: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let _ = (agent_id, team, status);
+        Err("Team task boards are not available".to_string())
+    }
+
+    /// Hand a task in for review instead of completing it: it moves to the
+    /// board's `review` column with `result`. `by` must hold or have posted
+    /// the task, as for [`Self::task_complete_by`].
+    async fn task_hand_in(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (task_id, result, by);
+        Err("Team task boards are not available".to_string())
+    }
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,

@@ -186,6 +186,12 @@ pub fn required_role_for_request(method: &axum::http::Method, path: &str) -> Opt
     if *method == Method::GET || *method == Method::HEAD || *method == Method::OPTIONS {
         return None;
     }
+    if is_team_work(method, path) {
+        // The handler decides from the caller's role on that team
+        // (`team_access`); here it only has to be an account that may change
+        // anything at all.
+        return Some(UserRole::User);
+    }
     let action = if path == "/api/users" || path.starts_with("/api/users/") {
         Action::ManageUsers
     } else if path == "/api/config" || path.starts_with("/api/config/") {
@@ -196,6 +202,27 @@ pub fn required_role_for_request(method: &axum::http::Method, path: &str) -> Opt
         Action::ChangeSystem
     };
     Some(action.required_role())
+}
+
+/// Whether a change is work on one team that a team lead or member may do:
+/// adding or removing a member, and posting, moving, assigning or deleting a
+/// card on the team's board. Everything else under a team (creating,
+/// renaming, running it, setting a member's role) stays with admins.
+fn is_team_work(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let Some(rest) = path.strip_prefix("/api/org/teams/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.iter().any(|p| p.is_empty()) {
+        return false;
+    }
+    match parts.as_slice() {
+        [_, "members"] | [_, "tasks"] => *method == Method::POST,
+        [_, "members", _] => *method == Method::DELETE,
+        [_, "tasks", _] => *method == Method::PUT || *method == Method::DELETE,
+        _ => false,
+    }
 }
 
 /// Whether a change is part of chatting with an agent.
@@ -815,6 +842,30 @@ mod tests {
             Some(UserRole::Admin)
         );
         assert_eq!(r(Method::POST, "/api/usersx"), Some(UserRole::Admin));
+    }
+
+    /// Team work needs only a user account at the door; the handler checks
+    /// the caller's role on the team. The rest of a team stays admin-only.
+    #[test]
+    fn team_work_is_left_to_the_team_role() {
+        let r = |m: Method, p: &str| required_role_for_request(&m, p);
+        let user = Some(UserRole::User);
+        let admin = Some(UserRole::Admin);
+        assert_eq!(r(Method::POST, "/api/org/teams/t1/members"), user);
+        assert_eq!(r(Method::DELETE, "/api/org/teams/t1/members/a1"), user);
+        assert_eq!(r(Method::POST, "/api/org/teams/t1/tasks"), user);
+        assert_eq!(r(Method::PUT, "/api/org/teams/t1/tasks/k1"), user);
+        assert_eq!(r(Method::DELETE, "/api/org/teams/t1/tasks/k1"), user);
+        // Not team work.
+        assert_eq!(r(Method::PUT, "/api/org/teams/t1/members"), admin);
+        assert_eq!(r(Method::PUT, "/api/org/teams/t1/members/a1"), admin);
+        assert_eq!(r(Method::POST, "/api/org/teams"), admin);
+        assert_eq!(r(Method::PUT, "/api/org/teams/t1"), admin);
+        assert_eq!(r(Method::POST, "/api/org/teams/t1/run"), admin);
+        assert_eq!(r(Method::POST, "/api/org/teams//tasks"), admin);
+        assert_eq!(r(Method::POST, "/api/org/teams/t1/tasks/k1/x"), admin);
+        assert_eq!(r(Method::POST, "/api/org/companies"), admin);
+        assert_eq!(r(Method::GET, "/api/org/teams/t1/tasks"), None);
     }
 
     #[tokio::test]

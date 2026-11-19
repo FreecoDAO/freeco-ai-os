@@ -728,6 +728,43 @@ on the integration branch).
   agent chats, peer display names, team grants, live HTTP history for
   unlabelled conversations).
 
+### Companies, team members and team boards
+
+Written with its tests; not compiled or run yet (owner rule: one check round
+on the integration branch). Store tests in `freeco-memory` (`org/people.rs`,
+`board.rs`, the task-board tests in `substrate.rs`), the permission matrix in
+`freeco_api::team_access`, and HTTP tests over real sessions in
+`crates/freeco-api/tests/teams_api_test.rs`.
+
+- 🟨 **Companies own teams.** A team belongs to a company directly, or through
+  its project. `GET/POST /api/org/companies` (as before, now scoped per
+  caller), `GET/PUT/DELETE /api/org/companies/{id}`: rename, describe,
+  archive, delete. Deleting a company leaves its projects and teams in place,
+  in no company. Teams and companies are the existing `org` store rows; a
+  *tenant* stays the separate isolation boundary, not a second kind of
+  company.
+- 🟨 **People sit on teams with a team role** (`lead`, `member`, `viewer`),
+  next to the agents. `GET/POST /api/org/teams/{id}/members` (an agent by
+  `agent_id`, a person by `user`), `DELETE .../members/{member}` with an agent
+  id or `user:<name>`. Only existing `[[users]]` accounts can be added.
+- 🟨 **One permission rule for teams** (`freeco_api::team_access`): owner and
+  admin manage everything; a team lead manages their team, a member works on
+  its board, a viewer reads it; someone on no team sees no team, and a
+  `viewer`/`kid` account only ever reads. `teams_visible_to` and
+  `team_agents_visible_to` are public for the chat-chamber work to build
+  `visible_agents` on. The middleware lets team work through with a `user`
+  account and the handler checks the team role.
+- 🟨 **The board is a kanban: todo / doing / review / done.** Each card keeps
+  its `column` and `updated_at`; `PUT /api/org/teams/{id}/tasks/{task_id}`
+  moves, assigns (an agent or a person on the team) or edits a card, `DELETE`
+  removes it (a lead's right), refused while an unfinished card waits on it.
+  Agents read their own team's board with `task_list { team }` and hand work
+  in for review with `task_complete { review: true }` instead of closing it.
+- 🟨 **The Teams page** has a company switcher (admins add, rename and delete
+  companies and move teams between them), a Members tab (agents and people),
+  and a Board tab with the four columns, where cards are dragged or moved and
+  assigned. Controls follow the `access` the server reports for the caller.
+
 ### Spend limits and secrets.env -- from the 2026-09-14 audit
 
 Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
@@ -1223,7 +1260,9 @@ The rest, in priority order, with nothing here described as done:
 - 📋 Automated backup and recovery workflows.
 - 📋 Company chart and live multi-agent view.
 - 📋 Global assistant widget and voice experience.
-- 📋 Multi-user and multi-company tenancy.
+- 🟨 Multi-user and multi-company tenancy: teams, companies, members and
+  boards exist and are permission-checked per caller (see Unreleased); cloud
+  tenancy and sign-in provisioning are still open.
 - 📋 Expanded language support, CRM integrations, Deskmate, and the FreEco.ai
   OS distribution.
 

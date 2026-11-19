@@ -1245,3 +1245,54 @@ async fn a_guest_stays_a_guest_through_other_agents() {
         "pong heard from ping in the guest's conversation"
     );
 }
+
+/// An agent reads its own team's board through the kernel, by column, and
+/// hands work in for review; an agent on another team cannot read it.
+#[tokio::test]
+async fn an_agent_reads_only_its_own_team_board_and_hands_in_for_review() {
+    use freeco_kernel_runtime::kernel_handle::KernelHandle;
+    let kernel = boot("team-board");
+    let org = kernel.memory.org();
+    let web = org.create_team("Web", None).unwrap();
+    let ops = org.create_team("Ops", None).unwrap();
+    org.add_team_member(&web.id, "agent-web", None).unwrap();
+    org.add_team_member(&ops.id, "agent-ops", None).unwrap();
+    let task = kernel
+        .memory
+        .task_post_on_board("Ship", "", None, Some("user:lena"), Some(&web.id), &[])
+        .await
+        .unwrap();
+
+    let board = kernel
+        .team_task_list(Some("agent-web"), "web", Some("todo"))
+        .await
+        .unwrap();
+    assert_eq!(board.len(), 1);
+    assert_eq!(board[0]["column"], "todo");
+    assert!(kernel
+        .team_task_list(Some("agent-ops"), "Web", None)
+        .await
+        .is_err());
+    assert!(kernel
+        .team_task_list(Some("agent-web"), "Web", Some("sideways"))
+        .await
+        .is_err());
+    assert!(kernel
+        .team_task_list(Some("agent-web"), "No such team", None)
+        .await
+        .is_err());
+
+    let claimed = kernel.memory.task_claim("agent-web").await.unwrap().unwrap();
+    assert_eq!(claimed["id"], task.as_str());
+    kernel
+        .task_hand_in(&task, "draft ready", Some("agent-web"))
+        .await
+        .unwrap();
+    let review = kernel
+        .team_task_list(Some("agent-web"), &web.id, Some("review"))
+        .await
+        .unwrap();
+    assert_eq!(review.len(), 1);
+    assert_eq!(review[0]["result"], "draft ready");
+    kernel.shutdown();
+}

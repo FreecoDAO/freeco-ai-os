@@ -1174,10 +1174,32 @@
           <div class="teams-stat"><span class="teams-stat-num" x-text="liveHandoffs()"></span><span class="teams-stat-label">hand-offs running</span></div>
         </div>
 
+        <!-- Company switcher: which company's teams the floor shows. -->
+        <div class="teams-companies" role="group" aria-label="Company">
+          <label class="text-xs text-dim" for="teams-company">Company</label>
+          <select id="teams-company" class="form-input teams-company-select" x-model="companyId" @change="onCompanyChange()">
+            <option value="">All companies</option>
+            <template x-for="c in companies" :key="c.id">
+              <option :value="c.id" x-text="c.name"></option>
+            </template>
+            <option value="none">No company</option>
+          </select>
+          <template x-if="manageAll">
+            <span class="teams-inline-form">
+              <input class="form-input" x-model="newCompany" placeholder="New company name..." aria-label="New company name"
+                     @keydown.enter="createCompany()">
+              <button class="btn btn-ghost btn-sm" @click="createCompany()" :disabled="!newCompany.trim()">Add company</button>
+              <button class="btn btn-ghost btn-sm" x-show="currentCompany()" @click="renameCompany()">Rename</button>
+              <button class="btn btn-ghost btn-sm" x-show="currentCompany()" @click="deleteCompany()">Delete</button>
+            </span>
+          </template>
+        </div>
+
         <div x-show="loading" class="text-dim">Loading...</div>
 
         <div x-show="!loading && !teams.length && !loadError" class="teams-empty">
-          No teams yet. Create one below, then put agents on it.
+          <span x-show="manageAll">No teams yet. Create one below, then put agents and people on it.</span>
+          <span x-show="!manageAll">You are not on a team yet. An admin or a team lead can add you.</span>
         </div>
 
         <!-- The floor: rooms reflow like any HTML; the lines are drawn over
@@ -1188,7 +1210,7 @@
           <svg class="teams-lanes" x-ref="lanesSvg" :width="floorW" :height="floorH" :viewBox="'0 0 ' + floorW + ' ' + floorH"
                aria-hidden="true" focusable="false"></svg>
 
-          <template x-for="t in teams" :key="t.id">
+          <template x-for="t in visibleTeams()" :key="t.id">
             <button type="button" class="teams-room" :class="{ 'teams-room-selected': t.id === selectedId }"
                     @click="select(t)" :aria-pressed="t.id === selectedId ? 'true' : 'false'"
                     :aria-label="'Team ' + t.name + ', ' + t.members.length + ' member' + (t.members.length === 1 ? '' : 's')">
@@ -1207,10 +1229,13 @@
                 </template>
                 <span class="text-xs text-dim" x-show="!t.members.length">No one on this team yet.</span>
               </span>
+              <span class="teams-room-people" x-show="t.people && t.people.length"
+                    x-text="t.people.length + ' ' + (t.people.length === 1 ? 'person' : 'people')"></span>
               <span class="teams-room-counts">
                 <span x-text="t.tasks.ready + ' ready'"></span>
                 <span x-text="t.tasks.blocked + ' waiting'"></span>
                 <span x-text="t.tasks.in_progress + ' in progress'"></span>
+                <span x-text="(t.tasks.review || 0) + ' in review'"></span>
                 <span x-text="t.tasks.completed + ' done'"></span>
               </span>
             </button>
@@ -1230,42 +1255,64 @@
           </div>
         </div>
 
-        <div class="teams-new-team">
+        <div class="teams-new-team" x-show="manageAll">
           <input class="form-input" x-model="newTeam" placeholder="New team name..." aria-label="New team name"
                  @keydown.enter="createTeam()">
-          <button class="btn btn-ghost" @click="createTeam()" :disabled="!newTeam.trim()">Create team</button>
+          <button class="btn btn-ghost" @click="createTeam()" :disabled="!newTeam.trim()"
+                  x-text="currentCompany() ? 'Create team in ' + currentCompany().name : 'Create team'"></button>
         </div>
 
         <!-- The selected team: its people, its goal, its board. -->
         <template x-if="selected()">
-          <section class="teams-detail" :aria-label="selected().name + ' board'">
-            <h2 class="teams-detail-title" x-text="selected().name"></h2>
+          <section class="teams-detail" :aria-label="selected().name">
+            <div class="teams-detail-head">
+              <h2 class="teams-detail-title" x-text="selected().name"></h2>
+              <span class="teams-access" x-text="accessLabel(selected().access)"></span>
+              <template x-if="manageAll">
+                <select class="form-input teams-company-select" aria-label="Company of this team"
+                        x-model="selected().company_id" @change="moveTeam()">
+                  <option value="">No company</option>
+                  <template x-for="c in companies" :key="c.id">
+                    <option :value="c.id" x-text="c.name"></option>
+                  </template>
+                </select>
+              </template>
+            </div>
 
-            <div class="teams-detail-row">
+            <div class="teams-tabs" role="tablist" aria-label="Team views">
+              <button type="button" role="tab" class="teams-tab" :class="{ 'teams-tab-on': tab === 'board' }"
+                      :aria-selected="tab === 'board' ? 'true' : 'false'" @click="tab = 'board'">Board</button>
+              <button type="button" role="tab" class="teams-tab" :class="{ 'teams-tab-on': tab === 'members' }"
+                      :aria-selected="tab === 'members' ? 'true' : 'false'" @click="openMembers()">Members</button>
+            </div>
+
+            <!-- Members: agents and people, each with a role on the team. -->
+            <div x-show="tab === 'members'" role="tabpanel" class="teams-detail-row">
               <div class="card teams-card">
-                <h3 class="teams-card-title">Members</h3>
+                <h3 class="teams-card-title">Agents</h3>
                 <ul class="teams-members">
                   <template x-for="m in selected().members" :key="m.agent_id">
                     <li>
                       <span x-text="m.name"></span>
                       <span class="text-xs text-dim" x-show="m.role" x-text="'(' + m.role + ')'"></span>
-                      <button class="btn btn-ghost btn-sm" @click="removeMember(m)"
+                      <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="removeMember(m.agent_id, m.name)"
                               :aria-label="'Take ' + m.name + ' off the team'">Remove</button>
                     </li>
                   </template>
+                  <li class="text-xs text-dim" x-show="!selected().members.length">No agents on this team.</li>
                 </ul>
-                <div class="teams-inline-form">
+                <div class="teams-inline-form" x-show="canManage()">
                   <select class="form-input" x-model="newMember.agent_id" aria-label="Agent to add">
                     <option value="">Add an agent...</option>
                     <template x-for="a in notOnTeam()" :key="a.id">
                       <option :value="a.id" x-text="a.name"></option>
                     </template>
                   </select>
-                  <input class="form-input teams-role" x-model="newMember.role" placeholder="Role, e.g. lead" aria-label="Role on the team">
+                  <input class="form-input teams-role" x-model="newMember.role" placeholder="Role, e.g. lead" aria-label="Agent's role on the team">
                   <button class="btn btn-sm" @click="addMember()" :disabled="!newMember.agent_id">Add</button>
                 </div>
-                <p class="text-xs text-dim">The member with the role <em>lead</em> splits a goal and hands the parts out.</p>
-                <div class="teams-inline-form" x-show="selected().members.length">
+                <p class="text-xs text-dim">The agent with the role <em>lead</em> splits a goal and hands the parts out.</p>
+                <div class="teams-inline-form" x-show="manageAll && selected().members.length">
                   <input class="form-input" x-model="goal" placeholder="Give the team a goal..." aria-label="Team goal"
                          @keydown.enter="runTeam()">
                   <button class="btn btn-sm" @click="runTeam()" :disabled="running || !goal.trim()">Run team</button>
@@ -1273,14 +1320,47 @@
               </div>
 
               <div class="card teams-card">
+                <h3 class="teams-card-title">People</h3>
+                <ul class="teams-members">
+                  <template x-for="p in (selected().people || [])" :key="p.id">
+                    <li>
+                      <span x-text="p.username"></span>
+                      <span class="teams-role-badge" :class="'teams-role-' + p.role" x-text="p.role"></span>
+                      <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="removeMember(p.id, p.username)"
+                              :aria-label="'Take ' + p.username + ' off the team'">Remove</button>
+                    </li>
+                  </template>
+                  <li class="text-xs text-dim" x-show="!(selected().people || []).length">No people on this team.</li>
+                </ul>
+                <div class="teams-inline-form" x-show="canManage()">
+                  <select class="form-input" x-model="newPerson.user" aria-label="Person to add">
+                    <option value="">Add a person...</option>
+                    <template x-for="name in accountsNotOnTeam()" :key="name">
+                      <option :value="name" x-text="name"></option>
+                    </template>
+                  </select>
+                  <select class="form-input teams-role" x-model="newPerson.role" aria-label="Their role on the team">
+                    <option value="member">member</option>
+                    <option value="lead">lead</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                  <button class="btn btn-sm" @click="addPerson()" :disabled="!newPerson.user">Add</button>
+                </div>
+                <p class="text-xs text-dim">A <em>lead</em> manages the team and its board, a <em>member</em> works on the board, a <em>viewer</em> reads it.</p>
+              </div>
+            </div>
+
+            <!-- Board: four columns; drag a card or use its menus. -->
+            <div x-show="tab === 'board'" role="tabpanel">
+              <div class="card teams-card teams-new-task" x-show="canWork()">
                 <h3 class="teams-card-title">New task</h3>
                 <input class="form-input" x-model="newTask.title" placeholder="What needs doing" aria-label="Task title">
                 <textarea class="form-input" rows="2" x-model="newTask.description" placeholder="Details (optional)" aria-label="Task details"></textarea>
                 <div class="teams-inline-form">
                   <select class="form-input" x-model="newTask.assigned_to" aria-label="Who does it">
                     <option value="">Anyone on the team</option>
-                    <template x-for="m in selected().members" :key="m.agent_id">
-                      <option :value="m.agent_id" x-text="m.name"></option>
+                    <template x-for="o in assigneeOptions()" :key="o.id">
+                      <option :value="o.id" x-text="o.label"></option>
                     </template>
                   </select>
                 </div>
@@ -1292,29 +1372,52 @@
                 </select>
                 <button class="btn" @click="postTask()" :disabled="posting || !newTask.title.trim()">Add to the board</button>
               </div>
-            </div>
 
-            <div class="teams-board">
-              <template x-for="col in [['ready','Ready'],['blocked','Waiting'],['in_progress','In progress'],['completed','Done']]" :key="col[0]">
-                <div class="teams-col" :class="'teams-col-' + col[0]">
-                  <h3 class="teams-col-title"><span x-text="col[1]"></span> <span class="teams-col-count" x-text="board(col[0]).length"></span></h3>
-                  <template x-for="task in board(col[0])" :key="task.id">
-                    <div class="teams-task">
-                      <div class="teams-task-title" x-text="task.title"></div>
-                      <div class="teams-task-meta">
-                        <span x-show="task.assigned_to" x-text="nameOf(task.assigned_to)"></span>
-                        <span x-show="!task.assigned_to">anyone</span>
-                        <span x-text="ago(task.completed_at || task.created_at)"></span>
+              <div class="teams-board">
+                <template x-for="col in columns" :key="col.id">
+                  <div class="teams-col" :class="{ ['teams-col-' + col.id]: true, 'teams-col-drop': dropCol === col.id }"
+                       @dragover.prevent="canWork() && (dropCol = col.id)" @dragleave="dropCol = ''"
+                       @drop.prevent="dropOn(col.id)">
+                    <h3 class="teams-col-title"><span x-text="col.label"></span> <span class="teams-col-count" x-text="board(col.id).length"></span></h3>
+                    <template x-for="task in board(col.id)" :key="task.id">
+                      <div class="teams-task" :draggable="canWork() ? 'true' : 'false'"
+                           @dragstart="dragId = task.id" @dragend="dragId = ''; dropCol = ''">
+                        <div class="teams-task-title" x-text="task.title"></div>
+                        <div class="teams-task-desc" x-show="task.description" x-text="task.description"></div>
+                        <div class="teams-task-meta">
+                          <span x-text="task.assigned_to ? nameOf(task.assigned_to) : 'anyone'"></span>
+                          <span x-text="ago(task.updated_at || task.completed_at || task.created_at)"></span>
+                        </div>
+                        <div class="teams-task-meta" x-show="task.created_by">
+                          <span x-text="'from ' + nameOf(task.created_by)"></span>
+                        </div>
+                        <div class="teams-task-wait" x-show="task.blocked">
+                          Waits for <span x-text="task.blocked_by.map(function (id) { return taskTitle(id); }).join(', ')"></span>
+                        </div>
+                        <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
+                        <div class="teams-task-actions" x-show="canWork()">
+                          <select class="form-input" :aria-label="'Move ' + task.title" x-model="task.column"
+                                  @change="moveTask(task, $event.target.value)">
+                            <template x-for="c in columns" :key="c.id">
+                              <option :value="c.id" x-text="c.label"></option>
+                            </template>
+                          </select>
+                          <select class="form-input" :aria-label="'Assign ' + task.title" x-model="task.assigned_to"
+                                  @change="assignTask(task, $event.target.value)">
+                            <option value="">Anyone</option>
+                            <template x-for="o in assigneeOptions()" :key="o.id">
+                              <option :value="o.id" x-text="o.label"></option>
+                            </template>
+                          </select>
+                          <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="deleteTask(task)"
+                                  :aria-label="'Delete ' + task.title">Delete</button>
+                        </div>
                       </div>
-                      <div class="teams-task-wait" x-show="task.blocked">
-                        Waits for <span x-text="task.blocked_by.map(function (id) { return taskTitle(id); }).join(', ')"></span>
-                      </div>
-                      <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
-                    </div>
-                  </template>
-                  <div class="text-xs text-dim" x-show="!board(col[0]).length">Nothing here.</div>
-                </div>
-              </template>
+                    </template>
+                    <div class="text-xs text-dim" x-show="!board(col.id).length">Nothing here.</div>
+                  </div>
+                </template>
+              </div>
             </div>
           </section>
         </template>

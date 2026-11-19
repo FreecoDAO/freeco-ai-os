@@ -10389,6 +10389,52 @@ impl KernelHandle for FreecoKernel {
             .map_err(|e| format!("Task list failed: {e}"))
     }
 
+    async fn team_task_list(
+        &self,
+        agent_id: Option<&str>,
+        team: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let org = self.memory.org();
+        let (team_id, name) = org
+            .find_team(team)
+            .map_err(|e| format!("Task list failed: {e}"))?
+            .ok_or_else(|| format!("No team called \"{team}\""))?;
+        if let Some(agent) = agent_id.map(str::trim).filter(|a| !a.is_empty()) {
+            let on_team = org
+                .teams_for_agent(agent)
+                .map_err(|e| format!("Task list failed: {e}"))?
+                .contains(&team_id);
+            if !on_team {
+                return Err(format!(
+                    "You are not on the team \"{name}\": only its members read its board"
+                ));
+            }
+        }
+        let status = match status.map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(s) => Some(freeco_memory::board::board_status(s).ok_or_else(|| {
+                format!("\"{s}\" is not a board column: use todo, doing, review or done")
+            })?),
+        };
+        self.memory
+            .task_board(status, Some(&team_id))
+            .await
+            .map_err(|e| format!("Task list failed: {e}"))
+    }
+
+    async fn task_hand_in(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .task_hand_in(task_id, result, by)
+            .await
+            .map_err(|e| format!("Hand-in failed: {e}"))
+    }
+
     async fn publish_event(
         &self,
         event_type: &str,

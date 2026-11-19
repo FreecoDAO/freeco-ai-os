@@ -577,6 +577,10 @@ pub fn suggest_project_name(session: &Session) -> Option<String> {
     crate::session::derive_session_label(&session.messages)
 }
 
+// Companies as owners of teams, and people (signed-in accounts) on teams.
+mod people;
+pub use people::{TeamPerson, TeamRole};
+
 #[cfg(test)]
 mod tests {
     use super::*;
