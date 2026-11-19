@@ -51,7 +51,6 @@ pub struct ConversationSummary {
     pub last_role: Option<Role>,
     /// The start of the last user or assistant message with text.
     pub last_text: Option<String>,
-    pub label: Option<String>,
 }
 
 /// Longest auto-generated label. Long enough to be recognisable in a list,
