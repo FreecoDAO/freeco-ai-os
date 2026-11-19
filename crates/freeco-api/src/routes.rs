@@ -1613,7 +1613,9 @@ pub async fn create_backup(
 /// was not, so a partial backup is never mistaken for a complete one.
 pub async fn backup_service_data(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let dir = state.kernel.config.home_dir.join("backups");
-    match crate::service_backup::export_service_data(&dir, 7).await {
+    match crate::service_backup::export_service_data(&dir, crate::service_backup::RETENTION_RUNS)
+        .await
+    {
         Ok(report) => {
             let status = if report.failed.is_empty() {
                 StatusCode::CREATED

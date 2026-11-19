@@ -1423,8 +1423,14 @@ fn start_backup_scheduler(
             }
             // The archive above covers ~/.freeco-ai only. Service data lives in
             // container volumes, which it never reached -- so it is saved here,
-            // on the same schedule and with the same retention.
-            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+            // on the same schedule. Its retention is lower: one run can be
+            // gigabytes, where an archive is megabytes.
+            match crate::service_backup::export_service_data(
+                &backups_dir,
+                crate::service_backup::RETENTION_RUNS,
+            )
+            .await
+            {
                 Ok(r) => info!(
                     directory = %r.directory,
                     saved = r.saved.len(),
