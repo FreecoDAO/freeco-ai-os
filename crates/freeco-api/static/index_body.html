@@ -1108,10 +1108,10 @@
               <span class="teams-access" x-text="accessLabel(selected().access)"></span>
               <template x-if="manageAll">
                 <select class="form-input teams-company-select" aria-label="Company of this team"
-                        :value="selected().company_id || ''" @change="moveTeam($event.target.value)">
+                        x-model="selected().company_id" @change="moveTeam($event.target.value)">
                   <option value="">No company</option>
                   <template x-for="c in companies" :key="c.id">
-                    <option :value="c.id" x-text="c.name" :selected="c.id === selected().company_id"></option>
+                    <option :value="c.id" x-text="c.name"></option>
                   </template>
                 </select>
               </template>
@@ -1234,15 +1234,17 @@
                         </div>
                         <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
                         <div class="teams-task-actions" x-show="canWork()">
-                          <select class="form-input" :aria-label="'Move ' + task.title" @change="moveTask(task, $event.target.value)">
+                          <select class="form-input" :aria-label="'Move ' + task.title" x-model="task.column"
+                                  @change="moveTask(task, $event.target.value)">
                             <template x-for="c in columns" :key="c.id">
-                              <option :value="c.id" x-text="c.label" :selected="c.id === task.column"></option>
+                              <option :value="c.id" x-text="c.label"></option>
                             </template>
                           </select>
-                          <select class="form-input" :aria-label="'Assign ' + task.title" @change="assignTask(task, $event.target.value)">
-                            <option value="" :selected="!task.assigned_to">Anyone</option>
+                          <select class="form-input" :aria-label="'Assign ' + task.title" x-model="task.assigned_to"
+                                  @change="assignTask(task, $event.target.value)">
+                            <option value="">Anyone</option>
                             <template x-for="o in assigneeOptions()" :key="o.id">
-                              <option :value="o.id" x-text="o.label" :selected="o.id === task.assigned_to"></option>
+                              <option :value="o.id" x-text="o.label"></option>
                             </template>
                           </select>
                           <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="deleteTask(task)"

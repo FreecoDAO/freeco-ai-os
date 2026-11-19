@@ -544,10 +544,11 @@ pub async fn post_team_task(
         .as_deref()
         .map(str::trim)
         .filter(|a| !a.is_empty());
+    let for_person = assigned.and_then(assignee_person).is_some();
     let created_by = poster(&caller);
-    let posted = match assigned.and_then(assignee_person) {
+    let posted = match for_person {
         // A person: checked here, then straight onto the board.
-        Some(_) => {
+        true => {
             let assignee = match team_assignee(&state, &team_id, assigned.unwrap_or_default()) {
                 Ok(a) => a,
                 Err(denied) => return denied,
@@ -566,7 +567,7 @@ pub async fn post_team_task(
                 .await
                 .map_err(|e| e.to_string())
         }
-        None => {
+        false => {
             state
                 .kernel
                 .team_task_post(

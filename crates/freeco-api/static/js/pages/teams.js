@@ -168,14 +168,15 @@ function teamsPage() {
       }
     },
 
-    async moveTeam(companyId) {
+    async moveTeam() {
       var t = this.selected();
       if (!t) return;
+      var companyId = t.company_id || '';
       try {
-        await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(t.id), { company_id: companyId || '' });
+        await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(t.id), { company_id: companyId });
         await this.load(true);
         // Keep the team in view when it left the company being shown.
-        if (this.companyId && !this.selected()) this.companyId = companyId || 'none';
+        if (!this.selected()) this.companyId = companyId || 'none';
       } catch (e) {
         FreecoToast.error('Could not move the team: ' + e.message);
       }

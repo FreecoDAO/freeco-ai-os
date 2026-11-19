@@ -42,6 +42,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Teams and companies. A company owns teams, directly or through a project:
+  companies can be read, renamed, archived and deleted, and teams can be
+  created into one and moved between them. People -- the signed-in `[[users]]`
+  accounts -- join a team next to its agents, with a team role of lead, member
+  or viewer. Owners and admins manage every team; a lead manages their team, a
+  member works on its board, a viewer reads it, and someone on no team sees no
+  team. The dashboard Teams page has a company switcher, a members tab and a
+  four-column board (to do, doing, review, done) where cards are dragged or
+  moved, assigned to an agent or a person on the team, and deleted. Agents
+  read their own team's board with `task_list { team }` and hand work in for
+  review with `task_complete { review: true }`.
+
+### Added
+
 - Skills install straight from GitHub. The Skills page has a GitHub tab:
   paste `owner/repo/skills` or a link, preview, tick the skills, install.
   Every install is pinned to the commit that was previewed, and every skill
