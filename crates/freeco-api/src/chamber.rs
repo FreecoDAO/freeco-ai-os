@@ -329,6 +329,34 @@ fn find_visible(kernel: &FreecoKernel, access: &Access, id: &str) -> Option<List
     }
 }
 
+/// Whether `access` may write in conversation `session_id`, for a chat that
+/// names the conversation it sends to (the WebSocket's `session_id`).
+///
+/// A conversation that no longer exists is fine: the kernel then uses the
+/// agent's current one, which chatting with the agent already covers. One in
+/// the trash is for admins only.
+pub(crate) fn can_write_in(kernel: &FreecoKernel, access: &Access, session_id: &str) -> bool {
+    let Ok(uuid) = uuid::Uuid::parse_str(session_id.trim()) else {
+        return false;
+    };
+    let id = uuid.to_string();
+    let listed_one = kernel
+        .memory
+        .list_conversation_summaries()
+        .ok()
+        .and_then(|all| all.into_iter().find(|s| s.session_id == id));
+    match listed_one {
+        Some(summary) => {
+            let l = listed(kernel, summary, &agent_names(kernel));
+            access.can_write_conversation(&l.as_ref())
+        }
+        None => match kernel.memory.get_session(SessionId(uuid)) {
+            Ok(None) => true,
+            _ => access.caller.role >= UserRole::Admin,
+        },
+    }
+}
+
 /// GET /api/chamber/conversations/{id}/messages — one conversation's
 /// readable messages (no system prompt, no tool traffic). Marks it read.
 pub async fn conversation_messages(

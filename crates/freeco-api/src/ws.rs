@@ -298,6 +298,98 @@ pub(crate) fn check_ws_auth(ctx: &WsAuthCtx<'_>) -> Result<(), axum::http::Statu
     Err(StatusCode::UNAUTHORIZED)
 }
 
+/// Who an upgrade that [`check_ws_auth`] let through is, as the HTTP auth
+/// middleware would say: an API-key holder or the local user (login off) is
+/// the owner; a session has its account's effective role.
+///
+/// The socket used to know only "authenticated", so a viewer could chat
+/// over it although HTTP refused them.
+pub(crate) fn ws_caller(
+    ctx: &WsAuthCtx<'_>,
+    admin_username: &str,
+    users: &[freeco_types::config::UserConfig],
+) -> Result<crate::middleware::Caller, axum::http::StatusCode> {
+    use crate::middleware::{AuthMethod, Caller};
+    check_ws_auth(ctx)?;
+    if !ctx.api_key.is_empty() && api_key_presented(ctx) {
+        return Ok(Caller::owner(AuthMethod::ApiKey));
+    }
+    if ctx.auth_enabled && !ctx.session_secret.is_empty() {
+        let claims = crate::session_auth::extract_session_cookie(ctx.headers)
+            .and_then(|t| crate::session_auth::verify_session_claims(&t, ctx.session_secret));
+        if let Some(claims) = claims {
+            let role = crate::session_auth::effective_role(&claims, admin_username, users);
+            return Ok(Caller {
+                username: Some(claims.username),
+                role,
+                method: AuthMethod::Session,
+            });
+        }
+    }
+    if ctx.api_key.is_empty() && !ctx.auth_enabled {
+        return Ok(Caller::owner(AuthMethod::Local));
+    }
+    Err(axum::http::StatusCode::UNAUTHORIZED)
+}
+
+/// Whether the upgrade carries the API key, as a Bearer header or `?token=`.
+fn api_key_presented(ctx: &WsAuthCtx<'_>) -> bool {
+    let ct_eq = |token: &str| -> bool {
+        use subtle::ConstantTimeEq;
+        token.len() == ctx.api_key.len()
+            && bool::from(token.as_bytes().ct_eq(ctx.api_key.as_bytes()))
+    };
+    let header = ctx
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(ct_eq);
+    header
+        || ctx
+            .uri
+            .query()
+            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
+            .map(crate::percent_decode)
+            .is_some_and(|token| ct_eq(&token))
+}
+
+/// What a socket's caller may send, by message type. A viewer reads only;
+/// chatting needs at least a kid and an agent [`crate::access`] lets them
+/// chat with; switching the agent's model is a change to it, which needs an
+/// admin as over HTTP. Pings and unknown types are always let through (an
+/// unknown type is answered with an error anyway).
+pub(crate) fn ws_permission(
+    access: &crate::access::Access,
+    agent_id: &str,
+    agent_name: &str,
+    msg_type: &str,
+    command: &str,
+    args: &str,
+) -> Result<(), String> {
+    if !matches!(msg_type, "message" | "command") {
+        return Ok(());
+    }
+    if !access.can_chat_with_agent(agent_id, agent_name) {
+        return Err(format!(
+            "Your role ({}) can read this chat but not send to it",
+            access.caller.role
+        ));
+    }
+    if msg_type == "command" {
+        let canonical = commands::resolve(command)
+            .map(|def| def.name)
+            .unwrap_or(command);
+        if canonical == "model"
+            && !args.trim().is_empty()
+            && access.caller.role < freeco_types::auth::UserRole::Admin
+        {
+            return Err("Switching the model needs the admin role".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// GET /api/agents/:id/ws — Upgrade to WebSocket for real-time chat.
 ///
 /// SECURITY: Authenticates via Bearer token in Authorization header,
@@ -334,13 +426,20 @@ pub async fn agent_ws(
         uri: &uri,
     };
 
-    if let Err(status) = check_ws_auth(&auth_ctx) {
-        warn!(
-            ip = %addr.ip(),
-            "WebSocket upgrade rejected: no valid Bearer token, ?token=, or freeco_session cookie"
-        );
-        return status.into_response();
-    }
+    let caller = match ws_caller(
+        &auth_ctx,
+        &state.kernel.config.auth.username,
+        &state.kernel.config.users,
+    ) {
+        Ok(caller) => caller,
+        Err(status) => {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: no valid Bearer token, ?token=, or freeco_session cookie"
+            );
+            return status.into_response();
+        }
+    };
 
     // SECURITY: Enforce per-IP WebSocket connection limit
     let ip = addr.ip();
@@ -385,8 +484,20 @@ pub async fn agent_ws(
         }
     }
 
+    // An agent the caller may not see does not exist for them.
+    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    let agent_name = state
+        .kernel
+        .registry
+        .get(agent_id)
+        .map(|e| e.name)
+        .unwrap_or_default();
+    if !access.can_see_agent(&agent_id.to_string(), &agent_name) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard, access))
         .into_response()
 }
 
@@ -404,6 +515,7 @@ async fn handle_agent_ws(
     agent_id: AgentId,
     id_str: String,
     _guard: WsConnectionGuard,
+    access: crate::access::Access,
 ) {
     info!(agent_id = %id_str, "WebSocket connected");
 
@@ -429,15 +541,15 @@ async fn handle_agent_ws(
     // Spawn background task: periodic agent list updates with change detection
     let sender_clone = Arc::clone(&sender);
     let state_clone = Arc::clone(&state);
+    let access_clone = access.clone();
     let update_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_hash: u64 = 0;
         loop {
             interval.tick().await;
-            let agents: Vec<serde_json::Value> = state_clone
-                .kernel
-                .registry
-                .list()
+            // Only the agents this caller may see.
+            let agents: Vec<serde_json::Value> = access_clone
+                .visible_agents(state_clone.kernel.registry.list())
                 .into_iter()
                 .map(|e| {
                     serde_json::json!({
@@ -550,7 +662,7 @@ async fn handle_agent_ws(
                 }
                 msg_times.push(now);
 
-                handle_text_message(&sender, &state, agent_id, &text, &verbose).await;
+                handle_text_message(&sender, &state, agent_id, &text, &verbose, &access).await;
             }
             Message::Close(_) => {
                 info!(agent_id = %id_str, "WebSocket closed by client");
@@ -582,6 +694,7 @@ async fn handle_text_message(
     agent_id: AgentId,
     text: &str,
     verbose: &Arc<AtomicU8>,
+    access: &crate::access::Access,
 ) {
     // Parse the message
     let parsed: serde_json::Value = match serde_json::from_str(text) {
@@ -593,6 +706,30 @@ async fn handle_text_message(
     };
 
     let msg_type = parsed["type"].as_str().unwrap_or("message");
+
+    // The role and access.rs decide what this caller may send, checked on
+    // every message rather than only at the upgrade.
+    let agent_name = state
+        .kernel
+        .registry
+        .get(agent_id)
+        .map(|e| e.name)
+        .unwrap_or_default();
+    if let Err(denied) = ws_permission(
+        access,
+        &agent_id.to_string(),
+        &agent_name,
+        msg_type,
+        parsed["command"].as_str().unwrap_or(""),
+        parsed["args"].as_str().unwrap_or(""),
+    ) {
+        let _ = send_json(
+            sender,
+            &serde_json::json!({ "type": "error", "content": denied }),
+        )
+        .await;
+        return;
+    }
 
     match msg_type {
         "message" => {
@@ -729,6 +866,22 @@ async fn handle_text_message(
                     }
                 },
             };
+            // A named conversation must be one this caller may write in: an
+            // agent granted to them can hold conversations they may not
+            // see, such as a guest's WhatsApp.
+            if let Some(session_id) = pinned_session.as_ref() {
+                if !crate::chamber::can_write_in(&state.kernel, access, &session_id.0.to_string()) {
+                    let _ = send_json(
+                        sender,
+                        &serde_json::json!({
+                            "type": "error",
+                            "content": "Invalid session_id",
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+            }
             let started = match pinned_session {
                 Some(session_id) => state.kernel.send_message_streaming_in_session(
                     agent_id,
@@ -2085,5 +2238,124 @@ mod tests {
             check_ws_auth(&ctx).is_ok(),
             "loopback dev path must work when dashboard auth is disabled"
         );
+    }
+
+    // ── Roles over the socket ─────────────────────────────────────────────
+
+    fn viewer_role_users() -> Vec<freeco_types::config::UserConfig> {
+        let account = |name: &str, role: &str| freeco_types::config::UserConfig {
+            name: name.to_string(),
+            role: role.to_string(),
+            agents: vec!["assistant".to_string()],
+            ..Default::default()
+        };
+        vec![
+            account("val", "viewer"),
+            account("kim", "kid"),
+            account("uma", "user"),
+        ]
+    }
+
+    fn session_ctx_caller(
+        user: &str,
+        role: freeco_types::auth::UserRole,
+    ) -> crate::middleware::Caller {
+        let secret = "shared-secret";
+        let token = crate::session_auth::create_session_token(user, role, secret, 1);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("cookie", format!("freeco_session={token}").parse().unwrap());
+        let uri = empty_uri();
+        let ctx = WsAuthCtx {
+            api_key: "",
+            auth_enabled: true,
+            session_secret: secret,
+            is_loopback: false,
+            allow_no_auth: false,
+            headers: &headers,
+            uri: &uri,
+        };
+        ws_caller(&ctx, "admin", &viewer_role_users()).expect("a valid session")
+    }
+
+    #[test]
+    fn the_socket_knows_the_sessions_role() {
+        use freeco_types::auth::UserRole;
+        let val = session_ctx_caller("val", UserRole::Viewer);
+        assert_eq!(val.role, UserRole::Viewer);
+        assert_eq!(val.username.as_deref(), Some("val"));
+        // The cookie cannot claim more than the account has now.
+        let kim = session_ctx_caller("kim", UserRole::Owner);
+        assert_eq!(kim.role, UserRole::Kid);
+    }
+
+    #[test]
+    fn api_key_and_local_callers_are_the_owner() {
+        use crate::middleware::AuthMethod;
+        use freeco_types::auth::UserRole;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        let uri = empty_uri();
+        let ctx = WsAuthCtx {
+            api_key: "secret",
+            auth_enabled: true,
+            session_secret: "s",
+            is_loopback: false,
+            allow_no_auth: false,
+            headers: &headers,
+            uri: &uri,
+        };
+        let c = ws_caller(&ctx, "admin", &[]).unwrap();
+        assert_eq!((c.role, c.method), (UserRole::Owner, AuthMethod::ApiKey));
+
+        let none = axum::http::HeaderMap::new();
+        let local = WsAuthCtx {
+            api_key: "",
+            auth_enabled: false,
+            session_secret: "s",
+            is_loopback: true,
+            allow_no_auth: false,
+            headers: &none,
+            uri: &uri,
+        };
+        let c = ws_caller(&local, "admin", &[]).unwrap();
+        assert_eq!((c.role, c.method), (UserRole::Owner, AuthMethod::Local));
+
+        let wrong = WsAuthCtx {
+            api_key: "secret",
+            auth_enabled: false,
+            session_secret: "s",
+            is_loopback: true,
+            allow_no_auth: false,
+            headers: &none,
+            uri: &uri,
+        };
+        assert!(ws_caller(&wrong, "admin", &[]).is_err());
+    }
+
+    #[test]
+    fn a_viewer_cannot_send_over_the_socket() {
+        use freeco_types::auth::UserRole;
+        let users = viewer_role_users();
+        let id = "8f0c2a5e-0000-4000-8000-000000000001";
+        let access = |user: &str, role| {
+            crate::access::Access::new(session_ctx_caller(user, role), None, &users)
+        };
+        let val = access("val", UserRole::Viewer);
+        assert!(ws_permission(&val, id, "assistant", "message", "", "").is_err());
+        assert!(ws_permission(&val, id, "assistant", "command", "new", "").is_err());
+        assert!(ws_permission(&val, id, "assistant", "ping", "", "").is_ok());
+
+        let kim = access("kim", UserRole::Kid);
+        assert!(ws_permission(&kim, id, "assistant", "message", "", "").is_ok());
+        assert!(ws_permission(&kim, id, "assistant", "command", "model", "").is_ok());
+        assert!(
+            ws_permission(&kim, id, "assistant", "command", "model", "gpt-4o").is_err(),
+            "switching the model is a change"
+        );
+        // An agent not granted to them.
+        assert!(ws_permission(&kim, "other-id", "coder", "message", "", "").is_err());
+
+        let uma = access("uma", UserRole::User);
+        assert!(ws_permission(&uma, id, "assistant", "message", "", "").is_ok());
     }
 }
