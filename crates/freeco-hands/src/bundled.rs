@@ -581,4 +581,47 @@ mod tests {
             }
         }
     }
+
+    /// The accounting hand reads the books through `accounting_api` (the
+    /// prompt says so), and its app container gets the database settings the
+    /// image's setup script and the web wizard actually read.
+    #[test]
+    fn accounting_hand_is_wired_to_its_tool_and_database() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "accounting")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert!(def.tools.iter().any(|t| t == "accounting_api"));
+        assert!(def.agent.system_prompt.contains("accounting_api"));
+        assert!(!def.tools.iter().any(|t| t == "shell_exec"));
+        let c = def.container.as_ref().expect("accounting is a service hand");
+        let app = c.services.iter().find(|s| s.name == "app").unwrap();
+        assert_eq!(app.env.get("DB_HOST").map(String::as_str), Some("db"));
+        assert_eq!(app.env.get("DB_NAME").map(String::as_str), Some("akaunting"));
+        assert_eq!(app.env.get("DB_DATABASE").map(String::as_str), Some("akaunting"));
+        assert_eq!(app.ports, vec!["8080:80".to_string()]);
+    }
+
+    /// Board task 6: the voice api's DATABASE_URL names the asyncpg dialect,
+    /// and the voice prompt points dograh's speech at the local Speaches.
+    #[test]
+    fn voice_hand_uses_asyncpg_and_local_speaches() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "voice")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        let c = def.container.as_ref().unwrap();
+        let api = c.services.iter().find(|s| s.name == "api").unwrap();
+        assert!(api
+            .env
+            .get("DATABASE_URL")
+            .is_some_and(|u| u.starts_with("postgresql+asyncpg://")));
+        assert!(def.agent.system_prompt.contains("host.containers.internal:8010/v1"));
+        assert!(def
+            .skill_content
+            .as_deref()
+            .is_some_and(|s| s.contains("host.containers.internal:8010/v1")));
+    }
 }

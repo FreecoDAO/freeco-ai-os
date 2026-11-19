@@ -135,7 +135,8 @@ fn action_for_tool(tool: &str) -> AuditAction {
         | "knowledge_add_entity"
         | "knowledge_add_relation"
         | "knowledge_query" => AuditAction::MemoryAccess,
-        "web_fetch" | "web_search" | "a2a_discover" | "a2a_send" | "crm_api" => {
+        "web_fetch" | "web_search" | "a2a_discover" | "a2a_send" | "crm_api"
+        | "accounting_api" => {
             AuditAction::NetworkAccess
         }
         t if t.starts_with("browser_") => AuditAction::NetworkAccess,

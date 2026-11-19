@@ -131,8 +131,9 @@ pub const SERVICE_CATALOG: &[ServiceProfile] = &[
         mcp_url: None,
         approx_download_gb: 1.5,
         manual_step: Some(
-            "Open http://localhost:8080 and finish the first-run wizard (company + admin user). \
-             Those credentials are what the accounting tools use.",
+            "Open http://localhost:8080 and finish the first-run wizard (company + admin user), \
+             then enter that login in Connect below. Agents get read-only access to the books \
+             through the accounting_api tool. Never paste the password into a chat.",
         ),
     },
 ];
@@ -283,8 +284,12 @@ pub async fn list_services(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "health_url": s.health_url,
             "running": running,
             // The CRM connects through a stored key, not an MCP entry.
-            "connected": configured.contains(s.id) || (s.id == "crm" && crate::crm::is_connected()),
-            "connect_with_key": s.id == "crm",
+            "connected": configured.contains(s.id)
+                || (s.id == "crm" && crate::crm::is_connected())
+                || (s.id == "accounting" && crate::crm::accounting_is_connected()),
+            "connect_with_key": s.id == "crm" || s.id == "accounting",
+            // Akaunting logs in with an e-mail and password, not an API key.
+            "connect_with_login": s.id == "accounting",
             "auto_connects": s.mcp_url.is_some(),
         }));
     }
@@ -657,6 +662,18 @@ mod tests {
             !compose.contains("\"3000:3000\""),
             "CRM must not publish 3000"
         );
+    }
+
+    /// The Services card, its Connect step and the read-only accounting_api
+    /// tool must all point at the same Akaunting.
+    #[test]
+    fn accounting_service_and_tool_agree() {
+        let acc = service_profile("accounting").expect("accounting in catalog");
+        assert_eq!(
+            acc.health_url,
+            freeco_kernel_runtime::accounting_tool::BASE_URL
+        );
+        assert!(acc.manual_step.unwrap_or("").contains("Connect"));
     }
 
     /// Every catalog entry must be materialisable: either a repo to clone or

@@ -5155,10 +5155,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span x-text="s.auto_connects ? 'connects automatically' : 'needs one manual step'"></span>
                       </div>
                       <div class="text-xs" x-show="s.manual_step" style="margin-top:4px;color:var(--text-secondary)" x-text="s.manual_step"></div>
-                      <!-- Key-connected services (the CRM): the key goes to the vault, checked first. -->
+                      <!-- Key-connected services (the CRM; Akaunting with a login): goes to the vault, checked first. -->
                       <div class="x-show-flex" x-show="s.connect_with_key && s.running" style="margin-top:8px;gap:6px;flex-wrap:wrap;align-items:center">
+                        <input type="email" class="form-input" autocomplete="off" style="flex:1;min-width:180px;max-width:260px"
+                               x-show="s.connect_with_login" placeholder="Akaunting login e-mail"
+                               x-model="svcEmails[s.id]">
                         <input type="password" class="form-input" autocomplete="off" style="flex:1;min-width:200px;max-width:360px"
-                               :placeholder="s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat'"
+                               :placeholder="s.connect_with_login
+                                 ? (s.connected ? 'Connected. Enter the login again to replace it' : 'Akaunting password, here, not in a chat')
+                                 : (s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat')"
                                x-model="svcKeys[s.id]" @keydown.enter="connectService(s.id)">
                         <button class="btn btn-primary btn-sm" @click="connectService(s.id)"
                                 :disabled="svcConnecting === s.id || !(svcKeys[s.id] || '').trim()"

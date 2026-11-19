@@ -137,14 +137,24 @@ function settingsPage() {
     // Keys typed into the Connect field, per service. Cleared once stored, so
     // the page never keeps a key around after it has gone to the vault.
     svcKeys: {},
+    // Login e-mail for services that connect with a login (Akaunting).
+    svcEmails: {},
     svcConnecting: '',
 
     async connectService(id) {
       var key = (this.svcKeys[id] || '').trim();
       if (!key || this.svcConnecting) return;
+      var payload = { key: key };
+      if (id === 'accounting') {
+        var email = (this.svcEmails[id] || '').trim();
+        if (!email) { FreecoToast.error('Enter the Akaunting login e-mail too.'); return; }
+        payload.email = email;
+        // A password is sent as typed; only an API key is trimmed.
+        payload.key = this.svcKeys[id] || '';
+      }
       this.svcConnecting = id;
       try {
-        var res = await FreecoAPI.post('/api/services/' + encodeURIComponent(id) + '/connect', { key: key });
+        var res = await FreecoAPI.post('/api/services/' + encodeURIComponent(id) + '/connect', payload);
         this.svcKeys[id] = '';
         FreecoToast.success(res.message || 'Connected.');
         await this.loadServices();
