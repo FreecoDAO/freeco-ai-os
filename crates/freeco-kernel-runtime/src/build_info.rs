@@ -121,7 +121,7 @@ mod tests {
         let a = uptime_seconds();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let b = uptime_seconds();
-        assert!(b >= a + 1, "uptime did not advance: {a} -> {b}");
+        assert!(b > a, "uptime did not advance: {a} -> {b}");
         // mark_start is idempotent.
         mark_start();
         assert!(uptime_seconds() >= b);
