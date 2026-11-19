@@ -1651,6 +1651,11 @@ pub struct AuthConfig {
     /// Argon2id password hash (PHC string format).
     /// Generate with: freeco auth hash-password
     pub password_hash: String,
+    /// Secret that signs dashboard session cookies. Optional: when empty the
+    /// signing secret is derived (the API key, else the password hash; see
+    /// `freeco_api::session_auth::session_secret`). Setting or changing it
+    /// invalidates every existing session.
+    pub session_secret: String,
     /// Session token lifetime in hours (default: 168 = 7 days).
     pub session_ttl_hours: u64,
 }
@@ -1661,6 +1666,7 @@ impl Default for AuthConfig {
             enabled: false,
             username: "admin".to_string(),
             password_hash: String::new(),
+            session_secret: String::new(),
             session_ttl_hours: 168,
         }
     }

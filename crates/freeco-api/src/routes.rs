@@ -5277,6 +5277,22 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
 }
 
+/// The signed-in login on this request, verified with the same secret that
+/// signed it ([`crate::session_auth::session_secret`]).
+fn caller_login(
+    config: &freeco_types::config::KernelConfig,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    let cookie = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    let token = cookie.split(';').find_map(|c| {
+        let c = c.trim();
+        c.strip_prefix("freeco_session=")
+            .or_else(|| c.strip_prefix("session="))
+    })?;
+    let secret = crate::session_auth::session_secret(config);
+    crate::session_auth::verify_session_token(token, &secret)
+}
+
 /// The tenant a request belongs to, from its session cookie.
 ///
 /// Returns `None` when nobody is signed in, which on a local install is the
@@ -5287,14 +5303,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
 /// something. Recording an owner and never reading it leaves the isolation in
 /// the database and absent from every answer the API gives.
 fn caller_tenant(state: &AppState, headers: &axum::http::HeaderMap) -> Option<String> {
-    let cookie = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    let token = cookie.split(';').find_map(|c| {
-        let c = c.trim();
-        c.strip_prefix("freeco_session=")
-            .or_else(|| c.strip_prefix("session="))
-    })?;
-    let secret = &state.kernel.config.auth.password_hash;
-    let login = crate::session_auth::verify_session_token(token, secret)?;
+    let login = caller_login(&state.kernel.config, headers)?;
     state
         .kernel
         .memory
@@ -14966,44 +14975,26 @@ pub async fn comms_task(
 
 // ── Dashboard Authentication (username/password sessions) ──
 
-/// POST /api/auth/login — Authenticate with username/password, returns session token.
-/// Pure role resolution (unit-testable): map an authenticated dashboard
-/// username to its RBAC role string.
-///
-/// The legacy single admin account (`admin_username`) is always the **owner**.
-/// Any other name is looked up in `users`; an enabled match uses its configured
-/// role, everything else falls back to the least-privileged `viewer` so an
-/// unknown or disabled session can never inherit power by default.
-fn role_for(
-    username: &str,
-    admin_username: &str,
-    users: &[freeco_types::config::UserConfig],
-) -> &'static str {
-    if username == admin_username {
-        return "owner";
-    }
-    match users.iter().find(|u| u.enabled && u.name == username) {
-        Some(u) => match freeco_kernel::auth::UserRole::from_str_role(&u.role) {
-            freeco_kernel::auth::UserRole::Owner => "owner",
-            freeco_kernel::auth::UserRole::Admin => "admin",
-            freeco_kernel::auth::UserRole::User => "user",
-            freeco_kernel::auth::UserRole::Kid => "kid",
-            freeco_kernel::auth::UserRole::Viewer => "viewer",
-        },
-        None => "viewer",
-    }
-}
-
-/// Resolve the RBAC role for an authenticated dashboard username against the
-/// running kernel config.
-fn resolve_user_role(state: &AppState, username: &str) -> &'static str {
-    role_for(
+/// Resolve the role for an authenticated dashboard username against the
+/// running kernel config (see [`crate::session_auth::role_for`]).
+fn resolve_user_role(state: &AppState, username: &str) -> freeco_types::auth::UserRole {
+    crate::session_auth::role_for(
         username,
         &state.kernel.config.auth.username,
         &state.kernel.config.users,
     )
 }
 
+/// The verified session on this request, if any, with the one session secret.
+fn session_claims(
+    config: &freeco_types::config::KernelConfig,
+    headers: &axum::http::HeaderMap,
+) -> Option<crate::session_auth::SessionClaims> {
+    let token = crate::session_auth::extract_session_cookie(headers)?;
+    crate::session_auth::verify_session_claims(&token, &crate::session_auth::session_secret(config))
+}
+
+/// POST /api/auth/login — Authenticate with username/password, returns session token.
 pub async fn auth_login(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -15063,16 +15054,14 @@ pub async fn auth_login(
             .unwrap();
     }
 
-    // Derive the session secret the same way as server.rs
-    let api_key = state.kernel.config.api_key.trim().to_string();
-    let secret = if !api_key.is_empty() {
-        api_key
-    } else {
-        auth_cfg.password_hash.clone()
-    };
-
-    let token =
-        crate::session_auth::create_session_token(username, &secret, auth_cfg.session_ttl_hours);
+    let secret = crate::session_auth::session_secret(&state.kernel.config);
+    let role = resolve_user_role(&state, username);
+    let token = crate::session_auth::create_session_token(
+        username,
+        role,
+        &secret,
+        auth_cfg.session_ttl_hours,
+    );
     let ttl_secs = auth_cfg.session_ttl_hours * 3600;
     let cookie =
         format!("freeco_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl_secs}");
@@ -15093,7 +15082,7 @@ pub async fn auth_login(
                 "status": "ok",
                 "token": token,
                 "username": username,
-                "role": resolve_user_role(&state, username),
+                "role": role,
             })
             .to_string(),
         ))
@@ -15186,16 +15175,8 @@ pub async fn auth_set_password(
             .get("current_password")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let secret = {
-            let api_key = state.kernel.config.api_key.trim();
-            if api_key.is_empty() {
-                password_hash
-            } else {
-                api_key
-            }
-        };
-        let session_user = crate::session_auth::extract_session_cookie(&headers)
-            .and_then(|token| crate::session_auth::verify_session_token(&token, secret));
+        let session_user =
+            session_claims(&state.kernel.config, &headers).map(|claims| claims.username);
         if session_user.as_deref() != Some(username)
             || !crate::session_auth::verify_password(current_password, password_hash)
         {
@@ -15346,20 +15327,14 @@ pub async fn auth_check(
         }));
     }
 
-    // Derive the session secret the same way as server.rs
-    let api_key = state.kernel.config.api_key.trim().to_string();
-    let secret = if !api_key.is_empty() {
-        api_key
-    } else {
-        auth_cfg.password_hash.clone()
-    };
-
     // Check session cookie
-    let session_user = crate::session_auth::extract_session_cookie(request.headers())
-        .and_then(|token| crate::session_auth::verify_session_token(&token, &secret));
-
-    if let Some(username) = session_user {
-        let role = resolve_user_role(&state, &username);
+    if let Some(claims) = session_claims(&state.kernel.config, request.headers()) {
+        let role = crate::session_auth::effective_role(
+            &claims,
+            &auth_cfg.username,
+            &state.kernel.config.users,
+        );
+        let username = claims.username;
         Json(serde_json::json!({
             "authenticated": true,
             "mode": "session",
@@ -15396,16 +15371,11 @@ fn require_owner(
     if !auth_cfg.enabled {
         return Ok(());
     }
-    let api_key = state.kernel.config.api_key.trim().to_string();
-    let secret = if !api_key.is_empty() {
-        api_key
-    } else {
-        auth_cfg.password_hash.clone()
-    };
-    let username = crate::session_auth::extract_session_cookie(headers)
-        .and_then(|t| crate::session_auth::verify_session_token(&t, &secret));
-    match username {
-        Some(u) if resolve_user_role(state, &u) == "owner" => Ok(()),
+    let role = session_claims(&state.kernel.config, headers).map(|claims| {
+        crate::session_auth::effective_role(&claims, &auth_cfg.username, &state.kernel.config.users)
+    });
+    match role {
+        Some(freeco_types::auth::UserRole::Owner) => Ok(()),
         _ => Err((
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Owner role required"})),
@@ -16062,9 +16032,71 @@ pub async fn unfreeze_system(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 #[cfg(test)]
+mod caller_login_tests {
+    use super::caller_login;
+    use freeco_types::auth::UserRole;
+    use freeco_types::config::KernelConfig;
+
+    fn login_on() -> freeco_types::config::AuthConfig {
+        freeco_types::config::AuthConfig {
+            enabled: true,
+            password_hash: "$argon2id$admin".into(),
+            ..Default::default()
+        }
+    }
+
+    fn cookie(token: &str) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            format!("freeco_session={token}").parse().unwrap(),
+        );
+        h
+    }
+
+    /// Regression: with an API key set, login signed the cookie with the key
+    /// while `caller_tenant` verified it against the password hash, so the
+    /// caller's tenant was never found. Fails on f84b267.
+    #[test]
+    fn a_login_cookie_resolves_when_an_api_key_is_set() {
+        let config = KernelConfig {
+            api_key: "the-api-key".into(),
+            auth: login_on(),
+            ..Default::default()
+        };
+        // What server.rs and /api/auth/login sign with on main: the API key.
+        let token =
+            crate::session_auth::create_session_token("alice", UserRole::User, "the-api-key", 1);
+        assert_eq!(
+            caller_login(&config, &cookie(&token)).as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn a_login_cookie_resolves_without_an_api_key() {
+        let config = KernelConfig {
+            auth: login_on(),
+            ..Default::default()
+        };
+        let secret = crate::session_auth::session_secret(&config);
+        let token = crate::session_auth::create_session_token("alice", UserRole::User, &secret, 1);
+        assert_eq!(
+            caller_login(&config, &cookie(&token)).as_deref(),
+            Some("alice")
+        );
+        let forged = crate::session_auth::create_session_token("alice", UserRole::User, "guess", 1);
+        assert_eq!(caller_login(&config, &cookie(&forged)), None);
+    }
+}
+
+#[cfg(test)]
 mod role_resolution_tests {
-    use super::role_for;
     use freeco_types::config::UserConfig;
+
+    fn role_for(username: &str, admin: &str, users: &[UserConfig]) -> &'static str {
+        crate::session_auth::role_for(username, admin, users).as_str()
+    }
 
     fn user(name: &str, role: &str, enabled: bool) -> UserConfig {
         UserConfig {
