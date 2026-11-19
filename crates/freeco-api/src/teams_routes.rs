@@ -69,6 +69,17 @@ pub async fn floor(State(state): State<Arc<AppState>>, caller: Caller) -> impl I
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let all_teams = team_access::manages_all_teams(&caller);
+    // The company switcher: the companies the caller may see.
+    let companies: Vec<freeco_memory::org::Company> = match (
+        org.list_companies(false),
+        team_access::companies_visible_to(org, &caller),
+    ) {
+        (Ok(list), Ok(visible)) => list
+            .into_iter()
+            .filter(|c| visible.as_ref().is_none_or(|v| v.contains(&c.id)))
+            .collect(),
+        (Err(e), _) | (_, Err(e)) => return fail(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let tasks = match state.kernel.memory.task_board(None, None).await {
         Ok(t) => t,
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -179,6 +190,8 @@ pub async fn floor(State(state): State<Arc<AppState>>, caller: Caller) -> impl I
         StatusCode::OK,
         Json(serde_json::json!({
             "teams": out_teams,
+            "companies": companies,
+            "manage_all": all_teams,
             "unassigned": unassigned,
             "handoffs": handoffs,
             "generated_at": chrono::Utc::now().to_rfc3339(),

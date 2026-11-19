@@ -321,6 +321,11 @@ async fn companies_teams_members_and_boards_follow_the_permission_matrix() {
     assert_eq!(floor["teams"].as_array().unwrap().len(), 1);
     assert_eq!(floor["teams"][0]["access"], "read");
     assert_eq!(floor["teams"][0]["company_id"], acme_id.as_str());
+    assert_eq!(floor["companies"].as_array().unwrap().len(), 1);
+    assert_eq!(floor["manage_all"], false);
+    let (_, floor) = call!(h, ADMIN, GET, "/api/teams/floor");
+    assert_eq!(floor["companies"].as_array().unwrap().len(), 2);
+    assert_eq!(floor["manage_all"], true);
 
     // ── The board ───────────────────────────────────────────────────────
     let tasks = format!("/api/org/teams/{web_id}/tasks");
