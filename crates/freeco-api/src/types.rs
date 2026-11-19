@@ -23,6 +23,10 @@ pub struct SpawnRequest {
 pub struct SpawnResponse {
     pub agent_id: String,
     pub name: String,
+    /// The hire security review's findings. An owner's hire is not held by
+    /// them, as an agent's is -- the owner is who would approve it -- but
+    /// they are shown and logged.
+    pub security_review: String,
 }
 
 /// A file attachment reference (from a prior upload).

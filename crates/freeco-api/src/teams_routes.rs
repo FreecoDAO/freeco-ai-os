@@ -149,7 +149,23 @@ pub async fn remove_member(
         Err(e) => return fail(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     match org.remove_team_member(&team_id, agent_id.trim()) {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({ "removed": true }))),
+        Ok(true) => {
+            let name = agent_id
+                .trim()
+                .parse()
+                .ok()
+                .and_then(|id| state.kernel.registry.get(id))
+                .map(|e| e.name)
+                .unwrap_or_else(|| agent_id.trim().to_string());
+            state.kernel.record_org_change(
+                "owner",
+                format!(
+                    "took {name} off team {}",
+                    crate::org_routes::team_label(org, &team_id)
+                ),
+            );
+            (StatusCode::OK, Json(serde_json::json!({ "removed": true })))
+        }
         Ok(false) => fail(StatusCode::NOT_FOUND, "That agent is not on this team"),
         Err(e) => fail(StatusCode::INTERNAL_SERVER_ERROR, e),
     }

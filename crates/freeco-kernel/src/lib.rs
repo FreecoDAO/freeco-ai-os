@@ -18,6 +18,7 @@ pub mod event_bus;
 pub mod freeco_agents;
 pub mod guest;
 pub mod heartbeat;
+pub mod hire_review;
 pub mod kernel;
 pub mod metering;
 pub mod pairing;

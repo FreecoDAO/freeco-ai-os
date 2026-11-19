@@ -517,6 +517,7 @@ pub async fn execute_tool(
         "agent_list" => tool_agent_list(kernel),
         "agent_kill" => tool_agent_kill(input, kernel),
         "agent_activate" => tool_agent_activate(input, kernel),
+        "agent_sleep" => tool_agent_sleep(input, kernel),
 
         // Shared memory tools
         "memory_store" => tool_memory_store(input, kernel, caller_agent_id),
@@ -1213,8 +1214,10 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                           time. Each task runs in a fresh conversation of its agent, with its own \
                           context, filed under the same project as this conversation. Waits for \
                           all of them and returns every result together, each with the \
-                          conversation it ran in. Leave `agent` out to hand a task to a fresh \
-                          conversation of yourself. Split independent work into separate tasks \
+                          conversation it ran in. Leave `agent` out to hand a task to a worker \
+                          copy of yourself (same model, tools and workspace; it sleeps when \
+                          done), or to a fresh conversation of yourself when every worker is \
+                          busy. Split independent work into separate tasks \
                           so they run in parallel; use agent_send instead for a quick question \
                           inside another agent's ongoing conversation.".to_string(),
             input_schema: serde_json::json!({
@@ -1226,7 +1229,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "agent": { "type": "string", "description": "Agent name or UUID; omit for yourself" },
+                                "agent": { "type": "string", "description": "Agent name or UUID; omit for a worker copy of yourself" },
                                 "title": { "type": "string", "description": "A few words naming the task" },
                                 "task": { "type": "string", "description": "Everything the agent needs to do it: the goal, the facts, what to hand back" }
                             },
@@ -1323,6 +1326,25 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                           and process events. Use this when agent_list shows an agent in a \
                           Suspended, Crashed, or Created state and you want to delegate work \
                           to it via agent_send. Terminated agents cannot be revived."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The target agent's UUID or human-readable name"
+                    }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolDefinition {
+            name: "agent_sleep".to_string(),
+            description: "Put an agent to sleep when its work is done: its background loop \
+                          and scheduled work stop and it uses no tokens. A message to it, or \
+                          agent_activate, wakes it again. Use this for helpers you woke or \
+                          started once their part is finished, and for agents the owner does \
+                          not need running."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -2954,6 +2976,21 @@ fn tool_agent_activate(
     let name = kh.activate_agent(agent_id)?;
     Ok(format!(
         "Agent '{name}' activated. It is now Running and ready to receive messages."
+    ))
+}
+
+fn tool_agent_sleep(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let agent_id = input["agent_id"]
+        .as_str()
+        .ok_or("Missing 'agent_id' parameter")?;
+    let name = kh.sleep_agent(agent_id)?;
+    Ok(format!(
+        "Agent '{name}' is asleep: no background work and no tokens until a message or \
+         agent_activate wakes it."
     ))
 }
 
@@ -5595,6 +5632,7 @@ mod tests {
         assert!(names.contains(&"agent_kill"));
         // Issue #890 — wake up inactive agents
         assert!(names.contains(&"agent_activate"));
+        assert!(names.contains(&"agent_sleep"));
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
         // 6 collaboration tools

@@ -196,17 +196,27 @@ pub async fn spawn_agent(
     };
 
     let name = manifest.name.clone();
+    // The same review an agent's hire passes. Here the owner is the hirer, so
+    // the findings are reported and logged rather than holding the hire.
+    let review = freeco_kernel::hire_review::review(
+        &manifest,
+        req.template.is_some() || freeco_kernel::hire_review::is_catalogue_template(&name),
+    );
     match state.kernel.spawn_agent(manifest) {
         Ok(id) => {
             // Register in channel router so binding resolution finds the new agent
             if let Some(ref mgr) = *state.bridge_manager.lock().await {
                 mgr.router().register_agent(name.clone(), id);
             }
+            state
+                .kernel
+                .record_org_change("owner", format!("hired \"{name}\" ({})", review.summary()));
             (
                 StatusCode::CREATED,
                 Json(serde_json::json!(SpawnResponse {
                     agent_id: id.to_string(),
                     name,
+                    security_review: review.summary(),
                 })),
             )
         }
@@ -13629,6 +13639,12 @@ pub async fn get_agent_deliveries(
 // ---------------------------------------------------------------------------
 // Cron job management endpoints
 // ---------------------------------------------------------------------------
+
+/// GET /api/runs/history — every recorded unattended run (schedules,
+/// triggers, background ticks), newest first, failures included.
+pub async fn run_history(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "runs": state.kernel.run_history(500) }))
+}
 
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
 pub async fn list_cron_jobs(

@@ -15,6 +15,9 @@ function projectsPage() {
     // Teams were being created here and never read back, because the route
     // accepted POST only. A team nobody can see is a team nobody joins.
     teams: [],
+    // What changed in the organisation, by the owner or by agents: structure
+    // created, members set or taken off, hires made or held for the owner.
+    changes: [],
     // Archived work is hidden by default so finished projects do not crowd
     // the list, and reachable in one click so it is never lost.
     showArchived: false,
@@ -71,6 +74,12 @@ function projectsPage() {
         var self = this;
         teams.forEach(function (t) { self.tf(t); });
         this.teams = teams;
+        // The change log is extra: a failure to read it must not hide the
+        // projects themselves.
+        try {
+          var ch = await FreecoAPI.get('/api/org/changes');
+          this.changes = (ch && ch.changes) || [];
+        } catch (e2) { this.changes = []; }
       } catch (e) {
         // Say what failed. A silently empty page reads as "you have no
         // projects", which is a different and more alarming message.
@@ -153,15 +162,42 @@ function projectsPage() {
       return (lead || ms[0] || {}).agent_id || '';
     },
 
-    memberLine(team) {
-      var self = this;
-      var lead = this.teamLead(team);
-      return (team.members || []).map(function (m) {
-        var name = self.agentName(m.agent_id) || String(m.agent_id).slice(0, 8);
-        var role = m.role ? ' (' + m.role + ')' : '';
-        var leads = m.agent_id === lead && !/lead/i.test(m.role || '') ? ' (leads)' : '';
-        return name + role + leads;
-      }).join(', ');
+    isLead(team, m) {
+      return m.agent_id === this.teamLead(team);
+    },
+
+    // Make a member the team's lead. The daemon makes whoever led before a
+    // plain member, so a team never has two.
+    async makeLead(team, agentId) {
+      try {
+        var res = await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(team.id) + '/members',
+                                      { agent_id: agentId, role: 'lead' });
+        if (res && res.team) {
+          var i = this.teams.findIndex(function (t) { return t.id === team.id; });
+          if (i >= 0) this.teams.splice(i, 1, res.team);
+        }
+        await this.loadChanges();
+      } catch (e) {
+        FreecoToast.error('Could not change the lead: ' + e.message);
+      }
+    },
+
+    async removeMember(team, agentId) {
+      var name = this.agentName(agentId) || String(agentId).slice(0, 8);
+      if (!window.confirm('Take ' + name + ' off ' + team.name + '?')) return;
+      try {
+        await FreecoAPI.del('/api/org/teams/' + encodeURIComponent(team.id) + '/members/' + encodeURIComponent(agentId));
+        await this.load();
+      } catch (e) {
+        FreecoToast.error('Could not update the team: ' + e.message);
+      }
+    },
+
+    async loadChanges() {
+      try {
+        var ch = await FreecoAPI.get('/api/org/changes');
+        this.changes = (ch && ch.changes) || [];
+      } catch (e) { /* the log is extra; keep what is shown */ }
     },
 
     async addMember(team) {

@@ -307,6 +307,7 @@ pub const CEO_MANAGEMENT_TOOLS: &[&str] = &[
     "agent_send",
     "agent_spawn",
     "agent_activate",
+    "agent_sleep",
     "agent_set_model",
     "agent_skills_set",
     // Models and providers

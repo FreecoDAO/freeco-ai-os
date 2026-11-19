@@ -684,7 +684,15 @@ pub async fn build_router(
         )
         .route(
             "/api/org/teams/{id}/members",
-            axum::routing::post(crate::org_routes::add_team_member),
+            axum::routing::post(crate::org_routes::add_team_member)
+                .put(crate::org_routes::set_team_member),
+        )
+        // Every unattended run: schedules, triggers, background ticks.
+        .route("/api/runs/history", axum::routing::get(routes::run_history))
+        // What changed in the organisation, and who changed it.
+        .route(
+            "/api/org/changes",
+            axum::routing::get(crate::org_routes::changes),
         )
         .route(
             "/api/org/teams/{id}/run",

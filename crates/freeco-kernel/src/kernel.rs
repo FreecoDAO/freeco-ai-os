@@ -648,6 +648,83 @@ fn gethostname() -> Option<String> {
 /// runs in practice.
 const AUTO_COMPACT_AT: usize = 80;
 
+/// Manifest metadata flag for an agent put to sleep: no background loop, no
+/// scheduled work, no tokens, until a message or `agent_activate` wakes it.
+/// Kept in the manifest so it survives a restart, which marks every agent
+/// Suspended on shutdown and so cannot carry the meaning itself.
+pub const ASLEEP_KEY: &str = "asleep";
+
+/// Manifest metadata on a worker copy: the id of the agent it works for.
+pub const WORKER_OF_KEY: &str = "worker_of";
+
+/// Most worker copies one agent may have.
+pub const MAX_WORKERS: usize = 4;
+
+/// Shared-store key for the log of unattended runs (schedules, triggers,
+/// background ticks), capped at `RUN_HISTORY_MAX` entries.
+const RUN_HISTORY_KEY: &str = "__run_history";
+const RUN_HISTORY_MAX: usize = 500;
+
+/// Shared-store key for the organisation change log.
+const ORG_CHANGES_KEY: &str = "__org_changes";
+const ORG_CHANGES_MAX: usize = 300;
+
+fn is_asleep(manifest: &AgentManifest) -> bool {
+    manifest
+        .metadata
+        .get(ASLEEP_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn is_worker(manifest: &AgentManifest) -> bool {
+    manifest.metadata.contains_key(WORKER_OF_KEY)
+}
+
+/// A path inside another machine's FreEco home, mapped into this one.
+///
+/// When the data directory moves -- the Windows home copied into the Linux
+/// container (deploy/daemon) -- agents keep paths such as
+/// `C:\Users\me\.freeco-ai\workspaces\crm`, which on Linux name a file in
+/// the working directory. Anything under a `.freeco-ai` folder (or the
+/// container's `freeco` home) is re-rooted at `home`; other paths are left
+/// alone. Returns `None` when the path needs no change.
+pub fn remap_home_path(path: &Path, home: &Path) -> Option<std::path::PathBuf> {
+    if path.starts_with(home) {
+        return None;
+    }
+    let unified = path.to_string_lossy().replace('\\', "/");
+    // Only paths written for a different machine: a Windows drive path on a
+    // non-Windows host, or a Unix path on Windows.
+    let windows_style = unified.len() > 2 && unified.as_bytes()[1] == b':';
+    if windows_style == cfg!(windows) {
+        return None;
+    }
+    let marker = ["/.freeco-ai/", "/freeco/"]
+        .iter()
+        .find_map(|m| unified.find(m).map(|i| i + m.len()))?;
+    let mut out = home.to_path_buf();
+    for part in unified[marker..].split('/').filter(|p| !p.is_empty()) {
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// Remap the manifest's own paths (workspace, private state) into `home`.
+fn remap_manifest_home(manifest: &mut AgentManifest, home: &Path) -> bool {
+    let mut changed = false;
+    for p in [&mut manifest.workspace, &mut manifest.state_dir]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(new) = remap_home_path(p, home) {
+            *p = new;
+            changed = true;
+        }
+    }
+    changed
+}
+
 impl FreecoKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
@@ -1423,6 +1500,13 @@ impl FreecoKernel {
 
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
+                    // Data moved from another machine (Windows to the Linux
+                    // container) keeps the old home in its paths; point them
+                    // at this home before anything compares or uses them.
+                    if remap_manifest_home(&mut entry.manifest, &kernel.config.home_dir) {
+                        info!(agent = %name, "Agent paths moved to this home directory");
+                        let _ = kernel.memory.save_agent(&entry);
+                    }
                     let toml_path = kernel
                         .config
                         .home_dir
@@ -1435,7 +1519,11 @@ impl FreecoKernel {
                                 match toml::from_str::<freeco_types::agent::AgentManifest>(
                                     &toml_str,
                                 ) {
-                                    Ok(disk_manifest) => {
+                                    Ok(mut disk_manifest) => {
+                                        remap_manifest_home(
+                                            &mut disk_manifest,
+                                            &kernel.config.home_dir,
+                                        );
                                         // Capture whether agent.toml defines exec_policy
                                         // explicitly (so we don't blow it away with the
                                         // kernel default below).
@@ -2218,6 +2306,160 @@ impl FreecoKernel {
         }
     }
 
+    /// Append `item` to a capped list in the shared store.
+    ///
+    /// One lock for every such list: two runs finishing together each read
+    /// the list, pushed and wrote it back, and the later write dropped the
+    /// earlier entry.
+    fn append_capped(&self, key: &str, item: serde_json::Value, max: usize) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let store = shared_memory_agent_id();
+        let mut list: Vec<serde_json::Value> = self
+            .memory
+            .structured_get(store, key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.push(item);
+        if list.len() > max {
+            let excess = list.len() - max;
+            list.drain(..excess);
+        }
+        let _ = self
+            .memory
+            .structured_set(store, key, serde_json::Value::Array(list));
+    }
+
+    /// A capped list from the shared store, newest first.
+    fn read_capped(&self, key: &str, limit: usize) -> Vec<serde_json::Value> {
+        let mut list: Vec<serde_json::Value> = self
+            .memory
+            .structured_get(shared_memory_agent_id(), key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.reverse();
+        list.truncate(limit);
+        list
+    }
+
+    /// Record a change to the organisation -- a company, project or team
+    /// created, a member set or taken off, an agent hired or a hire held -- so
+    /// the owner sees it on the Projects page and the CEO in `org_overview`.
+    /// Changes made by agents used to leave no trace outside the conversation
+    /// that made them.
+    ///
+    /// `actor` is a name, or an agent id, which is shown as the agent's name.
+    pub fn record_org_change(&self, actor: &str, what: impl Into<String>) {
+        let what = what.into();
+        let actor = actor
+            .parse::<AgentId>()
+            .ok()
+            .and_then(|id| self.registry.get(id))
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| actor.to_string());
+        info!(actor = %actor, change = %what, "Organisation changed");
+        self.append_capped(
+            ORG_CHANGES_KEY,
+            serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "actor": actor,
+                "change": what,
+            }),
+            ORG_CHANGES_MAX,
+        );
+    }
+
+    /// Recorded organisation changes, newest first.
+    pub fn org_changes(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.read_capped(ORG_CHANGES_KEY, limit)
+    }
+
+    /// Who an organisation change made through a tool is by: the calling
+    /// agent's name, or "an agent" when the run cannot be told.
+    fn org_actor(&self) -> String {
+        self.calling_agent()
+            .map(|(_, name)| name)
+            .unwrap_or_else(|| "an agent".to_string())
+    }
+
+    /// Record one run that started on its own -- a schedule, a trigger, a
+    /// background tick -- for the Run History page.
+    ///
+    /// That page was assembled in the browser from each job's *last* run and
+    /// each trigger's fire counter, so it showed one line per job at most,
+    /// nothing at all for background loops, and never a failure.
+    pub fn record_run(
+        &self,
+        agent_id: AgentId,
+        source: &str,
+        name: &str,
+        started: chrono::DateTime<chrono::Utc>,
+        result: &KernelResult<AgentLoopResult>,
+    ) {
+        match result {
+            Ok(r) => self.record_run_outcome(
+                agent_id,
+                source,
+                name,
+                started,
+                Ok(()),
+                r.total_usage.input_tokens + r.total_usage.output_tokens,
+                r.cost_usd.unwrap_or(0.0),
+            ),
+            Err(e) => {
+                self.record_run_outcome(agent_id, source, name, started, Err(e.to_string()), 0, 0.0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_run_outcome(
+        &self,
+        agent_id: AgentId,
+        source: &str,
+        name: &str,
+        started: chrono::DateTime<chrono::Utc>,
+        outcome: Result<(), String>,
+        tokens: u64,
+        cost_usd: f64,
+    ) {
+        let agent_name = self
+            .registry
+            .get(agent_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let finished = chrono::Utc::now();
+        let (status, error) = match outcome {
+            Ok(()) => ("completed", None),
+            Err(e) => ("failed", Some(e.chars().take(300).collect::<String>())),
+        };
+        self.append_capped(
+            RUN_HISTORY_KEY,
+            serde_json::json!({
+                "timestamp": started.to_rfc3339(),
+                "duration_ms": (finished - started).num_milliseconds().max(0),
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "source": source,
+                "name": name,
+                "status": status,
+                "error": error,
+                "tokens": tokens,
+                "cost_usd": cost_usd,
+            }),
+            RUN_HISTORY_MAX,
+        );
+    }
+
+    /// The recorded unattended runs, newest first.
+    pub fn run_history(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.read_capped(RUN_HISTORY_KEY, limit)
+    }
+
     /// The agent whose run is asking, if a run is asking: the owner of the
     /// conversation this task is working in.
     fn calling_agent(&self) -> Option<(AgentId, String)> {
@@ -2624,6 +2866,7 @@ impl FreecoKernel {
             .check_quota(agent_id)
             .map_err(KernelError::Freeco)
             .map_err(refused)?;
+        self.wake_if_asleep(agent_id);
 
         // Read after waiting: the manifest may have changed while this queued.
         // The conversation is the one locked, whichever is current by now.
@@ -2825,6 +3068,7 @@ impl FreecoKernel {
         self.scheduler
             .check_quota(agent_id)
             .map_err(KernelError::Freeco)?;
+        self.wake_if_asleep(agent_id);
 
         let entry = self
             .registry
@@ -4804,11 +5048,27 @@ impl FreecoKernel {
 
         let was_state = entry.state;
         let name = entry.name.clone();
+        let was_asleep = is_asleep(&entry.manifest);
+        let schedule = entry.manifest.schedule.clone();
         drop(entry);
 
         self.registry
             .set_state(agent_id, AgentState::Running)
             .map_err(KernelError::Freeco)?;
+        if was_asleep {
+            let _ = self.registry.update_metadata(
+                agent_id,
+                ASLEEP_KEY.to_string(),
+                serde_json::Value::Bool(false),
+            );
+            if let Some(updated) = self.registry.get(agent_id) {
+                let _ = self.memory.save_agent(&updated);
+            }
+            // Its loop was stopped when it went to sleep.
+            if let Some(kernel) = self.self_handle.get().and_then(|w| w.upgrade()) {
+                kernel.start_background_for_agent(agent_id, &name, &schedule);
+            }
+        }
 
         info!(
             agent = %name,
@@ -4818,6 +5078,131 @@ impl FreecoKernel {
         );
 
         Ok(name)
+    }
+
+    /// Put an agent to sleep: its background loop stops, scheduled work
+    /// stops, and it uses no tokens until a message or `agent_activate`
+    /// wakes it. Survives a restart.
+    ///
+    /// Activation existed without its opposite, so an orchestrator could wake
+    /// helpers but never stand them down: every agent ever started kept its
+    /// loops, and the tokens they cost, running.
+    pub fn sleep_agent(&self, agent_id: AgentId) -> KernelResult<String> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        if entry.state == AgentState::Terminated {
+            return Err(KernelError::Freeco(FreecoError::Internal(format!(
+                "Agent {} is Terminated",
+                entry.name
+            ))));
+        }
+        let name = entry.name.clone();
+        drop(entry);
+        self.background.stop_agent(agent_id);
+        self.registry
+            .update_metadata(
+                agent_id,
+                ASLEEP_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            )
+            .map_err(KernelError::Freeco)?;
+        self.registry
+            .set_state(agent_id, AgentState::Suspended)
+            .map_err(KernelError::Freeco)?;
+        if let Some(updated) = self.registry.get(agent_id) {
+            let _ = self.memory.save_agent(&updated);
+        }
+        info!(agent = %name, id = %agent_id, "Agent put to sleep");
+        Ok(name)
+    }
+
+    /// A message to a sleeping agent wakes it rather than failing.
+    fn wake_if_asleep(&self, agent_id: AgentId) {
+        if self
+            .registry
+            .get(agent_id)
+            .is_some_and(|e| is_asleep(&e.manifest))
+        {
+            let _ = self.activate_agent(agent_id);
+        }
+    }
+
+    /// Whether the agent is working in any conversation right now.
+    pub fn is_busy(&self, agent_id: AgentId) -> bool {
+        self.busy_conversations().into_iter().any(|sid| {
+            matches!(self.memory.get_session(sid), Ok(Some(s)) if s.agent_id == agent_id)
+        })
+    }
+
+    /// An idle worker copy of `agent_id`, started if there is none yet.
+    ///
+    /// A worker is a copy of the agent -- same model, instructions, tools and
+    /// workspace, its own conversations and private state -- reused when one
+    /// is idle, at most [`MAX_WORKERS`] per agent, and put to sleep when its
+    /// task ends so it costs nothing between tasks. A worker of a worker is a
+    /// worker of the original agent. Returns `None` when every worker is busy.
+    pub fn worker_for(&self, agent_id: AgentId) -> KernelResult<Option<AgentId>> {
+        let first = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        let owner_id = first
+            .manifest
+            .metadata
+            .get(WORKER_OF_KEY)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<AgentId>().ok())
+            .unwrap_or(agent_id);
+        let parent = if owner_id == agent_id {
+            first
+        } else {
+            self.registry.get(owner_id).ok_or_else(|| {
+                KernelError::Freeco(FreecoError::AgentNotFound(owner_id.to_string()))
+            })?
+        };
+        let parent_key = owner_id.to_string();
+        let workers: Vec<AgentEntry> = self
+            .registry
+            .list()
+            .into_iter()
+            .filter(|e| {
+                e.manifest.metadata.get(WORKER_OF_KEY).and_then(|v| v.as_str())
+                    == Some(parent_key.as_str())
+            })
+            .collect();
+        if let Some(idle) = workers
+            .iter()
+            .find(|w| w.id != agent_id && !self.is_busy(w.id))
+        {
+            return Ok(Some(idle.id));
+        }
+        if workers.len() >= MAX_WORKERS {
+            return Ok(None);
+        }
+        let mut n = workers.len() + 1;
+        let mut name = format!("{} worker {n}", parent.name);
+        while self.registry.find_by_name(&name).is_some() {
+            n += 1;
+            name = format!("{} worker {n}", parent.name);
+        }
+        let mut manifest = parent.manifest.clone();
+        manifest.name = name;
+        manifest.state_dir = None;
+        // A worker answers the task it was given and nothing else. The clone
+        // kept the parent's schedule, so every worker of the CEO ran the CEO's
+        // own heartbeat as well -- an LLM call every two minutes, around the
+        // clock, while it was meant to be asleep.
+        manifest.schedule = ScheduleMode::Reactive;
+        manifest.autonomous = None;
+        manifest.metadata.remove(ASLEEP_KEY);
+        manifest
+            .metadata
+            .insert(WORKER_OF_KEY.to_string(), serde_json::json!(parent_key));
+        let id = self.spawn_agent_with_parent(manifest, Some(owner_id), None)?;
+        info!(parent = %parent.name, worker = %id, "Started a worker copy");
+        Ok(Some(id))
     }
 
     /// Kill an agent.
@@ -5569,7 +5954,11 @@ impl FreecoKernel {
                     let aid = *agent_id;
                     let msg = message.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = kernel.send_message(aid, &msg).await {
+                        let started = chrono::Utc::now();
+                        let result = kernel.send_message(aid, &msg).await;
+                        let name: String = msg.chars().take(60).collect();
+                        kernel.record_run(aid, "trigger", &name, started, &result);
+                        if let Err(e) = result {
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     });
@@ -5810,6 +6199,10 @@ impl FreecoKernel {
                 .is_some_and(|inst| inst.status == freeco_hands::HandStatus::Paused)
             {
                 info!(agent = %entry.name, "Not starting background loop: its hand is paused");
+                continue;
+            }
+            if is_asleep(&entry.manifest) || is_worker(&entry.manifest) {
+                info!(agent = %entry.name, "Not starting background loop: asleep or a worker copy");
                 continue;
             }
             bg_agents.push((
@@ -6369,6 +6762,17 @@ impl FreecoKernel {
         name: &str,
         schedule: &ScheduleMode,
     ) {
+        // Workers run only what they are handed. Those started before
+        // `worker_for` reset the schedule still carry their parent's, and each
+        // wake would restart the parent's heartbeat in the worker. A sleeping
+        // agent runs nothing until it is woken.
+        if self
+            .registry
+            .get(agent_id)
+            .is_some_and(|e| is_worker(&e.manifest) || is_asleep(&e.manifest))
+        {
+            return;
+        }
         // For proactive agents, auto-register triggers from conditions
         if let ScheduleMode::Proactive { conditions } = schedule {
             for condition in conditions {
@@ -6389,13 +6793,13 @@ impl FreecoKernel {
             .start_agent(agent_id, name, schedule, move |aid, msg| {
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
-                    match k.send_message(aid, &msg).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            // send_message already records the panic in supervisor,
-                            // just log the background context here
-                            warn!(agent_id = %aid, error = %e, "Background tick failed");
-                        }
+                    let started = chrono::Utc::now();
+                    let result = k.send_message(aid, &msg).await;
+                    k.record_run(aid, "background", "Background tick", started, &result);
+                    if let Err(e) = result {
+                        // send_message already records the panic in supervisor,
+                        // just log the background context here
+                        warn!(agent_id = %aid, error = %e, "Background tick failed");
                     }
                 })
             });
@@ -7584,6 +7988,9 @@ impl FreecoKernel {
                             // agent that may `agent_send` may `agent_delegate`
                             // without every manifest having to list both.
                             || (d == "agent_send" && t.name == "agent_delegate")
+                            // Waking an agent and standing it down again
+                            // are one permission.
+                            || (d == "agent_activate" && t.name == "agent_sleep")
                     })
                 })
                 .collect()
@@ -7604,6 +8011,7 @@ impl FreecoKernel {
                                     // As for declared tools: a profile with
                                     // `agent_send` may hand out tasks too.
                                     || (a == "agent_send" && t.name == "agent_delegate")
+                                    || (a == "agent_activate" && t.name == "agent_sleep")
                             })
                         })
                         .collect()
@@ -8175,12 +8583,27 @@ impl FreecoKernel {
                 let delivery = job.delivery.clone();
                 let delivery_targets = job.delivery_targets.clone();
                 let kh: Arc<dyn KernelHandle> = self.clone();
-                match tokio::time::timeout(
+                let started = chrono::Utc::now();
+                let outcome = tokio::time::timeout(
                     timeout,
                     self.send_message_with_handle(agent_id, message, Some(kh), None, None),
                 )
-                .await
-                {
+                .await;
+                match &outcome {
+                    Ok(result) => {
+                        self.record_run(agent_id, "schedule", job_name.as_str(), started, result)
+                    }
+                    Err(_) => self.record_run_outcome(
+                        agent_id,
+                        "schedule",
+                        job_name.as_str(),
+                        started,
+                        Err(format!("timed out after {timeout_s}s")),
+                        0,
+                        0.0,
+                    ),
+                }
+                match outcome {
                     Ok(Ok(result)) => {
                         // Multi-destination fan-out (never aborts the job on delivery error).
                         cron_fan_out_targets(self, job_name, &result.response, &delivery_targets)
@@ -8995,11 +9418,38 @@ impl KernelHandle for FreecoKernel {
                     .to_string(),
             );
         }
+        // Security review. Inheritance alone passed anything the CEO hired,
+        // since the CEO holds every capability. Whatever reaches outside a
+        // sandbox, can hire again, or reads like an attempt to subvert the
+        // agent waits for the owner; the rest is hired and logged.
+        let actor = parent_id
+            .map(str::to_string)
+            .unwrap_or_else(|| self.org_actor());
+        let from_template = crate::hire_review::is_catalogue_template(&manifest.name);
+        let review = crate::hire_review::review(&manifest, from_template);
+        if !review.passed() {
+            self.record_org_change(
+                &actor,
+                format!(
+                    "hire of \"{}\" held for the owner: {}",
+                    manifest.name,
+                    review.summary()
+                ),
+            );
+            return Err(format!(
+                "Hire of \"{}\" not made -- it {}. Propose it to the owner with these points \
+                 and a reason for each, or narrow the manifest (start from a catalogue template, \
+                 drop host tools and shell access) and hire again.",
+                manifest.name,
+                review.summary()
+            ));
+        }
         let name = manifest.name.clone();
         let parent = parent_id.and_then(|pid| pid.parse::<AgentId>().ok());
         let id = self
             .spawn_agent_with_parent(manifest, parent, None)
             .map_err(|e| format!("Spawn failed: {e}"))?;
+        self.record_org_change(&actor, format!("hired \"{name}\" ({})", review.summary()));
         Ok((id.to_string(), name))
     }
 
@@ -9136,10 +9586,24 @@ impl KernelHandle for FreecoKernel {
                     .map(|e| e.id)
                     .ok_or_else(|| format!("Agent not found: {name}"))?,
             },
-            None => caller
-                .as_ref()
-                .map(|c| c.id)
-                .ok_or("Name the agent to hand this task to")?,
+            // Left out: a worker copy of the caller takes it, so the part runs
+            // with the caller's model, tools and workspace but its own private
+            // state, and sleeps afterwards. With every worker busy it runs in
+            // a fresh conversation of the caller itself.
+            None => {
+                let caller_id = caller
+                    .as_ref()
+                    .map(|c| c.id)
+                    .ok_or("Name the agent to hand this task to")?;
+                match self.worker_for(caller_id) {
+                    Ok(Some(worker)) => worker,
+                    Ok(None) => caller_id,
+                    Err(e) => {
+                        warn!(agent = %caller_id, "Could not start a worker copy: {e}");
+                        caller_id
+                    }
+                }
+            }
         };
         let target = self
             .registry
@@ -9207,6 +9671,11 @@ impl KernelHandle for FreecoKernel {
             })
             .await;
         self.finish_handoff(&handoff_id, result.is_ok(), None);
+        // A worker sleeps once its task is done; the next task, or a message
+        // to it, wakes it with its conversations intact.
+        if is_worker(&target.manifest) && !self.is_busy(target_id) {
+            let _ = FreecoKernel::sleep_agent(self, target_id);
+        }
         let result = result.map_err(|e| format!("{} could not finish it: {e}", target.name))?;
         Ok(kernel_handle::DelegatedTask {
             agent_id: target_id.to_string(),
@@ -9257,6 +9726,18 @@ impl KernelHandle for FreecoKernel {
                 .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
         };
         FreecoKernel::activate_agent(self, id).map_err(|e| format!("Activate failed: {e}"))
+    }
+
+    fn sleep_agent(&self, agent_id: &str) -> Result<String, String> {
+        let id: AgentId = match agent_id.parse() {
+            Ok(id) => id,
+            Err(_) => self
+                .registry
+                .find_by_name(agent_id)
+                .map(|e| e.id)
+                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
+        };
+        FreecoKernel::sleep_agent(self, id).map_err(|e| format!("Sleep failed: {e}"))
     }
 
     fn memory_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
@@ -9716,11 +10197,18 @@ impl KernelHandle for FreecoKernel {
     }
 
     async fn org_overview(&self) -> Result<serde_json::Value, String> {
-        self.memory
+        let projects = self
+            .memory
             .org()
             .org_overview()
             .map(serde_json::Value::from)
-            .map_err(|e| format!("{e}"))
+            .map_err(|e| format!("{e}"))?;
+        // The latest changes travel with the structure, so the CEO learns of
+        // a new team or a held hire the next time it looks.
+        Ok(serde_json::json!({
+            "projects": projects,
+            "recent_changes": self.org_changes(15),
+        }))
     }
 
     async fn team_create(&self, name: &str, project_id: Option<&str>) -> Result<String, String> {
@@ -9733,6 +10221,7 @@ impl KernelHandle for FreecoKernel {
             .org()
             .create_team(name, project_id)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(&self.org_actor(), format!("created team \"{}\"", team.name));
         Ok(format!("Created team \"{}\" (id {})", team.name, team.id))
     }
 
@@ -9756,6 +10245,15 @@ impl KernelHandle for FreecoKernel {
             .org()
             .add_team_member(team_id, agent_id, role)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!(
+                "added {} to team {}{}",
+                entry.name,
+                team_id,
+                role.map(|r| format!(" as {r}")).unwrap_or_default()
+            ),
+        );
         Ok(format!(
             "Added {} to team {}{}",
             entry.name,
@@ -9787,6 +10285,10 @@ impl KernelHandle for FreecoKernel {
             .org()
             .create_company(name, description)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!("created company \"{}\"", company.name),
+        );
         Ok(format!(
             "Created company \"{}\" (id {})",
             company.name, company.id
@@ -9809,6 +10311,10 @@ impl KernelHandle for FreecoKernel {
             // The store takes (name, company, description).
             .create_project(name, company_id, description)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!("created project \"{}\"", project.name),
+        );
         Ok(format!(
             "Created project \"{}\" (id {})",
             project.name, project.id
@@ -10707,6 +11213,52 @@ mod tests {
     use freeco_types::config::ExecPolicy;
     use std::collections::HashMap;
 
+    /// Data copied from Windows into the Linux container: agent paths under
+    /// the old `.freeco-ai` home land in the new home; others stay.
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_home_paths_move_into_the_container_home() {
+        let home = std::path::Path::new("/home/user/freeco");
+        let old = std::path::Path::new(r"C:\Users\me\.freeco-ai\workspaces\crm");
+        assert_eq!(
+            remap_home_path(old, home),
+            Some(std::path::PathBuf::from("/home/user/freeco/workspaces/crm"))
+        );
+        assert_eq!(remap_home_path(&home.join("workspaces/crm"), home), None);
+        assert_eq!(
+            remap_home_path(std::path::Path::new(r"C:\Users\me\dev\project"), home),
+            None
+        );
+        // A Unix path on a Unix host is this machine's own: left alone.
+        assert_eq!(
+            remap_home_path(std::path::Path::new("/srv/freeco/workspaces/x"), home),
+            None
+        );
+
+        let mut manifest = AgentManifest {
+            workspace: Some(old.to_path_buf()),
+            ..Default::default()
+        };
+        assert!(remap_manifest_home(&mut manifest, home));
+        assert_eq!(
+            manifest.workspace.as_deref(),
+            Some(std::path::Path::new("/home/user/freeco/workspaces/crm"))
+        );
+    }
+
+    /// And back: a container path read on Windows lands in the Windows home.
+    #[cfg(windows)]
+    #[test]
+    fn container_home_paths_move_into_the_windows_home() {
+        let home = std::path::Path::new(r"C:\Users\me\.freeco-ai");
+        let old = std::path::Path::new("/home/user/freeco/workspaces/crm");
+        assert_eq!(
+            remap_home_path(old, home),
+            Some(home.join("workspaces").join("crm"))
+        );
+        assert_eq!(remap_home_path(&home.join("workspaces"), home), None);
+    }
+
     #[test]
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
@@ -11319,6 +11871,192 @@ mod tests {
         // Unknown agent ID: rejected.
         assert!(kernel.activate_agent(AgentId::new()).is_err());
 
+        kernel.shutdown();
+    }
+
+    fn boot_test_kernel(tmp: &tempfile::TempDir, name: &str) -> FreecoKernel {
+        let home_dir = tmp.path().join(name);
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        FreecoKernel::boot_with_config(config).expect("kernel boots")
+    }
+
+    #[test]
+    fn a_worker_does_not_inherit_its_parents_heartbeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-worker-test");
+        let parent = register_test_agent(&kernel, "ceo");
+        let mut entry = kernel.registry.remove(parent).unwrap();
+        entry.manifest.schedule = ScheduleMode::Periodic {
+            cron: "*/2 * * * *".to_string(),
+        };
+        kernel.registry.register(entry).unwrap();
+
+        let worker = kernel
+            .worker_for(parent)
+            .expect("worker_for")
+            .expect("a worker is started");
+        let entry = kernel.registry.get(worker).expect("worker registered");
+        assert!(
+            matches!(entry.manifest.schedule, ScheduleMode::Reactive),
+            "a worker answers what it is handed, it has no schedule of its own"
+        );
+        assert!(entry.manifest.autonomous.is_none());
+        assert_eq!(
+            entry.manifest.metadata.get(WORKER_OF_KEY),
+            Some(&serde_json::json!(parent.to_string()))
+        );
+        assert_eq!(entry.name, "ceo worker 1");
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn idle_workers_are_reused_and_capped_per_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-worker-cap-test");
+        let parent = register_test_agent(&kernel, "lead");
+
+        let first = kernel.worker_for(parent).unwrap().unwrap();
+        // Idle, so it is handed out again rather than a second copy started.
+        assert_eq!(kernel.worker_for(parent).unwrap(), Some(first));
+        // A worker asking for a worker gets a sibling, never itself, and the
+        // sibling works for the original agent.
+        let sibling = kernel.worker_for(first).unwrap().unwrap();
+        assert_ne!(sibling, first);
+        assert_eq!(
+            kernel.registry.get(sibling).unwrap().manifest.metadata[WORKER_OF_KEY],
+            serde_json::json!(parent.to_string())
+        );
+        let workers = kernel
+            .registry
+            .list()
+            .into_iter()
+            .filter(|e| is_worker(&e.manifest))
+            .count();
+        assert_eq!(workers, 2);
+        assert!(workers <= MAX_WORKERS);
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn org_changes_are_logged_newest_first_with_names_and_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-org-log-test");
+        let agent = register_test_agent(&kernel, "ceo");
+
+        kernel.record_org_change("owner", "created team \"Ops\"");
+        kernel.record_org_change(&agent.to_string(), "hired \"writer\"");
+        let log = kernel.org_changes(10);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0]["actor"], "ceo", "an agent id reads as its name");
+        assert_eq!(log[0]["change"], "hired \"writer\"");
+        assert_eq!(log[1]["actor"], "owner");
+
+        for i in 0..ORG_CHANGES_MAX + 5 {
+            kernel.record_org_change("owner", format!("change {i}"));
+        }
+        let all = kernel.org_changes(usize::MAX);
+        assert_eq!(all.len(), ORG_CHANGES_MAX);
+        assert_eq!(all[0]["change"], format!("change {}", ORG_CHANGES_MAX + 4));
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn unattended_runs_are_recorded_with_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-run-history-test");
+        let agent = register_test_agent(&kernel, "night-shift");
+        let started = chrono::Utc::now();
+
+        let failed: KernelResult<AgentLoopResult> = Err(KernelError::Freeco(
+            FreecoError::Internal("provider down".to_string()),
+        ));
+        kernel.record_run(agent, "schedule", "nightly report", started, &failed);
+        kernel.record_run_outcome(
+            agent,
+            "background",
+            "Background tick",
+            started,
+            Ok(()),
+            1200,
+            0.01,
+        );
+
+        let runs = kernel.run_history(10);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["source"], "background");
+        assert_eq!(runs[0]["status"], "completed");
+        assert_eq!(runs[0]["tokens"], 1200);
+        assert_eq!(runs[1]["status"], "failed");
+        assert_eq!(runs[1]["agent_name"], "night-shift");
+        assert!(runs[1]["error"].as_str().unwrap().contains("provider down"));
+        assert_eq!(kernel.run_history(1).len(), 1);
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn an_agents_hire_passes_the_security_review_first() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-hire-review-test");
+        let ceo = register_test_agent(&kernel, "boss").to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let held = rt.block_on(KernelHandle::spawn_agent(
+            &kernel,
+            "name = \"shell-bot\"\nmodule = \"builtin:chat\"\n\
+             [capabilities]\nshell = [\"*\"]\ntools = [\"shell_exec\"]\n",
+            Some(&ceo),
+        ));
+        let err = held.unwrap_err();
+        assert!(err.contains("not made"), "{err}");
+        assert!(err.contains("shell"), "{err}");
+        assert!(kernel.registry.find_by_name("shell-bot").is_none());
+
+        let hired = rt.block_on(KernelHandle::spawn_agent(
+            &kernel,
+            "name = \"researcher\"\nmodule = \"builtin:chat\"\n\
+             [capabilities]\ntools = [\"web_fetch\"]\n",
+            Some(&ceo),
+        ));
+        assert!(hired.is_ok(), "{hired:?}");
+
+        let log = kernel.org_changes(10);
+        assert_eq!(log[0]["actor"], "boss");
+        assert!(log[0]["change"].as_str().unwrap().starts_with("hired \"researcher\""));
+        assert!(log[1]["change"]
+            .as_str()
+            .unwrap()
+            .starts_with("hire of \"shell-bot\" held for the owner"));
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn a_sleeping_agent_stays_asleep_until_woken() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-sleep-test");
+        let agent = register_test_agent(&kernel, "helper");
+
+        let name = KernelHandle::sleep_agent(&kernel, "helper").expect("sleep by name");
+        assert_eq!(name, "helper");
+        let entry = kernel.registry.get(agent).unwrap();
+        assert_eq!(entry.state, AgentState::Suspended);
+        assert!(is_asleep(&entry.manifest), "the flag survives a restart");
+
+        // What a message does before it runs.
+        kernel.wake_if_asleep(agent);
+        let entry = kernel.registry.get(agent).unwrap();
+        assert_eq!(entry.state, AgentState::Running);
+        assert!(!is_asleep(&entry.manifest));
+
+        assert!(KernelHandle::sleep_agent(&kernel, "ghost").is_err());
         kernel.shutdown();
     }
 
