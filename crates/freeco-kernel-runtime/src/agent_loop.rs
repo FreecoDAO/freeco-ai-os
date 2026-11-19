@@ -1546,6 +1546,18 @@ fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut Complet
 ///
 /// Shared by the streaming and non-streaming paths so they cannot drift apart
 /// again -- they had, and the streaming one is the path the dashboard uses.
+/// Seconds before the one retry of a request that never reached the provider.
+const CONNECT_RETRY_DELAY_SECS: u64 = 2;
+
+/// The request never reached the provider: no connection, no DNS. Nothing
+/// was sent or streamed, so trying again cannot duplicate anything.
+fn is_connect_failure(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("dns error")
+        || lower.contains("connection refused")
+}
+
 pub fn should_try_fallback(category: llm_errors::LlmErrorCategory) -> bool {
     matches!(
         category,
@@ -1658,6 +1670,18 @@ async fn call_with_retry(
                     "LLM error classified: {}",
                     classified.sanitized_message
                 );
+
+                // The connection itself failed (network down for a moment, DNS
+                // gone): nothing reached the provider, so trying the same model
+                // once more cannot duplicate anything. A brief blip used to end
+                // the turn with "error sending request".
+                if attempt == 0 && is_connect_failure(&raw_error) {
+                    warn!("Could not reach the model provider, retrying once in 2s");
+                    tokio::time::sleep(std::time::Duration::from_secs(CONNECT_RETRY_DELAY_SECS))
+                        .await;
+                    last_error = Some(raw_error);
+                    continue;
+                }
 
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_failure(provider, classified.is_billing);
@@ -1851,6 +1875,18 @@ async fn stream_with_retry(
                     "LLM stream error classified: {}",
                     classified.sanitized_message
                 );
+
+                // The connection itself failed (network down for a moment, DNS
+                // gone): nothing reached the provider, so trying the same model
+                // once more cannot duplicate anything. A brief blip used to end
+                // the turn with "error sending request".
+                if attempt == 0 && is_connect_failure(&raw_error) {
+                    warn!("Could not reach the model provider, retrying once in 2s");
+                    tokio::time::sleep(std::time::Duration::from_secs(CONNECT_RETRY_DELAY_SECS))
+                        .await;
+                    last_error = Some(raw_error);
+                    continue;
+                }
 
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_failure(provider, classified.is_billing);
@@ -6065,5 +6101,93 @@ mod gateway_wiring_tests {
             panic!("expected text");
         };
         assert!(!sent.contains("4242 4242"), "card still present: {sent}");
+    }
+}
+
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Fails to connect `failures` times, then answers.
+    struct FlakyNetwork {
+        failures: u32,
+        calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl LlmDriver for FlakyNetwork {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.failures {
+                return Err(LlmError::Http(
+                    "error sending request for url (https://api.example/v1): dns error".to_string(),
+                ));
+            }
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "back online".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            })
+        }
+    }
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        }
+    }
+
+    #[test]
+    fn connect_failures_are_told_apart_from_other_errors() {
+        assert!(is_connect_failure(
+            "error sending request for url (https://api.groq.com)"
+        ));
+        assert!(is_connect_failure("DNS error: failed to lookup address"));
+        assert!(!is_connect_failure("HTTP 401: invalid api key"));
+    }
+
+    #[tokio::test]
+    async fn a_connect_failure_is_retried_once_on_the_same_model() {
+        let driver = FlakyNetwork {
+            failures: 1,
+            calls: AtomicU32::new(0),
+        };
+        let mut served_by = None;
+        let response = call_with_retry(&driver, request(), None, None, &[], &mut served_by)
+            .await
+            .expect("the retry answers");
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+        assert!(served_by.is_none(), "the same model answered, not a fallback");
+        assert!(matches!(&response.content[0], ContentBlock::Text { text, .. } if text == "back online"));
+    }
+
+    #[tokio::test]
+    async fn a_lasting_outage_is_retried_only_once() {
+        let driver = FlakyNetwork {
+            failures: u32::MAX,
+            calls: AtomicU32::new(0),
+        };
+        let mut served_by = None;
+        let result = call_with_retry(&driver, request(), None, None, &[], &mut served_by).await;
+        assert!(result.is_err());
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
     }
 }

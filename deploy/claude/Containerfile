@@ -25,5 +25,9 @@ RUN npm install -g @anthropic-ai/claude-code \
 
 USER agent
 WORKDIR /workspace
+# IPv4 first, and no 250 ms race to IPv6: over a VPN the IPv4 connection is
+# slower than that, Node switched to IPv6, which the VM cannot route, and the
+# CLI reported "api.anthropic.com timed out" -- sign-in included.
+ENV NODE_OPTIONS="--no-network-family-autoselection --dns-result-order=ipv4first"
 # Kept alive so each call is a quick `exec` rather than a container start.
 CMD ["sleep", "infinity"]
