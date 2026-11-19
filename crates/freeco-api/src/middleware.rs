@@ -97,7 +97,7 @@ pub enum AuthMethod {
 ///
 /// ```ignore
 /// async fn handler(caller: Caller) -> Response {
-///     if let Err(denied) = caller.require(UserRole::Admin) { return denied; }
+///     if let Err(denied) = caller.require(UserRole::Admin) { return *denied; }
 ///     ...
 /// }
 /// ```
@@ -130,7 +130,9 @@ impl Caller {
     }
 
     /// `Ok` when this caller has at least `min`, otherwise the 403 to return.
-    pub fn require(&self, min: UserRole) -> Result<(), Response<Body>> {
+    /// Boxed, as in `chat_tools`: a `Response` is too large to pass by value
+    /// through every `Result` (clippy `result_large_err`).
+    pub fn require(&self, min: UserRole) -> Result<(), Box<Response<Body>>> {
         require_role(self.role, min)
     }
 }
@@ -161,14 +163,14 @@ fn json_error(status: StatusCode, msg: &str) -> Response<Body> {
 }
 
 /// `Ok` when `role` is at least `min`, otherwise a 403 naming the role needed.
-pub fn require_role(role: UserRole, min: UserRole) -> Result<(), Response<Body>> {
+pub fn require_role(role: UserRole, min: UserRole) -> Result<(), Box<Response<Body>>> {
     if role >= min {
         Ok(())
     } else {
-        Err(json_error(
+        Err(Box::new(json_error(
             StatusCode::FORBIDDEN,
             &format!("This needs the {min} role; you are signed in as {role}"),
-        ))
+        )))
     }
 }
 
@@ -449,7 +451,7 @@ pub async fn auth(
             );
             if let Some(min) = required_role_for_request(&method, path) {
                 if let Err(denied) = require_role(role, min) {
-                    return denied;
+                    return *denied;
                 }
             }
             request.extensions_mut().insert(Caller {
@@ -763,7 +765,7 @@ mod tests {
     async fn admin_only(caller: Caller) -> Response<Body> {
         match caller.require(UserRole::Admin) {
             Ok(()) => Response::new(Body::from("ok")),
-            Err(denied) => denied,
+            Err(denied) => *denied,
         }
     }
 

@@ -562,7 +562,14 @@ mod tests {
     fn starnet_a_tool_that_just_failed_shows_an_error_then_fades() {
         let agents = [agent("a1", "Shopping")];
         let failed = idle_after("web_fetch", false, 1_000);
-        let s = snap(&agents, &[failed.clone()], &[], &[], &[], 1_000 + 5_000);
+        let s = snap(
+            &agents,
+            std::slice::from_ref(&failed),
+            &[],
+            &[],
+            &[],
+            1_000 + 5_000,
+        );
         assert_eq!(row(&s, "a1")["state"], "error");
         assert_eq!(row(&s, "a1")["tool"], "web_fetch");
         assert_eq!(row(&s, "a1")["error"], "web_fetch failed");
