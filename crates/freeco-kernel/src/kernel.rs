@@ -5154,17 +5154,9 @@ impl FreecoKernel {
             },
             skills: def.skills.clone(),
             mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(freeco_types::config::ExecPolicy {
-                    mode: freeco_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
+            // The hand's own [exec_policy]; shell denied when it lists
+            // shell_exec without one (see `hand_exec_policy`).
+            exec_policy: hand_exec_policy(&def),
             tool_blocklist: Vec::new(),
             // Custom profile avoids ToolProfile-based expansion overriding the
             // explicit tool list.
@@ -8367,6 +8359,34 @@ pub(crate) fn merge_disk_manifest_preserving_kernel_defaults(
     disk
 }
 
+/// The exec policy a hand's agent runs with.
+///
+/// Hands used to get `mode = "full"` (any command, no approval) just for
+/// listing `shell_exec`. Now the hand's own `[exec_policy]` in HAND.toml is
+/// used as written. A hand that lists `shell_exec` without one gets shell
+/// denied, so a hand nobody gave a policy cannot run anything on the host.
+/// A hand without `shell_exec` keeps `None` and inherits the kernel's policy
+/// like any agent (it has no shell tool to use it with).
+fn hand_exec_policy(
+    def: &freeco_hands::HandDefinition,
+) -> Option<freeco_types::config::ExecPolicy> {
+    if let Some(policy) = &def.exec_policy {
+        return Some(policy.clone());
+    }
+    if def.tools.iter().any(|t| t == "shell_exec") {
+        warn!(
+            hand = %def.id,
+            "Hand lists shell_exec but has no [exec_policy] in HAND.toml; shell is denied for it"
+        );
+        return Some(freeco_types::config::ExecPolicy {
+            mode: freeco_types::config::ExecSecurityMode::Deny,
+            safe_bins: Vec::new(),
+            ..Default::default()
+        });
+    }
+    None
+}
+
 fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
     let mut caps = Vec::new();
 
@@ -10016,6 +10036,20 @@ impl KernelHandle for FreecoKernel {
         Ok(())
     }
 
+    fn shell_patterns(&self, agent_id: &str) -> Vec<String> {
+        let Ok(id) = agent_id.parse::<AgentId>() else {
+            return Vec::new();
+        };
+        self.capabilities
+            .list(id)
+            .into_iter()
+            .filter_map(|c| match c {
+                Capability::ShellExec(pattern) => Some(pattern),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn requires_approval(&self, tool_name: &str) -> bool {
         self.approval_manager.requires_approval(tool_name)
     }
@@ -10751,6 +10785,77 @@ mod tests {
     use super::*;
     use freeco_types::config::ExecPolicy;
     use std::collections::HashMap;
+
+    fn hand_toml(tools: &str, extra: &str) -> freeco_hands::HandDefinition {
+        let toml_str = format!(
+            r#"
+id = "h"
+name = "H"
+description = "d"
+category = "content"
+tools = {tools}
+
+[agent]
+name = "h"
+description = "d"
+system_prompt = "p"
+{extra}
+"#
+        );
+        freeco_hands::parse_hand_toml(&toml_str).expect("hand parses")
+    }
+
+    #[test]
+    fn hand_with_shell_and_no_exec_policy_is_denied_not_full() {
+        let def = hand_toml(r#"["shell_exec", "file_read"]"#, "");
+        let policy = hand_exec_policy(&def).expect("a shell hand gets a policy");
+        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Deny);
+        assert!(policy.safe_bins.is_empty());
+    }
+
+    #[test]
+    fn hand_exec_policy_from_hand_toml_is_used_as_written() {
+        let def = hand_toml(
+            r#"["shell_exec"]"#,
+            r#"
+[exec_policy]
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+timeout_secs = 120
+
+[exec_policy.containers]
+name_prefixes = ["freeco-"]
+images = ["ghcr.io/freecodao/*"]
+"#,
+        );
+        let policy = hand_exec_policy(&def).expect("policy");
+        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Allowlist);
+        assert_eq!(policy.allowed_commands, vec!["podman"]);
+        assert!(policy.safe_bins.is_empty());
+        assert_eq!(policy.timeout_secs, 120);
+        let c = policy.containers.expect("containers parsed");
+        assert_eq!(c.name_prefixes, vec!["freeco-"]);
+    }
+
+    #[test]
+    fn hand_without_shell_inherits_kernel_policy() {
+        let def = hand_toml(r#"["file_read"]"#, "");
+        assert!(hand_exec_policy(&def).is_none());
+    }
+
+    #[test]
+    fn no_bundled_shell_hand_silently_loses_or_gains_shell() {
+        for (id, toml_content, skill) in freeco_hands::bundled::bundled_hands() {
+            let def = freeco_hands::bundled::parse_bundled(id, toml_content, skill).unwrap();
+            if def.tools.iter().any(|t| t == "shell_exec") {
+                assert!(
+                    def.exec_policy.is_some(),
+                    "bundled hand '{id}' lists shell_exec but has no [exec_policy]"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_manifest_to_capabilities() {

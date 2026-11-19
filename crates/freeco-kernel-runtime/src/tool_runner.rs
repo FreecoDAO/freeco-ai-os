@@ -177,6 +177,67 @@ fn refuse_before_approval(
     None
 }
 
+/// Shell policy that refuses a command outright, before anyone is asked to
+/// approve it: the manifest's `capabilities.shell` patterns and the container
+/// limits in `exec_policy.containers`. Applies to `shell_exec` and
+/// `process_start`.
+fn refuse_shell_by_policy(
+    tool_use_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+    exec_policy: Option<&freeco_types::config::ExecPolicy>,
+) -> Option<ToolResult> {
+    let command = input["command"].as_str().unwrap_or("");
+    // process_start never goes through a shell: check its argv as given.
+    let argv: Option<Vec<String>> = match tool_name {
+        "shell_exec" => None,
+        "process_start" => {
+            let mut v = vec![command.to_string()];
+            if let Some(args) = input["args"].as_array() {
+                v.extend(args.iter().filter_map(|a| a.as_str().map(String::from)));
+            }
+            Some(v)
+        }
+        _ => return None,
+    };
+    let display = argv
+        .as_ref()
+        .map(|v| v.join(" "))
+        .unwrap_or_else(|| command.to_string());
+    let refuse = |content: String| {
+        warn!(tool_name, "Refused by shell policy");
+        Some(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content,
+            is_error: true,
+        })
+    };
+
+    if let (Some(kh), Some(agent_id)) = (kernel, caller_agent_id) {
+        let patterns = kh.shell_patterns(agent_id);
+        let safe_bins: &[String] = exec_policy.map(|p| p.safe_bins.as_slice()).unwrap_or(&[]);
+        if let Err(reason) =
+            crate::subprocess_sandbox::check_shell_capability(&display, &patterns, safe_bins)
+        {
+            return refuse(format!("{tool_name} blocked: {reason}"));
+        }
+    }
+
+    if let Some(containers) = exec_policy.and_then(|p| p.containers.as_ref()) {
+        let protected = crate::container_admin::protected_containers();
+        let checked = match &argv {
+            Some(v) => crate::container_policy::check_argv(v, containers, &protected),
+            None => crate::container_policy::check_command(command, containers, &protected),
+        };
+        if let Err(reason) = checked {
+            return refuse(format!("{tool_name} blocked: {reason}"));
+        }
+    }
+    None
+}
+
 /// Ask a human to approve this call when the tool needs it. Returns the
 /// result to give the model when the call must not run, or `None` to go on.
 async fn approval_gate(
@@ -282,6 +343,18 @@ pub async fn approve_before_deadline(
     if refuse_before_approval(tool_use_id, tool_name, allowed_tools).is_some() {
         return None;
     }
+    if refuse_shell_by_policy(
+        tool_use_id,
+        tool_name,
+        input,
+        kernel,
+        caller_agent_id,
+        exec_policy,
+    )
+    .is_some()
+    {
+        return None;
+    }
     approval_gate(
         tool_use_id,
         tool_name,
@@ -333,6 +406,16 @@ pub async fn execute_tool(
     let tool_name = normalize_tool_name(tool_name);
 
     if let Some(refused) = refuse_before_approval(tool_use_id, tool_name, allowed_tools) {
+        return refused;
+    }
+    if let Some(refused) = refuse_shell_by_policy(
+        tool_use_id,
+        tool_name,
+        input,
+        kernel,
+        caller_agent_id,
+        exec_policy,
+    ) {
         return refused;
     }
 
@@ -7198,5 +7281,73 @@ mod tests {
         let unknown = scoped_memory_key(Some("agent"), "notes", None);
         assert_ne!(unknown, "notes");
         assert!(unknown.starts_with("agent:"));
+    }
+
+    // ── exec_policy.containers is enforced before approval ───────────────
+
+    fn container_exec_policy() -> freeco_types::config::ExecPolicy {
+        freeco_types::config::ExecPolicy {
+            mode: freeco_types::config::ExecSecurityMode::Allowlist,
+            safe_bins: Vec::new(),
+            allowed_commands: vec!["podman".to_string()],
+            containers: Some(freeco_types::config::ContainerPolicy {
+                name_prefixes: vec!["freeco-".to_string()],
+                images: vec!["localhost/*".to_string()],
+                allow_host_network: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn container_policy_refuses_shell_exec_before_approval() {
+        let policy = container_exec_policy();
+        let input = serde_json::json!({
+            "command": "podman run --privileged --name freeco-x localhost/app"
+        });
+        let refused =
+            refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy))
+                .expect("privileged run must be refused");
+        assert!(refused.is_error);
+        assert!(refused.content.contains("exec_policy.containers"));
+
+        let fine = serde_json::json!({ "command": "podman ps -a" });
+        assert!(
+            refuse_shell_by_policy("t2", "shell_exec", &fine, None, None, Some(&policy)).is_none()
+        );
+    }
+
+    #[test]
+    fn container_policy_checks_process_start_argv() {
+        let policy = container_exec_policy();
+        let input = serde_json::json!({
+            "command": "podman",
+            "args": ["stop", "postgres"]
+        });
+        assert!(
+            refuse_shell_by_policy("t1", "process_start", &input, None, None, Some(&policy))
+                .is_some()
+        );
+        let fine = serde_json::json!({ "command": "podman", "args": ["logs", "freeco-crm"] });
+        assert!(
+            refuse_shell_by_policy("t2", "process_start", &fine, None, None, Some(&policy))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_container_policy_means_no_container_check() {
+        let policy = freeco_types::config::ExecPolicy::default();
+        let input = serde_json::json!({ "command": "podman run --privileged alpine" });
+        assert!(
+            refuse_shell_by_policy("t1", "shell_exec", &input, None, None, Some(&policy))
+                .is_none()
+        );
+        // Other tools are never touched.
+        let policy = container_exec_policy();
+        assert!(
+            refuse_shell_by_policy("t2", "file_read", &input, None, None, Some(&policy))
+                .is_none()
+        );
     }
 }

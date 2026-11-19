@@ -431,6 +431,62 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
     }
 }
 
+/// Safe bins that run another program or a script of their own (`env cmd`,
+/// `find -exec`, `sed e`, `awk system()`, `xargs cmd`). They do not get the
+/// `capabilities.shell` exemption below.
+const SAFE_BINS_THAT_EXEC: &[&str] = &["env", "find", "sed", "awk", "xargs"];
+
+/// Check a shell command against the manifest's `capabilities.shell` globs
+/// (`Capability::ShellExec`), e.g. `["podman *", "cargo test *"]`.
+///
+/// - Empty `patterns`: no restriction from this field; `exec_policy` alone
+///   decides. The builtin `shell_exec` never checked the field before, and
+///   hands and agents made in the dashboard have none, so treating empty as
+///   "deny" would switch their shell off without a word.
+/// - Otherwise the whole command must match one pattern (`*` as in every
+///   capability glob). A path on the first word is ignored, so
+///   `/usr/bin/podman ps` matches `podman *`.
+/// - Read-only `safe_bins` from the exec policy (`ls`, `cat`, `grep`, ...)
+///   stay allowed, except the ones that can run another program.
+pub fn check_shell_capability(
+    command: &str,
+    patterns: &[String],
+    safe_bins: &[String],
+) -> Result<(), String> {
+    use freeco_types::capability::{capability_matches, Capability};
+
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let command = command.trim();
+    let base = extract_base_command(command);
+    let normalized = match command.split_once(char::is_whitespace) {
+        Some((_, rest)) => format!("{base} {}", rest.trim_start()),
+        None => base.to_string(),
+    };
+    let required = [
+        Capability::ShellExec(command.to_string()),
+        Capability::ShellExec(normalized),
+    ];
+    let granted = patterns.iter().any(|p| {
+        let grant = Capability::ShellExec(p.clone());
+        required.iter().any(|r| capability_matches(&grant, r))
+    });
+    if granted {
+        return Ok(());
+    }
+    if !SAFE_BINS_THAT_EXEC.contains(&base) && safe_bins.iter().any(|b| b == base) {
+        return Ok(());
+    }
+    Err(format!(
+        "'{}' does not match this agent's capabilities.shell ({}), so nothing ran. Only \
+         commands matching one of those patterns may run; the owner can widen the list in \
+         the agent's manifest.",
+        crate::str_utils::safe_truncate_str(command, 120),
+        patterns.join(", ")
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Process tree kill — cross-platform graceful → force kill
 // ---------------------------------------------------------------------------
@@ -1268,5 +1324,54 @@ mod tests {
         let cmds = extract_all_commands(cmd);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0], "\u{4f60}\u{597d}");
+    }
+
+    // --- capabilities.shell (check_shell_capability) ---
+
+    fn pats(p: &[&str]) -> Vec<String> {
+        p.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn shell_capability_empty_list_does_not_restrict() {
+        assert!(check_shell_capability("rm -rf /tmp/x", &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_matching_glob_passes() {
+        let p = pats(&["podman *", "cargo test *"]);
+        assert!(check_shell_capability("podman ps -a", &p, &[]).is_ok());
+        assert!(check_shell_capability("  podman ps -a  ", &p, &[]).is_ok());
+        assert!(check_shell_capability("cargo test --workspace", &p, &[]).is_ok());
+        assert!(check_shell_capability("/usr/bin/podman ps", &p, &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_non_matching_is_refused() {
+        let p = pats(&["podman *", "cargo test *"]);
+        let err = check_shell_capability("curl https://x", &p, &[]).unwrap_err();
+        assert!(err.contains("capabilities.shell"));
+        assert!(check_shell_capability("cargo build", &p, &[]).is_err());
+        // The pattern needs the space: `podmanx` is a different binary.
+        assert!(check_shell_capability("podmanx ps", &p, &[]).is_err());
+    }
+
+    #[test]
+    fn shell_capability_star_allows_everything() {
+        assert!(check_shell_capability("anything at all", &pats(&["*"]), &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_keeps_read_only_safe_bins() {
+        let p = pats(&["python *"]);
+        let safe = pats(&["ls", "cat", "env", "find", "sed"]);
+        assert!(check_shell_capability("ls -la", &p, &safe).is_ok());
+        assert!(check_shell_capability("cat notes.txt", &p, &safe).is_ok());
+        // Safe bins that can run another program are not exempt.
+        assert!(check_shell_capability("env rm -rf x", &p, &safe).is_err());
+        assert!(check_shell_capability("find . -exec rm {} ;", &p, &safe).is_err());
+        assert!(check_shell_capability("sed -n 1p f", &p, &safe).is_err());
+        // Without safe bins, nothing outside the patterns.
+        assert!(check_shell_capability("ls -la", &p, &[]).is_err());
     }
 }

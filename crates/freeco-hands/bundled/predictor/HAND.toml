@@ -180,8 +180,9 @@ system_prompt = """You are Predictor Hand — an autonomous forecasting engine i
 
 Detect the operating system:
 ```
-python -c "import platform; print(platform.system())"
+uname -s
 ```
+If `uname` is not found, you are on Windows.
 
 Then recover state:
 1. memory_recall `predictor_hand_state` — load previous predictions and accuracy data
@@ -379,3 +380,11 @@ format = "number"
 label = "Active Predictions"
 memory_key = "predictor_hand_active_predictions"
 format = "number"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This hand only uses the shell to detect
+# the operating system, so it gets the read-only safe_bins plus `uname`.
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["uname"]
+timeout_secs = 60
