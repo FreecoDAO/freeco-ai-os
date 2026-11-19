@@ -744,10 +744,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
+        // A new conversation, not a deleted one: `/new` on Telegram or
+        // WhatsApp used to wipe the conversation the dashboard was showing.
         self.kernel
-            .reset_session(agent_id)
+            .start_new_session(agent_id)
             .map_err(|e| format!("{e}"))?;
-        Ok("Session reset. Chat history cleared.".to_string())
+        Ok("New conversation started. The previous one is kept under History.".to_string())
     }
 
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
@@ -1992,6 +1994,45 @@ pub async fn reload_channels_from_disk(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// `/new` typed on Telegram or WhatsApp reached `reset_session`, which
+    /// deleted the conversation the dashboard was showing.
+    #[tokio::test]
+    async fn a_new_from_a_channel_keeps_the_dashboard_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = freeco_types::config::KernelConfig {
+            home_dir: tmp.path().to_path_buf(),
+            data_dir: tmp.path().join("data"),
+            ..Default::default()
+        };
+        let kernel = Arc::new(FreecoKernel::boot_with_config(config).unwrap());
+        let manifest: freeco_types::agent::AgentManifest = toml::from_str(
+            "name = \"bridged\"\nmodule = \"builtin:chat\"\n[model]\nprovider = \"openai\"\nmodel = \"gpt-4o-mini\"\nsystem_prompt = \"t\"\n",
+        )
+        .unwrap();
+        let agent = kernel.spawn_agent(manifest).unwrap();
+        let old = kernel.registry.get(agent).unwrap().session_id;
+        let mut session = kernel.memory.get_session(old).unwrap().unwrap();
+        session
+            .messages
+            .push(freeco_types::message::Message::user("dashboard work"));
+        kernel.memory.save_session(&session).unwrap();
+
+        let adapter = KernelBridgeAdapter {
+            kernel: Arc::clone(&kernel),
+            started_at: Instant::now(),
+        };
+        adapter.reset_session(agent).await.unwrap();
+
+        assert_ne!(kernel.registry.get(agent).unwrap().session_id, old);
+        let kept = kernel.memory.get_session(old).unwrap();
+        assert!(
+            kept.is_some_and(|s| s.messages.len() == 1),
+            "the dashboard conversation must survive a channel /new"
+        );
+    }
+
     #[test]
     fn channel_text_and_text_blocks_are_marked_when_they_read_like_an_injection() {
         use freeco_types::message::ContentBlock;

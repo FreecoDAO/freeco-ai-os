@@ -386,7 +386,11 @@ pub async fn agent_ws(
     }
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
+    // Room for a 16 MB message plus its JSON envelope in one frame.
+    let room = crate::routes::MAX_MESSAGE_BYTES + 1024 * 1024;
+    ws.max_frame_size(room)
+        .max_message_size(room)
+        .on_upgrade(move |socket| handle_agent_ws(socket, state, agent_id, id_str, guard))
         .into_response()
 }
 
@@ -497,10 +501,13 @@ async fn handle_agent_ws(
             }
             _ = tokio::time::sleep(WS_IDLE_TIMEOUT.saturating_sub(last_activity.elapsed())) => {
                 info!(agent_id = %id_str, "WebSocket idle timeout (30 min)");
+                // Its own type, not "error": closing an unused socket is
+                // housekeeping. The dashboard reconnects without telling the
+                // user, who otherwise saw a failure in a chat that had none.
                 let _ = send_json(
                     &sender,
                     &serde_json::json!({
-                        "type": "error",
+                        "type": "idle_timeout",
                         "content": "Connection closed due to inactivity (30 min timeout)",
                     }),
                 ).await;
@@ -520,14 +527,15 @@ async fn handle_agent_ws(
             Message::Text(text) => {
                 last_activity = std::time::Instant::now();
 
-                // SECURITY: Reject oversized WebSocket messages (64KB max)
-                const MAX_WS_MSG_SIZE: usize = 64 * 1024;
-                if text.len() > MAX_WS_MSG_SIZE {
+                // SECURITY: Reject oversized WebSocket messages. Long ones are
+                // accepted and kept in the agent's workspace (see
+                // `stage_long_message`); the cap only guards memory.
+                if text.len() > crate::routes::MAX_MESSAGE_BYTES {
                     let _ = send_json(
                         &sender,
                         &serde_json::json!({
                             "type": "error",
-                            "content": "Message too large (max 64KB)",
+                            "content": "Message too large (max 16 MB)",
                         }),
                     )
                     .await;
@@ -640,7 +648,7 @@ async fn handle_text_message(
             // Resolve file attachments into image content blocks
             let mut has_images = false;
             let mut ws_content_blocks: Option<Vec<freeco_types::message::ContentBlock>> = None;
-            let mut content = content;
+            let mut content = crate::routes::stage_long_message(&state.kernel, agent_id, &content);
             if let Some(attachments) = parsed["attachments"].as_array() {
                 let refs: Vec<crate::types::AttachmentRef> = attachments
                     .iter()
@@ -728,6 +736,46 @@ async fn handle_text_message(
                         return;
                     }
                 },
+            };
+            // `new_session`: start a conversation named `title` and send there
+            // (the assistant popup's "new task"). Reported back as a
+            // `session` frame so the window knows where it is now. Like a
+            // pinned send, it leaves the agent's current conversation alone.
+            let pinned_session = match pinned_session {
+                Some(sid) => Some(sid),
+                None if parsed["new_session"].as_bool().unwrap_or(false) => {
+                    let title = parsed["title"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(|t| t.chars().take(60).collect::<String>());
+                    match state
+                        .kernel
+                        .create_agent_session_opts(agent_id, title.as_deref(), false)
+                    {
+                        Ok(v) => {
+                            let _ = send_json(
+                                sender,
+                                &serde_json::json!({
+                                    "type": "session",
+                                    "agent_id": agent_id.to_string(),
+                                    "session_id": v["session_id"],
+                                    "label": v["label"],
+                                }),
+                            )
+                            .await;
+                            v["session_id"]
+                                .as_str()
+                                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                                .map(freeco_types::agent::SessionId)
+                        }
+                        Err(e) => {
+                            warn!(agent_id = %agent_id, "Could not start a new conversation: {e}");
+                            None
+                        }
+                    }
+                }
+                None => None,
             };
             let started = match pinned_session {
                 Some(session_id) => state.kernel.send_message_streaming_in_session(
@@ -1066,9 +1114,10 @@ async fn handle_command(
         .unwrap_or(cmd);
 
     match canonical {
-        "new" => match state.kernel.reset_session(agent_id) {
-            Ok(()) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
+        // A new conversation; the previous one stays listed under History.
+        "new" => match state.kernel.start_new_session(agent_id) {
+            Ok(sid) => {
+                serde_json::json!({"type": "command_result", "command": cmd, "session_id": sid.0.to_string(), "message": "New conversation started. The previous one is kept under History."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },

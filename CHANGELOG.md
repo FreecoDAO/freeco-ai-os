@@ -104,6 +104,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
   stale memory when opening a database with a `-wal` file someone else wrote
   (RUSTSEC-2026-0459).
+- Conversations no longer disappear. `/new` -- in the chat, over the
+  WebSocket, or typed on Telegram or WhatsApp -- deleted the conversation the
+  dashboard was showing; it now starts a new one and keeps the old one under
+  History. Only an explicit delete removes a conversation.
+- A hand's agent keeps its conversation across restarts. Every boot
+  reactivated the hand, which deleted all of its agent's conversations and
+  gave it a fresh empty one.
+- Switching conversation is saved at once. It was saved only at a clean
+  shutdown, so after a crash the agent came back on the conversation it had
+  before.
+- The assistant popup reopens the conversation it was in after a reload, and
+  "new chat" and "open from History" switch the conversation on the server,
+  not only on screen: messages went to whichever conversation the CEO was in,
+  and a new task's title renamed that one.
+- The popup always talks to the same CEO. Two bundled agents carry the `ceo`
+  tag and the first one found won, so the popup could change agents, and
+  histories, between restarts. The bundled `freeco-ceo` wins, then the oldest.
+- An agent sees the whole conversation. History sent to the model was capped
+  at 20 raw messages, and one answer with nine tool calls is eighteen, so the
+  request it answered fell out of view. There is no cap by default; an agent
+  that sets `max_history_messages` now gets that many turns, never half a
+  turn.
+- Compaction waits until the conversation nears 80% of the model's own
+  context window, and keeps the last four requests whole. It fired at 30
+  messages and kept the last ten. The stored conversation stays complete; the
+  model is sent the summary plus what follows it.
+- An idle WebSocket closed after 30 minutes no longer shows as an error; the
+  dashboard reconnects quietly.
+- Pasting a key into the vault dialog's name box says the box is for the name
+  only, instead of quoting the naming rule.
 
 ### Changed
 
@@ -113,6 +143,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from this repository lands in a public image.
 
 ### Added
+
+- Messages and uploads up to 16 MB (were 64 KB and 10 MB). A message over
+  32 KB is saved in the agent's workspace as `pasted/…md`; the model gets its
+  start, its end and the file's name, and reads the rest with its file tools.
+- `POST /api/transcribe`: the words in a piece of audio, nothing stored.
+  Dictation in the chat and the popup types into the box while you speak and
+  no longer attaches the recording to the message.
+- `POST /api/dispatch`: the popup asks the CEO's own model which of the CEO's
+  conversations a new message belongs in -- this one, an existing one, a new
+  one, or a new project, company, team or hand (asked first). Every message
+  runs on its own connection, side by side. Contacts' channel conversations
+  are never offered.
+- The WebSocket accepts `new_session` and `title` to start a named
+  conversation and send there; a `session` frame reports its id.
+- Unsent drafts are kept per chat and in the popup, across chat switches and
+  reloads.
+- Pages an agent builds open as pages (an "Open" button in the chat's files
+  and artifacts), sandboxed: scripts run, but on an opaque origin and with
+  only `https:` connections.
+- Agents are told to link workspace files they hand you, to answer every
+  question in a message, and to use the conversation above.
 
 - Skills install straight from GitHub. The Skills page has a GitHub tab:
   paste `owner/repo/skills` or a link, preview, tick the skills, install.

@@ -161,6 +161,14 @@ impl MemorySubstrate {
         self.structured.remove_agent(agent_id)
     }
 
+    /// Remove an agent from persistent storage, leaving its conversations.
+    ///
+    /// For an agent replaced under the same id (a hand reactivated at boot):
+    /// what it talked about belongs to the replacement.
+    pub fn remove_agent_keeping_sessions(&self, agent_id: AgentId) -> FreecoResult<()> {
+        self.structured.remove_agent(agent_id)
+    }
+
     /// Load all agent entries from persistent storage.
     pub fn load_all_agents(&self) -> FreecoResult<Vec<AgentEntry>> {
         self.structured.load_all_agents()
@@ -301,6 +309,15 @@ impl MemorySubstrate {
     /// List all sessions for a specific agent.
     pub fn list_agent_sessions(&self, agent_id: AgentId) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_agent_sessions(agent_id)
+    }
+
+    /// An agent's most recent conversations with label and last request.
+    pub fn recent_session_topics(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        self.sessions.recent_session_topics(agent_id, limit)
     }
 
     /// Create a new session with an optional label.

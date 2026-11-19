@@ -44,6 +44,62 @@ pub struct CompactionConfig {
     pub token_threshold_ratio: f64,
     /// Model context window size in tokens.
     pub context_window_tokens: usize,
+    /// When above zero, keep this many recent requests whole (each user
+    /// message with every tool call and reply that followed it) instead of
+    /// `keep_recent` raw messages, which could cut a request off from the
+    /// work done for it.
+    pub keep_recent_turns: usize,
+    /// Upper bound for what is kept verbatim, as a fraction of the context
+    /// window: a single huge request is still summarised rather than kept.
+    pub keep_recent_ratio: f64,
+}
+
+impl CompactionConfig {
+    /// Compaction the way Claude Code does it: the conversation is left
+    /// whole until it nears the model's real context window, then everything
+    /// but the last few requests is summarised.
+    ///
+    /// The defaults compacted after 30 raw messages -- one or two tool-heavy
+    /// requests -- and kept only the last 10 messages, so agents forgot what
+    /// they had been asked minutes earlier.
+    pub fn for_context_window(context_window_tokens: usize) -> Self {
+        Self {
+            // The message count no longer triggers anything; size does.
+            threshold: usize::MAX,
+            token_threshold_ratio: 0.8,
+            context_window_tokens: if context_window_tokens > 0 {
+                context_window_tokens
+            } else {
+                200_000
+            },
+            keep_recent_turns: 4,
+            keep_recent_ratio: 0.35,
+            max_summary_tokens: 4096,
+            ..Self::default()
+        }
+    }
+}
+
+/// Where to split so that the last `turns` requests are kept whole, moving
+/// later while what is kept exceeds `max_tokens` (always keeping the last
+/// request). Returns 0 when there is nothing older to summarise.
+pub fn split_keeping_turns(messages: &[Message], turns: usize, max_tokens: usize) -> usize {
+    let starts: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| crate::agent_loop::is_user_turn(m))
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() <= 1 || turns == 0 {
+        return 0;
+    }
+    let mut idx = starts.len().saturating_sub(turns);
+    while idx + 1 < starts.len()
+        && estimate_token_count(&messages[starts[idx]..], None, None) > max_tokens
+    {
+        idx += 1;
+    }
+    starts[idx]
 }
 
 impl Default for CompactionConfig {
@@ -60,6 +116,8 @@ impl Default for CompactionConfig {
             max_retries: 3,
             token_threshold_ratio: 0.7,
             context_window_tokens: 200_000,
+            keep_recent_turns: 0,
+            keep_recent_ratio: 0.35,
         }
     }
 }
@@ -669,7 +727,14 @@ pub async fn compact_session(
     config: &CompactionConfig,
 ) -> Result<CompactionResult, String> {
     let msg_count = session.messages.len();
-    if msg_count <= config.keep_recent {
+    let raw_split = if config.keep_recent_turns > 0 {
+        let max_kept =
+            (config.context_window_tokens as f64 * config.keep_recent_ratio).max(1.0) as usize;
+        split_keeping_turns(&session.messages, config.keep_recent_turns, max_kept)
+    } else {
+        msg_count.saturating_sub(config.keep_recent)
+    };
+    if raw_split == 0 {
         return Ok(CompactionResult {
             summary: String::new(),
             kept_messages: session.messages.clone(),
@@ -679,7 +744,6 @@ pub async fn compact_session(
         });
     }
 
-    let raw_split = msg_count.saturating_sub(config.keep_recent);
     // Adjust split point to avoid cutting between a ToolUse assistant message
     // and its ToolResult user message.  If the split lands right between them,
     // pull back by 1 so the pair stays together in `kept`.
@@ -1516,5 +1580,58 @@ mod tests {
         assert_eq!(adjust_split_for_tool_pairs(&messages, 0), 0);
         assert_eq!(adjust_split_for_tool_pairs(&messages, 1), 1);
         assert_eq!(adjust_split_for_tool_pairs(&messages, 5), 5);
+    }
+
+    fn request_with_steps(ask: &str, steps: usize) -> Vec<Message> {
+        let mut out = vec![Message::user(ask)];
+        for i in 0..steps {
+            out.push(Message::assistant_with_blocks(vec![
+                ContentBlock::ToolUse {
+                    id: format!("{ask}-{i}"),
+                    name: "file_write".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                },
+            ]));
+            out.push(Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: format!("{ask}-{i}"),
+                tool_name: "file_write".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+            }]));
+        }
+        out.push(Message::assistant("done"));
+        out
+    }
+
+    /// Fifty messages used to trigger compaction and keep only the last ten,
+    /// cutting the request off from its own tool calls. Now nothing happens
+    /// below the token threshold, and what is kept starts at a request.
+    #[test]
+    fn compaction_waits_for_the_window_and_keeps_whole_requests() {
+        let config = CompactionConfig::for_context_window(200_000);
+        let mut messages = Vec::new();
+        for ask in ["one", "two", "three", "four", "five", "six"] {
+            messages.extend(request_with_steps(ask, 4));
+        }
+        let session = Session {
+            id: freeco_types::agent::SessionId::new(),
+            agent_id: freeco_types::agent::AgentId::new(),
+            messages: messages.clone(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        assert!(messages.len() > 30);
+        assert!(!needs_compaction(&session, &config));
+        let est = estimate_token_count(&messages, None, None);
+        assert!(!needs_compaction_by_tokens(est, &config));
+
+        let split = split_keeping_turns(&messages, config.keep_recent_turns, 1_000_000);
+        assert_eq!(messages[split].content.text_content(), "three");
+        // A budget too small for four requests still keeps the last whole.
+        let split = split_keeping_turns(&messages, 4, 1);
+        assert_eq!(messages[split].content.text_content(), "six");
+        // One request alone has nothing older to summarise.
+        assert_eq!(split_keeping_turns(&request_with_steps("x", 3), 4, 1), 0);
     }
 }

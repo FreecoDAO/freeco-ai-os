@@ -339,6 +339,87 @@ fn safe_upload_name(name: &str, fallback: &str) -> String {
     }
 }
 
+/// The largest message accepted: 16 MB, about 2.5 million words.
+///
+/// It was 64 KB, so a long paste was refused outright -- and only the socket
+/// said so, in a frame the dashboard showed as a generic error.
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Above this, a message is kept in the agent's workspace rather than inline.
+const INLINE_MESSAGE_BYTES: usize = 32 * 1024;
+
+/// A long paste goes into the agent's workspace; the model gets its start,
+/// its end and where the whole of it is.
+///
+/// The way Claude Code treats a long paste. Sent inline, a book-length paste
+/// would overflow the model's context on its own and then be re-sent with
+/// every later message; as a file the agent reads it in parts with its file
+/// tools, and the conversation stays small. The end is kept as well as the
+/// start because that is where people put the question about the text.
+pub fn stage_long_message(
+    kernel: &freeco_kernel::FreecoKernel,
+    agent_id: AgentId,
+    text: &str,
+) -> String {
+    if text.len() <= INLINE_MESSAGE_BYTES {
+        return text.to_string();
+    }
+    let Some(workspace) = kernel
+        .registry
+        .get(agent_id)
+        .and_then(|e| e.manifest.workspace.clone())
+    else {
+        return text.to_string();
+    };
+    let dir = workspace.join("pasted");
+    let name = format!(
+        "pasted-{}-{:04x}.md",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        rand::random::<u16>()
+    );
+    if std::fs::create_dir_all(&dir).is_err() || std::fs::write(dir.join(&name), text).is_err() {
+        return text.to_string();
+    }
+    long_message_preview(text, &name)
+}
+
+/// What the model is sent for a long message saved as `pasted/<name>`.
+fn long_message_preview(text: &str, name: &str) -> String {
+    let words = text.split_whitespace().count();
+    let head: String = text.chars().take(5000).collect();
+    let tail: String = {
+        let total = text.chars().count();
+        text.chars().skip(total.saturating_sub(1500)).collect()
+    };
+    format!(
+        "{head}\n\n[… the middle of this message is not shown here …]\n\n{tail}\n\n\
+         [This message is long ({words} words). The whole text is saved in your workspace \
+         as pasted/{name}. Read it with file_read, in parts if needed, before answering \
+         anything about it -- do not guess at what the part not shown says.]"
+    )
+}
+
+#[cfg(test)]
+mod long_message_tests {
+    use super::*;
+
+    /// A book-length paste with the question at the end: the model sees the
+    /// start, the question, and where the rest is.
+    #[test]
+    fn a_long_paste_keeps_its_start_its_question_and_its_file() {
+        let body = "Lorem ipsum dolor sit amet. ".repeat(40_000);
+        let text = format!("Chapter one.\n{body}\nPlease summarise this in five bullets.");
+        let sent = long_message_preview(&text, "pasted-x.md");
+        assert!(sent.starts_with("Chapter one."));
+        assert!(sent.contains("Please summarise this in five bullets."));
+        assert!(sent.contains("pasted/pasted-x.md"));
+        assert!(sent.len() < 10_000, "preview stays small: {}", sent.len());
+    }
+
+    // Room for a million words (~7 MB), checked when this compiles.
+    const _: () = assert!(MAX_MESSAGE_BYTES >= 7 * 1024 * 1024);
+}
+
 /// Put every attachment where the agent can actually reach it, and say where.
 ///
 /// Attachments used to reach the agent only if they were images: everything
@@ -584,12 +665,11 @@ pub async fn send_message(
         );
     }
 
-    // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // SECURITY: Reject oversized messages to prevent OOM.
+    if req.message.len() > MAX_MESSAGE_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": "Message too large (max 16 MB)"})),
         );
     }
 
@@ -633,6 +713,8 @@ pub async fn send_message(
         None => req.message.clone(),
     };
     // Every attachment, not only images, goes into the agent's workspace.
+    // A long paste goes into the agent's workspace, with a preview inline.
+    let text = stage_long_message(&state.kernel, agent_id, &req.message);
     let message = match stage_attachments(&state.kernel, agent_id, &req.attachments) {
         Some(note) => format!("{text}{note}"),
         None => text,
@@ -2211,12 +2293,11 @@ pub async fn send_message_stream(
     use freeco_kernel_runtime::llm_driver::StreamEvent;
     use futures::stream;
 
-    // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
-    const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
-    if req.message.len() > MAX_MESSAGE_SIZE {
+    // SECURITY: Reject oversized messages to prevent OOM.
+    if req.message.len() > MAX_MESSAGE_BYTES {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": "Message too large (max 16 MB)"})),
         )
             .into_response();
     }
@@ -2248,9 +2329,10 @@ pub async fn send_message_stream(
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    let message = stage_long_message(&state.kernel, agent_id, &req.message);
     let (rx, _handle) = match state.kernel.send_message_streaming(
         agent_id,
-        &req.message,
+        &message,
         Some(kernel_handle),
         req.sender_id,
         req.sender_name,
@@ -8975,7 +9057,11 @@ pub async fn switch_agent_session(
 
 // ── Extended Chat Command API Endpoints ─────────────────────────────────
 
-/// POST /api/agents/{id}/session/reset — Reset an agent's session.
+/// POST /api/agents/{id}/session/reset — Start a new conversation.
+///
+/// The previous conversation is kept and stays listed; deleting one is a
+/// separate, explicit action (`DELETE /api/sessions/{id}`, or the chat's
+/// delete-conversation tool).
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -8989,10 +9075,14 @@ pub async fn reset_session(
             )
         }
     };
-    match state.kernel.reset_session(agent_id) {
-        Ok(()) => (
+    match state.kernel.start_new_session(agent_id) {
+        Ok(sid) => (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
+            Json(serde_json::json!({
+                "status": "ok",
+                "message": "New conversation started",
+                "session_id": sid.0.to_string(),
+            })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9460,6 +9550,29 @@ pub async fn get_agent_history(
     }
 }
 
+/// The CEO among the agents carrying the `ceo` tag, by one fixed rule.
+///
+/// Two bundled agents carry the tag (`ceo` and `freeco-ceo`), and the first
+/// match in the registry's unordered map won: the widget could talk to one
+/// agent today and the other after a restart, each with its own history, so
+/// conversations seemed to disappear. The bundled `freeco-ceo` wins; among
+/// the rest, the oldest agent (it holds the history), then the id.
+pub(crate) fn pick_ceo(
+    agents: &[freeco_types::agent::AgentEntry],
+) -> Option<&freeco_types::agent::AgentEntry> {
+    agents
+        .iter()
+        .filter(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")))
+        .min_by(|a, b| {
+            let bundled =
+                |e: &freeco_types::agent::AgentEntry| !e.name.eq_ignore_ascii_case("freeco-ceo");
+            bundled(a)
+                .cmp(&bundled(b))
+                .then(a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        })
+}
+
 /// GET /api/assistant — the agent the concierge widget talks to.
 ///
 /// The widget used to choose this itself, by looking for a name containing
@@ -9479,9 +9592,7 @@ pub async fn get_agent_history(
 pub async fn get_assistant(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.registry.list();
 
-    let by_role = agents
-        .iter()
-        .find(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")));
+    let by_role = pick_ceo(&agents);
 
     let canonical = freeco_types::agent::AgentId::from_string("freeco-concierge");
     let pick = by_role
@@ -12794,8 +12905,11 @@ struct UploadMeta {
 /// In-memory upload metadata registry.
 static UPLOAD_REGISTRY: LazyLock<DashMap<String, UploadMeta>> = LazyLock::new(DashMap::new);
 
-/// Maximum upload size: 10 MB.
-const MAX_UPLOAD_SIZE: usize = 10 * 1024 * 1024;
+/// The largest upload, and the largest audio `/api/transcribe` takes: 16 MB,
+/// the same as a message. The route's body limit in server.rs is set to
+/// match; without it the framework's 2 MB default refused larger files
+/// before this check ever ran.
+pub const MAX_UPLOAD_SIZE: usize = 16 * 1024 * 1024;
 
 /// Allowed content type prefixes for upload.
 ///
@@ -13017,6 +13131,69 @@ pub async fn upload_file(
         body["transcription_error"] = serde_json::Value::String(err);
     }
     (StatusCode::CREATED, Json(body))
+}
+
+/// POST /api/transcribe — the words in a piece of audio, nothing else.
+///
+/// For dictation that types as you speak: the dashboard sends what has been
+/// recorded so far every couple of seconds and shows the text in the input
+/// box. Unlike an upload nothing is kept -- the audio is deleted as soon as it
+/// is read -- because these are drafts of a message, not files.
+pub async fn transcribe_only(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("audio/webm")
+        .to_string();
+    if !content_type.starts_with("audio/") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "audio only"})),
+        );
+    }
+    if body.is_empty() || body.len() > MAX_UPLOAD_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "empty or too large"})),
+        );
+    }
+    let dir = std::env::temp_dir().join("freeco_dictation");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(uuid::Uuid::new_v4().to_string());
+    if std::fs::write(&path, &body).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "could not stage the audio"})),
+        );
+    }
+    let attachment = freeco_types::media::MediaAttachment {
+        media_type: freeco_types::media::MediaType::Audio,
+        mime_type: content_type,
+        source: freeco_types::media::MediaSource::FilePath {
+            path: path.to_string_lossy().to_string(),
+        },
+        size_bytes: body.len() as u64,
+    };
+    let result = state
+        .kernel
+        .media_engine
+        .transcribe_audio(&attachment)
+        .await;
+    let _ = std::fs::remove_file(&path);
+    match result {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"text": r.description})),
+        ),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 /// GET /api/uploads/{file_id} — Serve an uploaded file.
@@ -16236,5 +16413,57 @@ mod upload_name_tests {
     #[test]
     fn odd_characters_are_replaced_not_passed_through() {
         assert_eq!(safe_upload_name("a:b*c?.pdf", "id"), "a_b_c_.pdf");
+    }
+}
+
+#[cfg(test)]
+mod ceo_pick_tests {
+    use super::pick_ceo;
+    use freeco_types::agent::{AgentEntry, AgentId};
+
+    fn agent(name: &str, tags: &[&str], age_secs: i64) -> AgentEntry {
+        let mut e = AgentEntry {
+            id: AgentId::new(),
+            name: name.to_string(),
+            manifest: Default::default(),
+            state: freeco_types::agent::AgentState::Running,
+            mode: Default::default(),
+            created_at: chrono::Utc::now() - chrono::Duration::seconds(age_secs),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+        };
+        e.manifest.name = name.to_string();
+        e
+    }
+
+    /// Two agents carry the `ceo` tag; whichever the map yielded first won,
+    /// so the widget could change agents (and histories) between restarts.
+    #[test]
+    fn the_bundled_ceo_wins_whatever_the_order() {
+        let a = agent("ceo", &["ceo"], 100);
+        let b = agent("freeco-ceo", &["freeco", "ceo"], 10);
+        let c = agent("writer", &["writer"], 1000);
+        for order in [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![c.clone(), b.clone(), a.clone()],
+            vec![b.clone(), a.clone(), c.clone()],
+        ] {
+            assert_eq!(pick_ceo(&order).unwrap().name, "freeco-ceo");
+        }
+    }
+
+    #[test]
+    fn otherwise_the_oldest_ceo_wins() {
+        let old = agent("ceo", &["CEO"], 500);
+        let young = agent("boss", &["ceo"], 5);
+        assert_eq!(pick_ceo(&[young.clone(), old.clone()]).unwrap().name, "ceo");
+        assert_eq!(pick_ceo(&[old, young]).unwrap().name, "ceo");
+        assert!(pick_ceo(&[agent("writer", &[], 1)]).is_none());
     }
 }

@@ -764,6 +764,40 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   only as a count once the note's budget is full; instructions are kept
   longest. A paid summary for that case is not built.
 
+### Conversations kept whole -- ported from the 2026-10 daemon snapshot
+
+Checked by tests (`crates/freeco-kernel/tests/conversations_kept_test.rs`,
+the compaction and turn-cap tests in `freeco-kernel-runtime`, the bridge and
+CEO-pick tests in `freeco-api`), not yet on a running daemon.
+
+- 🟨 No history cap by default; a manifest's `max_history_messages` counts
+  turns. Compaction only near 80% of the model's window, keeping the last four
+  requests whole; the model gets summary + tail from a per-session cursor
+  (`__compaction_cursor`), the stored conversation stays complete. The
+  canonical-memory upkeep at 80 messages still summarises, but moves the
+  cursor only near the window.
+- 🟨 `/new` (chat, WebSocket, channels) starts a new conversation and keeps
+  the old one; hands resume their conversation after a restart; session
+  switches are saved at once; the popup reloads its conversation, and its
+  "new chat" / History switch on the server; one CEO by a fixed rule.
+- 🟨 16 MB messages and uploads, long pastes staged in `pasted/`,
+  `POST /api/transcribe`, `POST /api/dispatch`, drafts per chat, sandboxed
+  agent pages, idle-socket close as housekeeping.
+- ⚠️ A staged paste is stored in the conversation as its preview, so the chat
+  shows the preview, not the whole paste (the file has it).
+- ⚠️ A `/new` from a channel contact who is an operator starts a new
+  dashboard conversation for the agent; resetting only that contact's own
+  conversation is not built.
+- ⬜ Still hard deletes, by design but without an archive: "Delete
+  conversation" keeps only the trimmed canonical memory;
+  `DELETE /api/agents/{id}/history` and `DELETE /api/sessions/{id}`.
+- ⬜ Dashboard-spawned agents get random ids, so recreating the CEO orphans
+  its conversations (recoverable via `GET /api/sessions/orphaned` and
+  `POST .../adopt`); delegated tasks, team runs and per-contact chats live in
+  labelled conversations the chat page does not list.
+- ⬜ The popup's dispatcher cannot hand a message to a worker copy when the
+  CEO is busy (`parallel`): worker copies are not ported yet.
+
 ### OmniRoute as the one gateway — 2026-11-14
 
 Live now (runtime config, no build needed):
