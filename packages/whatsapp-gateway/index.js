@@ -13,6 +13,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import pino from 'pino';
+import { parseAllowlist, inboundDecision, isAllowed, jidFor } from './allowlist.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,32 +27,17 @@ const DEFAULT_AGENT = process.env.FREECO_AI_DEFAULT_AGENT || process.env.FREECO_
 const GATEWAY_TOKEN = process.env.WHATSAPP_GATEWAY_TOKEN || '';
 const FREECO_AI_API_KEY = process.env.FREECO_AI_API_KEY || process.env.FREECO_AI_API_KEY || '';
 
-// Who the agent answers. A WhatsApp number is in every group its owner was
-// ever added to, and the agent used to answer all of them, and anyone at all
-// who wrote to the number.
-//   WHATSAPP_ALLOWED_GROUPS  comma-separated group JIDs (…@g.us) to answer in,
-//                            or * for every group. Unset: groups are ignored.
-//   WHATSAPP_ALLOWED_NUMBERS comma-separated numbers (+41…) to answer in
-//                            direct chats. Unset: every direct chat is answered.
-function envList(name) {
-  return (process.env[name] || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-const ALLOWED_GROUPS = envList('WHATSAPP_ALLOWED_GROUPS');
-const ALLOWED_NUMBERS = envList('WHATSAPP_ALLOWED_NUMBERS').map(normalizeNumber);
-
-function normalizeNumber(n) {
-  return '+' + String(n).replace(/[^0-9]/g, '');
-}
-
-function groupAllowed(jid) {
-  return ALLOWED_GROUPS.includes('*') || ALLOWED_GROUPS.includes(jid);
-}
-
-function numberAllowed(phone) {
-  return ALLOWED_NUMBERS.length === 0 || ALLOWED_NUMBERS.includes(normalizeNumber(phone));
+// Who the agent talks to, in both directions. A WhatsApp number is in every
+// group its owner was ever added to, and anyone at all can write to it, so
+// only listed chats are answered and only listed chats can be written to.
+//   WHATSAPP_ALLOWED_NUMBERS comma-separated numbers (+41…) for direct chats
+//   WHATSAPP_ALLOWED_GROUPS  comma-separated group JIDs (…@g.us)
+// FreEco.ai sets both from [channels.whatsapp] allowed_users and owner_number
+// in config.toml, and checks the same list again on its side. Empty or unset:
+// nobody. There is no wildcard. Normalisation: allowlist.js.
+const ALLOWLIST = parseAllowlist(process.env.WHATSAPP_ALLOWED_NUMBERS, process.env.WHATSAPP_ALLOWED_GROUPS);
+for (const bad of ALLOWLIST.rejected) {
+  console.warn(`[gateway] Allowlist entry "${bad}" is not an international number or a group JID; it allows nothing`);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,8 +199,17 @@ async function startConnection() {
       if (msg.key.fromMe) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
+      // Allowed chats only, decided before anything else is done with the
+      // message: nothing is read, downloaded, forwarded or marked read for a
+      // chat that is not on the list (the gateway never sends read receipts).
+      const decision = inboundDecision(ALLOWLIST, msg.key);
+      if (!decision.allowed) {
+        console.log(`[gateway] Ignored a message in ${decision.isGroup ? 'group' : 'chat'} ${decision.chat}: not on the allowlist`);
+        continue;
+      }
+
       const remoteJid = msg.key.remoteJid || '';
-      const isGroup = remoteJid.endsWith('@g.us');
+      const isGroup = decision.isGroup;
 
       const content = unwrapMessage(msg.message);
       const media = mediaOf(content);
@@ -224,19 +219,13 @@ async function startConnection() {
         || '';
       if (!text && !media) continue; // Only skip truly empty messages
 
-      // For groups: real sender is in participant; for DMs: it's remoteJid
-      const senderJid = isGroup ? (msg.key.participant || '') : remoteJid;
-      const phone = '+' + senderJid.replace(/@.*$/, '');
+      // For groups: real sender is in participant; for DMs: it's remoteJid.
+      // Prefer the phone-number JID when WhatsApp gives one next to a privacy id.
+      const senderJid = isGroup
+        ? (msg.key.participantPn || msg.key.participant || '')
+        : (msg.key.senderPn || remoteJid);
+      const phone = senderJid.endsWith('@lid') ? senderJid : '+' + senderJid.replace(/[:@].*$/, '');
       const pushName = msg.pushName || phone;
-
-      if (isGroup && !groupAllowed(remoteJid)) {
-        console.log(`[gateway] Ignored a message in group ${remoteJid}: not in WHATSAPP_ALLOWED_GROUPS`);
-        continue;
-      }
-      if (!isGroup && !numberAllowed(phone)) {
-        console.log(`[gateway] Ignored a message from ${phone}: not in WHATSAPP_ALLOWED_NUMBERS`);
-        continue;
-      }
 
       // A voice note becomes its transcript; an image or document is uploaded
       // to the agent and attached. Done after the allowlist, so nothing is
@@ -255,6 +244,8 @@ async function startConnection() {
         channel: 'whatsapp',
         sender: phone,
         sender_name: pushName,
+        // The chat the daemon re-checks against the allowlist.
+        chat_jid: remoteJid,
       };
       if (isGroup) {
         metadata.group_jid = remoteJid;
@@ -609,15 +600,24 @@ async function forwardToFreecoAi(text, phone, pushName, metadata, conversationId
 // ---------------------------------------------------------------------------
 // Send a message via Baileys (called by FreEco.ai for outgoing)
 // ---------------------------------------------------------------------------
+class NotAllowedError extends Error {}
+
 async function sendMessage(to, text) {
+  // Allowed chats only on the way out too, checked before the connection so
+  // the caller learns the real reason.
+  const jid = jidFor(to);
+  if (!jid || !isAllowed(ALLOWLIST, jid)) {
+    throw new NotAllowedError(`WhatsApp chat "${to}" is not on the allowlist; nothing was sent`);
+  }
   if (!sock || connStatus !== 'connected') {
     throw new Error('WhatsApp not connected');
   }
-
-  // If already a full JID (group or user), use as-is; otherwise normalize phone → JID
-  const jid = to.includes('@') ? to : to.replace(/^\+/, '') + '@s.whatsapp.net';
-
   await sock.sendMessage(jid, { text });
+}
+
+// Whether a previous pairing left credentials, so no QR scan is needed.
+function hasCredentials() {
+  return fs.existsSync(path.join(__dirname, 'auth_store', 'creds.json'));
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +715,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname === '/login/status') {
       return jsonResponse(res, 200, {
         connected: connStatus === 'connected',
+        // disconnected | qr_ready | connected
+        state: connStatus,
+        qr_needed: connStatus === 'qr_ready' || (connStatus === 'disconnected' && !hasCredentials()),
         message: statusMessage,
         expired: qrExpired,
       });
@@ -729,7 +732,12 @@ const server = http.createServer(async (req, res) => {
         return jsonResponse(res, 400, { error: 'Missing "to" or "text" field' });
       }
 
-      await sendMessage(to, text);
+      try {
+        await sendMessage(String(to), String(text));
+      } catch (err) {
+        if (err instanceof NotAllowedError) return jsonResponse(res, 403, { error: err.message });
+        throw err;
+      }
       return jsonResponse(res, 200, { success: true, message: 'Sent' });
     }
 
@@ -738,6 +746,8 @@ const server = http.createServer(async (req, res) => {
       return jsonResponse(res, 200, {
         status: 'ok',
         connected: connStatus === 'connected',
+        state: connStatus,
+        allowed_chats: ALLOWLIST.entries.size,
         session_id: sessionId || null,
       });
     }
@@ -754,12 +764,10 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] FreEco.ai URL: ${FREECO_AI_URL}`);
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
-  console.log(`[gateway] Groups: ${ALLOWED_GROUPS.length ? (ALLOWED_GROUPS.includes('*') ? 'all' : ALLOWED_GROUPS.join(', ')) : 'ignored (set WHATSAPP_ALLOWED_GROUPS to answer in one)'}`);
-  console.log(`[gateway] Direct chats: ${ALLOWED_NUMBERS.length ? ALLOWED_NUMBERS.join(', ') : 'everyone'}`);
+  console.log(`[gateway] Allowed chats: ${ALLOWLIST.entries.size ? [...ALLOWLIST.entries].join(', ') : 'none (empty allowlist: every message is ignored, every send refused)'}`);
 
   // Auto-connect if credentials already exist from a previous session
-  const credsPath = path.join(__dirname, 'auth_store', 'creds.json');
-  if (fs.existsSync(credsPath)) {
+  if (hasCredentials()) {
     console.log('[gateway] Found existing credentials — auto-connecting...');
     startConnection().catch((err) => {
       console.error('[gateway] Auto-connect failed:', err.message);
