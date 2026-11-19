@@ -651,6 +651,12 @@ pub async fn build_router(
             "/api/tasks",
             axum::routing::get(crate::live_routes::list_tasks),
         )
+        // The Starnet view: rooms (teams), desks (agents), states and tasks
+        // in one read-only poll.
+        .route(
+            "/api/starnet/state",
+            axum::routing::get(crate::live_routes::starnet_state),
+        )
         .route(
             "/api/org/overview",
             axum::routing::get(crate::org_routes::overview),
