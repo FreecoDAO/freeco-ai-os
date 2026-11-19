@@ -1010,19 +1010,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         security: std::sync::Arc::new(freeco_api::security::SecurityService::default()),
     });
 
-    let api_key = state.kernel.config.api_key.trim().to_string();
-    let auth_state = middleware::AuthState {
-        api_key: api_key.clone(),
-        auth_enabled: state.kernel.config.auth.enabled,
-        session_secret: if !api_key.is_empty() {
-            api_key.clone()
-        } else if state.kernel.config.auth.enabled {
-            state.kernel.config.auth.password_hash.clone()
-        } else {
-            String::new()
-        },
-        allow_no_auth: true,
-    };
+    let auth_state = middleware::AuthState::from_config(&state.kernel.config, true);
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))

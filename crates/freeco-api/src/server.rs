@@ -185,18 +185,7 @@ pub async fn build_router(
         }
     }
 
-    let auth_state = crate::middleware::AuthState {
-        api_key: api_key.clone(),
-        auth_enabled: state.kernel.config.auth.enabled,
-        session_secret: if !api_key.is_empty() {
-            api_key.clone()
-        } else if state.kernel.config.auth.enabled {
-            state.kernel.config.auth.password_hash.clone()
-        } else {
-            String::new()
-        },
-        allow_no_auth,
-    };
+    let auth_state = crate::middleware::AuthState::from_config(&state.kernel.config, allow_no_auth);
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     let app = Router::new()
