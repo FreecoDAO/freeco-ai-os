@@ -161,6 +161,14 @@ impl MemorySubstrate {
         self.structured.remove_agent(agent_id)
     }
 
+    /// Remove an agent from persistent storage, leaving its conversations.
+    ///
+    /// For an agent replaced under the same id (a hand reactivated at boot):
+    /// what it talked about belongs to the replacement.
+    pub fn remove_agent_keeping_sessions(&self, agent_id: AgentId) -> FreecoResult<()> {
+        self.structured.remove_agent(agent_id)
+    }
+
     /// Load all agent entries from persistent storage.
     pub fn load_all_agents(&self) -> FreecoResult<Vec<AgentEntry>> {
         self.structured.load_all_agents()

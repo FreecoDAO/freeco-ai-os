@@ -1733,7 +1733,9 @@ Run the migration. Converts manifests, imports skills, and optionally imports se
 
 ### POST /api/agents/{id}/session/reset
 
-Reset an agent's session, clearing all conversation history.
+Start a new conversation and make it the agent's current one. The previous
+conversation is kept and stays listed in `GET /api/agents/{id}/sessions`;
+delete one explicitly with `DELETE /api/sessions/{id}`.
 
 **Response** `200 OK`:
 
@@ -2340,7 +2342,9 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/agents/{id}/message/stream` | Send message (SSE stream) |
 | GET | `/api/agents/{id}/session` | Get conversation history |
 | GET | `/api/agents/{id}/ws` | WebSocket chat |
-| POST | `/api/agents/{id}/session/reset` | Reset session |
+| POST | `/api/agents/{id}/session/reset` | Start a new conversation (the old one is kept) |
+| POST | `/api/dispatch` | Which conversation a popup message belongs in (`here`, `session`, `new_task`, `propose`) |
+| POST | `/api/transcribe` | Words in an audio body (`Content-Type: audio/*`, max 16 MB); nothing stored |
 | POST | `/api/agents/{id}/session/compact` | LLM-based compaction |
 | POST | `/api/agents/{id}/stop` | Cancel current run |
 | PUT | `/api/agents/{id}/model` | Switch model |

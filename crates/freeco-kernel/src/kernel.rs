@@ -4043,14 +4043,68 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         // Update registry with new session ID
-        self.registry
-            .update_session_id(agent_id, new_session.id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
 
         // Reset quota tracking so /new clears "token quota exceeded"
         self.scheduler.reset_usage(agent_id);
 
         info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        Ok(())
+    }
+
+    /// Start a fresh conversation and make it current, keeping the old one.
+    ///
+    /// What `/new` means. It used to be `reset_session`, which deletes the
+    /// current conversation -- and a `/new` typed on Telegram or WhatsApp
+    /// reached the same call, so it wiped the conversation the dashboard was
+    /// showing. The old conversation stays listed under History; only an
+    /// explicit delete removes one. A message still waiting on the old
+    /// conversation is redirected here, as after a reset.
+    pub fn start_new_session(&self, agent_id: AgentId) -> KernelResult<SessionId> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+
+        if let Ok(Some(old_session)) = self.memory.get_session(entry.session_id) {
+            // An empty conversation is reused rather than piled up.
+            if old_session.messages.is_empty() {
+                self.scheduler.reset_usage(agent_id);
+                return Ok(entry.session_id);
+            }
+            if old_session.messages.len() >= 2 {
+                self.save_session_summary(agent_id, &entry, &old_session);
+            }
+        }
+        self.mark_conversation_ended(entry.session_id);
+
+        let new_session = self
+            .memory
+            .create_session(agent_id)
+            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
+        self.scheduler.reset_usage(agent_id);
+
+        info!(agent_id = %agent_id, old = %entry.session_id.0, new = %new_session.id.0, "New conversation started; the old one is kept");
+        Ok(new_session.id)
+    }
+
+    /// Make `session_id` the agent's current conversation, and persist that
+    /// at once.
+    ///
+    /// The switch lived only in memory until a clean shutdown saved it, so
+    /// after a crash or a killed container the agent came back pointing at the
+    /// conversation it had before -- possibly one deleted since -- and the
+    /// chat opened on the wrong conversation, or on none.
+    fn set_current_session(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<()> {
+        self.registry
+            .update_session_id(agent_id, session_id)
+            .map_err(KernelError::Freeco)?;
+        if let Some(updated) = self.registry.get(agent_id) {
+            if let Err(e) = self.memory.save_agent(&updated) {
+                warn!(agent_id = %agent_id, "Could not persist the current conversation: {e}");
+            }
+        }
         Ok(())
     }
 
@@ -4076,9 +4130,7 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         // Update registry with new session ID
-        self.registry
-            .update_session_id(agent_id, new_session.id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
 
         info!(agent_id = %agent_id, "All agent history cleared");
         Ok(())
@@ -4170,9 +4222,7 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         if switch_to {
-            self.registry
-                .update_session_id(agent_id, session.id)
-                .map_err(KernelError::Freeco)?;
+            self.set_current_session(agent_id, session.id)?;
         }
 
         info!(agent_id = %agent_id, label = ?label, switch_to, "Created new session");
@@ -4210,9 +4260,7 @@ impl FreecoKernel {
             )));
         }
 
-        self.registry
-            .update_session_id(agent_id, session_id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, session_id)?;
 
         info!(agent_id = %agent_id, session_id = %session_id.0, "Switched session");
         Ok(())
@@ -4956,6 +5004,12 @@ impl FreecoKernel {
 
     /// Kill an agent.
     pub fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+        self.kill_agent_opts(agent_id, false)
+    }
+
+    /// Kill an agent; with `keep_conversations`, its conversations stay in
+    /// the store for the agent that replaces it under the same id.
+    fn kill_agent_opts(&self, agent_id: AgentId, keep_conversations: bool) -> KernelResult<()> {
         let entry = self
             .registry
             .remove(agent_id)
@@ -4975,7 +5029,11 @@ impl FreecoKernel {
         }
 
         // Remove from persistent storage
-        let _ = self.memory.remove_agent(agent_id);
+        if keep_conversations {
+            let _ = self.memory.remove_agent_keeping_sessions(agent_id);
+        } else {
+            let _ = self.memory.remove_agent(agent_id);
+        }
 
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
@@ -4987,6 +5045,33 @@ impl FreecoKernel {
 
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
         Ok(())
+    }
+
+    /// Point a just-respawned agent back at the conversation it had, and drop
+    /// the empty one spawn created. Does nothing when that conversation is
+    /// gone or is not the agent's.
+    fn resume_session_after_respawn(&self, agent_id: AgentId, previous: SessionId) {
+        let Some(fresh) = self.registry.get(agent_id).map(|e| e.session_id) else {
+            return;
+        };
+        if fresh == previous {
+            return;
+        }
+        let owned = matches!(
+            self.memory.get_session(previous),
+            Ok(Some(s)) if s.agent_id == agent_id
+        );
+        if !owned {
+            return;
+        }
+        if self.set_current_session(agent_id, previous).is_ok() {
+            if let Ok(Some(empty)) = self.memory.get_session(fresh) {
+                if empty.messages.is_empty() {
+                    let _ = self.memory.delete_session(fresh);
+                }
+            }
+            info!(agent_id = %agent_id, session_id = %previous.0, "Resumed the conversation the agent had before");
+        }
     }
 
     // ─── Hand lifecycle ─────────────────────────────────────────────────────
@@ -5366,11 +5451,6 @@ impl FreecoKernel {
         let saved_crons: Vec<freeco_types::scheduler::CronJob> = old_agent_id
             .map(|id| self.cron_scheduler.list_jobs(id))
             .unwrap_or_default();
-        if let Some(old) = existing {
-            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            let _ = self.kill_agent(old.id);
-        }
-
         // Spawn the agent with a fixed ID based on hand_id for stable identity across restarts.
         // This ensures triggers and cron jobs continue to work after daemon restart.
         // Named instances derive the UUID from instance_id so each coexists with a
@@ -5381,7 +5461,32 @@ impl FreecoKernel {
         } else {
             AgentId::from_string(hand_id)
         };
+        // The conversation the hand's chat was on. Reactivation (every boot)
+        // killed the agent, which deleted all its conversations, and spawned
+        // it with a fresh empty one: the chat came back blank each restart.
+        let previous_session = existing
+            .as_ref()
+            .filter(|e| e.id == fixed_agent_id)
+            .map(|e| e.session_id)
+            .or_else(|| {
+                self.memory
+                    .load_agent(fixed_agent_id)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.session_id)
+            });
+        if let Some(old) = existing {
+            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
+            // Its conversations are kept: under the same id they are the
+            // new agent's, and under an old random id they stay recoverable
+            // through the orphaned-sessions view.
+            let _ = self.kill_agent_opts(old.id, true);
+        }
+
         let agent_id = self.spawn_agent_with_parent(manifest, None, Some(fixed_agent_id))?;
+        if let Some(previous) = previous_session {
+            self.resume_session_after_respawn(agent_id, previous);
+        }
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {

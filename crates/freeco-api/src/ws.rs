@@ -1074,9 +1074,10 @@ async fn handle_command(
         .unwrap_or(cmd);
 
     match canonical {
-        "new" => match state.kernel.reset_session(agent_id) {
-            Ok(()) => {
-                serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
+        // A new conversation; the previous one stays listed under History.
+        "new" => match state.kernel.start_new_session(agent_id) {
+            Ok(sid) => {
+                serde_json::json!({"type": "command_result", "command": cmd, "session_id": sid.0.to_string(), "message": "New conversation started. The previous one is kept under History."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },

@@ -8937,7 +8937,11 @@ pub async fn switch_agent_session(
 
 // ── Extended Chat Command API Endpoints ─────────────────────────────────
 
-/// POST /api/agents/{id}/session/reset — Reset an agent's session.
+/// POST /api/agents/{id}/session/reset — Start a new conversation.
+///
+/// The previous conversation is kept and stays listed; deleting one is a
+/// separate, explicit action (`DELETE /api/sessions/{id}`, or the chat's
+/// delete-conversation tool).
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -8951,10 +8955,14 @@ pub async fn reset_session(
             )
         }
     };
-    match state.kernel.reset_session(agent_id) {
-        Ok(()) => (
+    match state.kernel.start_new_session(agent_id) {
+        Ok(sid) => (
             StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
+            Json(serde_json::json!({
+                "status": "ok",
+                "message": "New conversation started",
+                "session_id": sid.0.to_string(),
+            })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9422,6 +9430,29 @@ pub async fn get_agent_history(
     }
 }
 
+/// The CEO among the agents carrying the `ceo` tag, by one fixed rule.
+///
+/// Two bundled agents carry the tag (`ceo` and `freeco-ceo`), and the first
+/// match in the registry's unordered map won: the widget could talk to one
+/// agent today and the other after a restart, each with its own history, so
+/// conversations seemed to disappear. The bundled `freeco-ceo` wins; among
+/// the rest, the oldest agent (it holds the history), then the id.
+pub(crate) fn pick_ceo(
+    agents: &[freeco_types::agent::AgentEntry],
+) -> Option<&freeco_types::agent::AgentEntry> {
+    agents
+        .iter()
+        .filter(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")))
+        .min_by(|a, b| {
+            let bundled =
+                |e: &freeco_types::agent::AgentEntry| !e.name.eq_ignore_ascii_case("freeco-ceo");
+            bundled(a)
+                .cmp(&bundled(b))
+                .then(a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        })
+}
+
 /// GET /api/assistant — the agent the concierge widget talks to.
 ///
 /// The widget used to choose this itself, by looking for a name containing
@@ -9441,9 +9472,7 @@ pub async fn get_agent_history(
 pub async fn get_assistant(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.registry.list();
 
-    let by_role = agents
-        .iter()
-        .find(|e| e.tags.iter().any(|t| t.eq_ignore_ascii_case("ceo")));
+    let by_role = pick_ceo(&agents);
 
     let canonical = freeco_types::agent::AgentId::from_string("freeco-concierge");
     let pick = by_role
@@ -16169,5 +16198,57 @@ mod upload_name_tests {
     #[test]
     fn odd_characters_are_replaced_not_passed_through() {
         assert_eq!(safe_upload_name("a:b*c?.pdf", "id"), "a_b_c_.pdf");
+    }
+}
+
+#[cfg(test)]
+mod ceo_pick_tests {
+    use super::pick_ceo;
+    use freeco_types::agent::{AgentEntry, AgentId};
+
+    fn agent(name: &str, tags: &[&str], age_secs: i64) -> AgentEntry {
+        let mut e = AgentEntry {
+            id: AgentId::new(),
+            name: name.to_string(),
+            manifest: Default::default(),
+            state: freeco_types::agent::AgentState::Running,
+            mode: Default::default(),
+            created_at: chrono::Utc::now() - chrono::Duration::seconds(age_secs),
+            last_active: chrono::Utc::now(),
+            parent: None,
+            children: vec![],
+            session_id: Default::default(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            identity: Default::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+        };
+        e.manifest.name = name.to_string();
+        e
+    }
+
+    /// Two agents carry the `ceo` tag; whichever the map yielded first won,
+    /// so the widget could change agents (and histories) between restarts.
+    #[test]
+    fn the_bundled_ceo_wins_whatever_the_order() {
+        let a = agent("ceo", &["ceo"], 100);
+        let b = agent("freeco-ceo", &["freeco", "ceo"], 10);
+        let c = agent("writer", &["writer"], 1000);
+        for order in [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![c.clone(), b.clone(), a.clone()],
+            vec![b.clone(), a.clone(), c.clone()],
+        ] {
+            assert_eq!(pick_ceo(&order).unwrap().name, "freeco-ceo");
+        }
+    }
+
+    #[test]
+    fn otherwise_the_oldest_ceo_wins() {
+        let old = agent("ceo", &["CEO"], 500);
+        let young = agent("boss", &["ceo"], 5);
+        assert_eq!(pick_ceo(&[young.clone(), old.clone()]).unwrap().name, "ceo");
+        assert_eq!(pick_ceo(&[old, young]).unwrap().name, "ceo");
+        assert!(pick_ceo(&[agent("writer", &[], 1)]).is_none());
     }
 }

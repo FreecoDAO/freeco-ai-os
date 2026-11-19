@@ -789,11 +789,12 @@ function chatPage() {
           break;
         case '/new':
           if (self.currentAgent) {
-            FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function() {
+            FreecoAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function(res) {
               self.messages = [];
-              self.sessionId = null; // the reset made a new conversation
-              FreecoToast.success('Session reset');
-            }).catch(function(e) { FreecoToast.error('Reset failed: ' + e.message); });
+              // A new conversation; the previous one is kept under History.
+              self.sessionId = (res && res.session_id) || null;
+              FreecoToast.success('New conversation started');
+            }).catch(function(e) { FreecoToast.error('Could not start a new conversation: ' + e.message); });
           }
           break;
         case '/compact':
