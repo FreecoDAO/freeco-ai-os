@@ -644,6 +644,9 @@ pub async fn execute_tool(
         // System time tool
         "system_time" => Ok(tool_system_time()),
 
+        // Build and system information (read-only, available to every agent)
+        "system_info" => Ok(tool_system_info()),
+
         // Cron scheduling tools
         "cron_create" => tool_cron_create(input, kernel, caller_agent_id).await,
         "cron_list" => tool_cron_list(kernel, caller_agent_id).await,
@@ -2060,6 +2063,16 @@ them.".to_string(),
         ToolDefinition {
             name: "system_time".to_string(),
             description: "Get the current date, time, and timezone. Returns ISO 8601 timestamp, Unix epoch seconds, and timezone info.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        // --- Build / system info tool ---
+        ToolDefinition {
+            name: "system_info".to_string(),
+            description: "Read-only build and system information: version, commit SHA, branch, UTC build time, rustc version, OS/architecture, and process uptime in seconds. Use when asked about versions, deployments, or whether a fix is in the running build. Changes nothing.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -4499,6 +4512,16 @@ async fn tool_location_get() -> Result<String, String> {
 // ---------------------------------------------------------------------------
 
 /// Return current date, time, timezone, and Unix epoch.
+/// system_info: build identity and uptime. Never needs approval and changes
+/// nothing; the values come from `build_info`, the same source `/api/version`
+/// reads, so an agent and the dashboard cannot disagree about the build.
+fn tool_system_info() -> String {
+    let text = crate::build_info::info_text();
+    let json = serde_json::to_string_pretty(&crate::build_info::info_json())
+        .unwrap_or_else(|_| "{}".to_string());
+    format!("{text}\n\n{json}")
+}
+
 fn tool_system_time() -> String {
     let now_utc = chrono::Utc::now();
     let now_local = chrono::Local::now();
@@ -7395,5 +7418,46 @@ mod tests {
         )
         .await;
         assert!(pre.is_none());
+    }
+
+    #[tokio::test]
+    async fn system_info_returns_build_identity_and_changes_nothing() {
+        let r = exec_in("system_info", serde_json::json!({}), None).await;
+        assert!(!r.is_error, "{}", r.content);
+        let v = crate::build_info::info_json();
+        for field in [
+            "version",
+            "git_sha",
+            "git_branch",
+            "build_date",
+            "platform",
+            "arch",
+        ] {
+            assert!(r.content.contains(field), "missing {field}: {}", r.content);
+        }
+        assert!(
+            r.content.contains(v["version"].as_str().unwrap()),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("uptime"), "{}", r.content);
+        // Defined for every agent: it is in the always-granted policy list.
+        assert!(
+            crate::tool_policy::ALWAYS_GRANTED_TOOLS.contains(&"system_info"),
+            "system_info must be available to all agents"
+        );
+        // Safe: not in any deny list, no approval required.
+        assert!(!crate::tool_policy::SUBAGENT_DENY_ENFORCED.contains(&"system_info"));
+        // builtin definitions advertise it
+        assert!(builtin_tool_definitions()
+            .iter()
+            .any(|t| t.name == "system_info"));
+    }
+
+    #[test]
+    fn system_info_never_requires_approval_by_default() {
+        // FreecoKernel wires known_secrets; the tool itself is pure output.
+        // Guard against it accidentally landing in an always-ask list.
+        assert!(!ALWAYS_ASK_TOOLS.contains(&"system_info"));
     }
 }

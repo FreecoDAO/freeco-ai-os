@@ -332,6 +332,12 @@ pub const CEO_MANAGEMENT_TOOLS: &[&str] = &[
     "system_audit",
 ];
 
+/// Read-only tools every agent gets, whatever its manifest or tool profile
+/// lists. They report facts about the installation and change nothing, so no
+/// agent needs to be trusted with them. The owner can still take one away
+/// with the agent's tool blocklist.
+pub const ALWAYS_GRANTED_TOOLS: &[&str] = &["system_info"];
+
 /// Whether an agent with these tags holds the CEO role.
 pub fn holds_ceo_role(tags: &[String]) -> bool {
     tags.iter().any(|t| t.trim().eq_ignore_ascii_case("ceo"))

@@ -690,6 +690,8 @@ impl FreecoKernel {
 
     /// Boot the kernel with an explicit configuration.
     pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
+        // Anchor the system_info / /api/version uptime clock at boot.
+        freeco_kernel_runtime::build_info::mark_start();
         if rustls::crypto::ring::default_provider()
             .install_default()
             .is_err()
@@ -7819,6 +7821,16 @@ impl FreecoKernel {
             }
         }
 
+        // Step 3.6: Read-only tools every agent gets (system_info). Also
+        // before step 4, so the blocklist can still remove them.
+        for def in builtin_tool_definitions() {
+            if freeco_kernel_runtime::tool_policy::ALWAYS_GRANTED_TOOLS.contains(&def.name.as_str())
+                && !all_tools.iter().any(|t| t.name == def.name)
+            {
+                all_tools.push(def);
+            }
+        }
+
         // Step 4: Apply per-agent tool_allowlist/tool_blocklist overrides.
         // These are separate from capabilities.tools and act as additional filters.
         let (tool_allowlist, tool_blocklist) = entry
@@ -11620,13 +11632,20 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), ceo_tools.len(), "no tool listed twice");
 
-        // Without the role nothing is added beyond its own tools and the two
-        // read-only skill tools every agent that sees skills gets.
+        // Without the role nothing is added beyond its own tools, the two
+        // read-only skill tools every agent that sees skills gets, and the
+        // read-only system_info every agent gets.
         let mut helper_tools = names(helper);
         helper_tools.sort();
         assert_eq!(
             helper_tools,
-            ["memory_store", "skill_describe", "skill_list", "web_fetch"],
+            [
+                "memory_store",
+                "skill_describe",
+                "skill_list",
+                "system_info",
+                "web_fetch"
+            ],
             "{helper_tools:?}"
         );
 
@@ -12796,8 +12815,8 @@ system_prompt = "You are a test agent."
     fn restricted_agent_gets_only_the_read_only_skill_tools() {
         // Small or large install, an agent with a fixed tool list keeps its own
         // tools and gets the two read-only skill tools the summary tells it to
-        // use (skill_describe always, skill_list for the skills the cap hides).
-        // Nothing that runs code is added.
+        // use (skill_describe always, skill_list for the skills the cap hides)
+        // and the read-only system_info. Nothing that runs code is added.
         for extra in [0, 300] {
             let tmp = tempfile::tempdir().unwrap();
             let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), extra);
@@ -12812,7 +12831,8 @@ system_prompt = "You are a test agent."
                 vec![
                     "file_read".to_string(),
                     "skill_describe".to_string(),
-                    "skill_list".to_string()
+                    "skill_list".to_string(),
+                    "system_info".to_string()
                 ],
                 "extra={extra}"
             );

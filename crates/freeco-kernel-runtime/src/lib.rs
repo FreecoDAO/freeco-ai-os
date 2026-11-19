@@ -15,6 +15,7 @@ pub mod apply_patch;
 pub mod audit;
 pub mod auth_cooldown;
 pub mod browser;
+pub mod build_info;
 pub mod command_lane;
 pub mod compactor;
 pub mod container_admin;
