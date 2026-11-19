@@ -74,7 +74,7 @@ fn check_argv_at(
             check_command_at(token, policy, protected, depth + 1)?;
         }
         let base = binary_name(token);
-        if COMPOSE_BINARIES.contains(&base.as_str()) {
+        if base == "docker" && argv.get(i + 1).map(String::as_str) == Some("compose") {
             return Err(refusal(
                 "compose files are not allowed: the kernel cannot check the containers they \
                  start. Run each container with `podman run`.",
@@ -269,14 +269,14 @@ fn check_name(
     protected: &[String],
     mutating: bool,
 ) -> Result<(), String> {
-    if !name_in_scope(name, policy) {
-        return Err(out_of_scope(kind, name, policy));
-    }
     if mutating && is_protected(name, protected) {
         return Err(refusal(&format!(
             "'{name}' is protected: it runs FreEco itself (or is listed in \
              FREECO_PROTECTED_CONTAINERS). Ask the owner to do this by hand."
         )));
+    }
+    if !name_in_scope(name, policy) {
+        return Err(out_of_scope(kind, name, policy));
     }
     Ok(())
 }
@@ -290,6 +290,7 @@ fn check_targets(
 ) -> Result<(), String> {
     let mutating = is_mutating(sub);
     let value_flags = target_value_flags(sub);
+    let mut inspect_type = "container";
     let mut positionals: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -300,6 +301,12 @@ fn check_targets(
         }
         if arg.starts_with('-') && arg.len() > 1 {
             let (flag, inline) = split_flag(arg);
+            if (flag == "-t" || flag == "--type") && sub == "inspect" {
+                inspect_type = match inline {
+                    Some(v) => v,
+                    None => rest.get(i + 1).map(String::as_str).unwrap_or("container"),
+                };
+            }
             match flag {
                 "--latest" | "-l" => {
                     return Err(refusal(
@@ -338,12 +345,16 @@ fn check_targets(
     if targets.is_empty() && mutating {
         return Err(refusal(&format!("'{sub}' needs the container's name.")));
     }
+    let inspect_containers = sub != "inspect" || inspect_type == "container";
     for name in targets {
-        // `inspect` also takes image names.
-        if sub == "inspect" && !name_in_scope(name, policy) && image_allowed(name, policy) {
-            continue;
+        if is_protected(name, protected) {
+            // Readable, but nothing may point an agent at FreEco itself.
+            check_name("container", name, policy, protected, mutating)?;
+        } else if !inspect_containers && image_allowed(name, policy) {
+            continue; // `inspect` also takes image names
+        } else {
+            check_name("container", name, policy, protected, mutating)?;
         }
-        check_name("container", name, policy, protected, mutating)?;
     }
     Ok(())
 }
@@ -831,6 +842,11 @@ fn check_run(
             image = Some(arg);
             break;
         }
+        if !arg.starts_with("--") && !policy.images.is_empty() && image_allowed(arg, policy) {
+            // `-w,localhost/app` (shlex does not drop the comma).
+            image = Some(arg);
+            break;
+        }
         if arg.starts_with("--") {
             let (flag, inline) = split_flag(arg);
             match flag {
@@ -1025,10 +1041,29 @@ fn check_exec(
             i += 1;
             continue;
         }
-        // -i, -t, -d, -it, -dit ...
-        if !flag.starts_with("--") && flag[1..].chars().all(|c| matches!(c, 'i' | 't' | 'd')) {
-            i += 1;
-            continue;
+        // -i, -t, -d, -it, -dit, and a value flag at the end of a cluster.
+        if !flag.starts_with("--") {
+            // -i, -t, -d, -it, -dit, and a value flag (-e, -w, -u) at the
+            // end of the cluster: it takes the next argv element.
+            let chars: Vec<char> = flag[1..].chars().collect();
+            let mut cluster_ok = true;
+            for (k, c) in chars.iter().enumerate() {
+                if matches!(c, 'i' | 't' | 'd') {
+                    continue;
+                }
+                if matches!(c, 'e' | 'w' | 'u') {
+                    if k + 1 == chars.len() && inline.is_none() {
+                        i += 1;
+                    }
+                    break;
+                }
+                cluster_ok = false;
+                break;
+            }
+            if cluster_ok {
+                i += 1;
+                continue;
+            }
         }
         return Err(refusal(&format!(
             "'{flag}' is not an option the kernel knows for 'exec'; it is refused."
@@ -1248,6 +1283,11 @@ mod tests {
         refused("podman compose up");
         refused("podman-compose up -d");
         refused("docker-compose up -d");
+        refused("docker compose up -d");
+        refused("podman run -w,localhost/app");
+        ok("podman run -it localhost/app");
+        ok("podman run localhost/app");
+        ok("podman run -d localhost/app");
         refused("podman kube play pod.yaml");
         refused("podman play kube pod.yaml");
         refused("podman cp freeco-x:/etc/passwd .");
@@ -1346,6 +1386,23 @@ mod tests {
         assert!(check_command("podman run --privileged alpine", &open, &[]).is_err());
         assert!(check_command("podman run -v /:/h alpine", &open, &[]).is_err());
         assert!(check_command("podman run -p 80:80 alpine", &open, &[]).is_err());
+    }
+
+    #[test]
+    fn inspect_type_image_checks_images() {
+        ok("podman inspect --type image ghcr.io/freecodao/omniroute:latest");
+        refused("podman inspect --type image docker.io/library/nginx");
+        ok("podman inspect -t container freeco-crm");
+        refused("podman inspect -t container ghcr.io/freecodao/x");
+    }
+
+    #[test]
+    fn exec_clusters_take_values() {
+        ok("podman exec -i freeco-crm ls");
+        ok("podman exec -it freeco-crm sh");
+        ok("podman exec -it -w /app freeco-crm ls");
+        ok("podman exec -itw /app freeco-crm ls");
+        refused("podman exec -it postgres sh");
     }
 
     #[test]

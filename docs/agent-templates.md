@@ -884,6 +884,22 @@ shell = ["python *", "cargo *"]     # Allowed shell command patterns (whitelist)
 2. **Write a clear system prompt**. The system prompt is the most important part of the template. Be specific about the agent's role, methodology, output format, and limitations.
 3. **Set appropriate temperature**. Use 0.2 for precise/analytical tasks, 0.5 for balanced tasks, 0.7+ for creative tasks.
 4. **Use shell whitelists**. Never grant `shell = ["*"]`. Whitelist specific command patterns like `shell = ["python *", "cargo test *"]`.
+
+### How shell access is actually enforced
+
+For the builtin `shell_exec` and `process_start` tools, **all** of these must
+agree, checked before an approval is requested:
+
+| Field | Meaning |
+|---|---|
+| `capabilities.tools` | Must list `shell_exec`, or the tool is refused. |
+| `capabilities.shell` | The whole command must match one of these globs. **Empty = no restriction from this field**, not "deny": `exec_policy` decides. Read-only `exec_policy.safe_bins` (e.g. `ls`, `cat`) stay allowed, except the ones that run another program (`env`, `find`, `sed`, `awk`, `xargs`). |
+| `exec_policy` | `deny` blocks everything, `allowlist` only allows `safe_bins`/`allowed_commands`, `full` runs the command through a shell. Shell metacharacters are always refused on the host. |
+| `exec_policy.containers` | Optional: every `podman`/`docker` command is parsed, and container names outside `name_prefixes`, images outside `images`, `--privileged`, host mounts, host namespaces, `--cap-add`, `0.0.0.0` publishing and subcommands the kernel cannot check are refused. |
+
+HAND.toml takes the same `[exec_policy]` (including
+`[exec_policy.containers]`). A hand that lists `shell_exec` **without** an
+`[exec_policy]` gets shell denied.
 5. **Set token budgets**. Use `max_llm_tokens_per_hour` to prevent runaway costs. Start with 100,000 and adjust based on usage.
 6. **Add fallback models**. If your primary model has rate limits or availability issues, add a `[[fallback_models]]` entry.
 7. **Use memory for continuity**. Grant `memory_store` and `memory_recall` so the agent can persist context across sessions.

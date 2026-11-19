@@ -1794,7 +1794,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let _held = listener.accept().await;
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_millis(800)).await;
         });
         let probe =
             probe_health(&format!("http://127.0.0.1:{port}/"), Duration::from_millis(300)).await;
