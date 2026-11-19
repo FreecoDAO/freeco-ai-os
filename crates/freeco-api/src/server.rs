@@ -1708,12 +1708,11 @@ async fn shutdown_signal(api_shutdown: Arc<tokio::sync::Notify>) {
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // Use kill -0 to check if process exists without sending a signal
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // Signal 0 checks that the process exists without sending anything.
+        // Through libc, not `kill -0`: no argument parsing, and pid 0/1 are
+        // never "alive" here (pid 0 would mean the caller's own group).
+        // SAFETY: a plain libc call on an integer argument.
+        i32::try_from(pid).is_ok_and(|p| p > 1 && unsafe { libc::kill(p, 0) } == 0)
     }
 
     #[cfg(windows)]
