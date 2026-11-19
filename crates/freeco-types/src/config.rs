@@ -2429,9 +2429,16 @@ pub struct WhatsAppConfig {
     /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
     /// When set, outgoing messages are routed through the gateway instead of Cloud API.
     pub gateway_url_env: String,
-    /// Allowed phone numbers (empty = allow all).
+    /// The chats the agent may talk to, in both directions: phone numbers in
+    /// international form (`+41 79 123 45 67`, `0041…`) and group JIDs
+    /// (`…@g.us`). Every other chat is ignored on the way in and refused on
+    /// the way out. Empty = nobody except `owner_number` (if set); with
+    /// neither, every chat is refused. No wildcard.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// The owner's own WhatsApp number, always allowed (international form).
+    #[serde(default)]
+    pub owner_number: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2448,6 +2455,7 @@ impl Default for WhatsAppConfig {
             webhook_port: 8443,
             gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
             allowed_users: vec![],
+            owner_number: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -4554,6 +4562,25 @@ mod tests {
         let json = serde_json::to_string(&wa).unwrap();
         let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.phone_number_id, "12345");
+    }
+
+    #[test]
+    fn test_whatsapp_owner_number_and_allowlist_from_toml() {
+        let wa: WhatsAppConfig = toml::from_str(
+            r#"
+            allowed_users = ["+41 79 123 45 67", "120363000000000000@g.us"]
+            owner_number = "+41 79 000 00 00"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(wa.allowed_users.len(), 2);
+        assert_eq!(wa.owner_number.as_deref(), Some("+41 79 000 00 00"));
+
+        // Both optional: an old config without them still loads, and denies by default.
+        let old: WhatsAppConfig = toml::from_str("phone_number_id = \"1\"").unwrap();
+        assert!(old.allowed_users.is_empty());
+        assert_eq!(old.owner_number, None);
+        assert_eq!(WhatsAppConfig::default().owner_number, None);
     }
 
     #[test]
