@@ -112,10 +112,10 @@
     "semantic_hash": "c3a7a8efbb23074cb351b607a72ecfb4"
   },
   "Cargo.toml": {
-    "mtime": 1795103974.5852685,
-    "seen": 1795104956.419414,
-    "ast_hash": "7be7fd8c259681134aae245d42a0352e",
-    "semantic_hash": "7be7fd8c259681134aae245d42a0352e",
+    "mtime": 1795198961.3772624,
+    "seen": 1795199525.2791324,
+    "ast_hash": "2c4f54cd51fd7a81aaba2aaa940bfc1f",
+    "semantic_hash": "2c4f54cd51fd7a81aaba2aaa940bfc1f",
     "ast_empty": true
   },
   "agents/langchain-code-reviewer/agent.py": {
@@ -2342,10 +2342,10 @@
     "semantic_hash": "b78f1e915348565b2b7b395961ba6b43"
   },
   "crates/freeco-skills/src/github.rs": {
-    "mtime": 1795040399.0993705,
-    "seen": 1795104956.4738991,
-    "ast_hash": "9a5d2adfa44d274860ba8e8be6a643db",
-    "semantic_hash": "9a5d2adfa44d274860ba8e8be6a643db"
+    "mtime": 1795199051.2462406,
+    "seen": 1795199525.3426785,
+    "ast_hash": "9596bc86d7da5e1ee5c22aafc51ac623",
+    "semantic_hash": "9596bc86d7da5e1ee5c22aafc51ac623"
   },
   "crates/freeco-skills/src/installer.rs": {
     "mtime": 1795040399.0993705,

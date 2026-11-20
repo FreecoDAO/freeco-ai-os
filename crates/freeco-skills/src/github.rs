@@ -680,10 +680,16 @@ pub fn extract_archive(bytes: &[u8], subpath: &str, dest: &Path) -> Result<usize
         let mut entry = archive
             .by_index(i)
             .map_err(|e| SkillError::InvalidManifest(format!("bad zip entry {i}: {e}")))?;
+        // zip 9 returns a Result: an unreadable name is as unsafe as an
+        // escaping one, so both are refused.
+        let Ok(entry_name) = entry.name() else {
+            return Err(SkillError::SecurityBlocked(format!(
+                "archive entry {i} has an unreadable name"
+            )));
+        };
         let Some(name) = entry.enclosed_name() else {
             return Err(SkillError::SecurityBlocked(format!(
-                "archive entry escapes its folder: {}",
-                entry.name()
+                "archive entry escapes its folder: {entry_name}"
             )));
         };
         if entry.unix_mode().is_some_and(|m| m & 0o170000 == 0o120000) {
