@@ -93,6 +93,7 @@ url = "2"
 # between engines). Note 47.0.0-47.0.2 do NOT -- that range is still
 # vulnerable, and 47.0.2 is what dependabot proposed.
 wasmtime = "49.0.6"
+zstd = "0.14.4"
 
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws", "multipart"] }
