@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(list[0].agent_id, "agent1");
 
         // Cleanup
-        let _ = pm.kill(&id).await;
+        let _ = pm.kill("agent1", &id).await;
     }
 
     #[tokio::test]
@@ -351,20 +351,20 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("max: 1"));
 
-        let _ = pm.kill(&id1).await;
+        let _ = pm.kill("agent1", &id1).await;
     }
 
     #[tokio::test]
     async fn test_kill_nonexistent() {
         let pm = ProcessManager::new(5);
-        let result = pm.kill("nonexistent").await;
+        let result = pm.kill("agent1", "nonexistent").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_read_nonexistent() {
         let pm = ProcessManager::new(5);
-        let result = pm.read("nonexistent").await;
+        let result = pm.read("agent1", "nonexistent").await;
         assert!(result.is_err());
     }
 
