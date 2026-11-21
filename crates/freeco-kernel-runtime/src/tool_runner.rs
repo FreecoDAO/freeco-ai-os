@@ -2800,15 +2800,41 @@ async fn tool_shell_exec(
 
     // Prevent child from inheriting stdin (avoids blocking on Windows)
     cmd.stdin(std::process::Stdio::null());
+    // capture output so a timeout kill can't lose what the child printed
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    // The sandboxed child leads its own process group, so the kill below
+    // can stop it and its descendants on timeout instead of orphaning it
+    // (a `sleep 10000` under a 30s timeout otherwise leaks a process per
+    // attempt).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
 
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("Failed to execute command: {e}")),
+    };
     let result =
-        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
 
     match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
+        Ok(Ok(status)) => {
+            // Take the output pipes; wait() above consumed the child but
+            // `output()` normally reads these for us, so read to EOF now
+            // (the process is gone, so ordering is safe).
+            use tokio::io::AsyncReadExt;
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_end(&mut stdout_buf).await;
+            }
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_end(&mut stderr_buf).await;
+            }
+            let stdout = String::from_utf8_lossy(&stdout_buf);
+            let stderr = String::from_utf8_lossy(&stderr_buf);
+            let exit_code = status.code().unwrap_or(-1);
 
             // Truncate very long outputs to prevent memory issues
             let max_output = 100_000;
