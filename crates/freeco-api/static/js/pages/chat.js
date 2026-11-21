@@ -1782,7 +1782,7 @@ function chatPage() {
           // Agent presented an interactive canvas — render it in an iframe sandbox
           var canvasHtml = '<div class="canvas-panel" style="border:1px solid var(--border);border-radius:8px;margin:8px 0;overflow:hidden;">';
           canvasHtml += '<div style="padding:6px 12px;background:var(--surface);border-bottom:1px solid var(--border);font-size:0.85em;display:flex;justify-content:space-between;align-items:center;">';
-          canvasHtml += '<span>' + (data.title || 'Canvas') + '</span>';
+          canvasHtml += '<span>' + window.escapeHtml(String(data.title || 'Canvas')) + '</span>';
           canvasHtml += '<span style="opacity:0.5;font-size:0.8em;">' + (data.canvas_id || '').substring(0, 8) + '</span></div>';
           canvasHtml += '<iframe sandbox="allow-scripts" srcdoc="' + (data.html || '').replace(/"/g, '&quot;') + '" ';
           canvasHtml += 'style="width:100%;min-height:300px;border:none;background:#fff;" loading="lazy"></iframe></div>';
