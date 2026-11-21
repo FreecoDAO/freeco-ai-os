@@ -316,11 +316,12 @@ pub async fn starnet_state(
         let any = agents.is_empty();
         any
     };
+    let total = agents.len();
     let filtered_agents: Vec<StarnetAgent> = agents
         .into_iter()
         .filter(|a| visible || access.can_see_agent(&a.id, &a.name))
         .collect();
-    let hidden = agents.len() - filtered_agents.len();
+    let hidden = total - filtered_agents.len();
     let mut body = starnet_snapshot(&filtered_agents, &seen, &waiting, &teams, &tasks, now_ms);
     body["hidden_agents"] = serde_json::json!(hidden);
     body["degraded"] = serde_json::json!(degraded);
