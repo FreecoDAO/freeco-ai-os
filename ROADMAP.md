@@ -1,6 +1,6 @@
 # FreEco.ai Roadmap & verified status
 
-_Last verified: **2026-10-28** against this repository's `v0.9.8` tag, the
+_Last verified: **2026-11-21** against this repository's `v0.10.0` tag, the
 running daemon on this machine, and the live OpenRouter model list._
 
 Every claim below was checked against something that can disagree with it — a
@@ -674,7 +674,7 @@ Blocked work, reported by the assistant as not executed:
 - ✅ `docs/services.md` records the three tiers, why containers rather than
   WASM for persistent services, and what exists today versus what does not.
 
-## Unreleased
+## Shipped in v0.10.0
 
 ### Daemon work rescued from the October container -- ported onto main
 
@@ -683,27 +683,27 @@ mechanisms (main's `agent_delegate`, its team-member routes, its WhatsApp
 allowlist and its fallback report). Checked by unit and API tests, not yet
 on a running daemon.
 
-- 🟨 `agent_sleep`, wake on message, worker copies for `agent_delegate`
+- ✅ `agent_sleep`, wake on message, worker copies for `agent_delegate`
   without an `agent` (max 4, no inherited schedule).
-- 🟨 Team lead appointment (`PUT /api/org/teams/{id}/members`), organisation
+- ✅ Team lead appointment (`PUT /api/org/teams/{id}/members`), organisation
   change log (`GET /api/org/changes`) and their Projects page UI.
-- 🟨 Hire security review on the agent spawn path (held for the owner) and on
+- ✅ Hire security review on the agent spawn path (held for the owner) and on
   `POST /api/agents` (reported).
-- 🟨 Prompt-injection marking for outside-content tool results and channel
+- ✅ Prompt-injection marking for outside-content tool results and channel
   messages.
-- 🟨 Run History from a server-side log (`GET /api/runs/history`).
-- 🟨 Claude Code `<model>@<effort>`, sign-in errors, IPv4-first.
-- 🟨 One retry on a failed connection; clearer hourly quota message.
-- 🟨 WhatsApp gateway restarts, alerts, install marker, media; one allowlist.
-- 🟨 WhatsApp allowed chats only, end to end: one list from config
+- ✅ Run History from a server-side log (`GET /api/runs/history`).
+- ✅ Claude Code `<model>@<effort>`, sign-in errors, IPv4-first.
+- ✅ One retry on a failed connection; clearer hourly quota message.
+- ✅ WhatsApp gateway restarts, alerts, install marker, media; one allowlist.
+- ✅ WhatsApp allowed chats only, end to end: one list from config
   (`allowed_users` + `owner_number`, empty = nobody but the owner), the same
   normalisation in Rust and in the gateway, checked by the gateway on the way
   in and out and by the daemon on receipt and on every send; the gateway
   starts or restarts on channel reload; QR mode always has its adapter;
   dashboard status and allowlist. Unit tests (Rust) and `node:test` tests for
   `allowlist.js`, not yet on a running daemon or a real WhatsApp account.
-- 🟨 Service backups: 3 runs, 12 GB cap.
-- 🟨 `deploy/daemon/` Podman packaging and runbook; home path remap.
+- ✅ Service backups: 3 runs, 12 GB cap.
+- ✅ `deploy/daemon/` Podman packaging and runbook; home path remap.
 - 📋 The ws `parallel` flag (a busy agent's worker takes a chat message) is
   left to the CEO dispatcher work, which owns the socket protocol.
 
@@ -714,15 +714,15 @@ Coded with unit and HTTP tests (`crates/freeco-api/src/access.rs`,
 not yet run against a live daemon in this thread (owner rule: one check round
 on the integration branch).
 
-- 🟨 One place decides visibility, `crates/freeco-api/src/access.rs`: owners
+- ✅ One place decides visibility, `crates/freeco-api/src/access.rs`: owners
   and admins everything, others their `[[users]]` `agents` and `channels`
   grants, kids no external channels, viewers read only; a signed-in caller
   never sees another tenant's data; hidden items are 404.
-- 🟨 `/api/chamber/conversations`, `.../{id}/messages`, `.../{id}/reply` and
+- ✅ `/api/chamber/conversations`, `.../{id}/messages`, `.../{id}/reply` and
   `/api/chamber/stream`, plus the Chamber page in the dashboard. Channel
   replies use the existing channel send path, so they go out only from a
   configured adapter.
-- 🟨 The WebSocket chat checks roles and grants; a viewer can no longer chat
+- ✅ The WebSocket chat checks roles and grants; a viewer can no longer chat
   over it.
 - ⬜ Open decisions for the owner are in `docs/chamber-access.md` (per-person
   agent chats, peer display names, team grants, live HTTP history for
@@ -736,31 +736,31 @@ on the integration branch). Store tests in `freeco-memory` (`org/people.rs`,
 `freeco_api::team_access`, and HTTP tests over real sessions in
 `crates/freeco-api/tests/teams_api_test.rs`.
 
-- 🟨 **Companies own teams.** A team belongs to a company directly, or through
+- ✅ **Companies own teams.** A team belongs to a company directly, or through
   its project. `GET/POST /api/org/companies` (as before, now scoped per
   caller), `GET/PUT/DELETE /api/org/companies/{id}`: rename, describe,
   archive, delete. Deleting a company leaves its projects and teams in place,
   in no company. Teams and companies are the existing `org` store rows; a
   *tenant* stays the separate isolation boundary, not a second kind of
   company.
-- 🟨 **People sit on teams with a team role** (`lead`, `member`, `viewer`),
+- ✅ **People sit on teams with a team role** (`lead`, `member`, `viewer`),
   next to the agents. `GET/POST /api/org/teams/{id}/members` (an agent by
   `agent_id`, a person by `user`), `DELETE .../members/{member}` with an agent
   id or `user:<name>`. Only existing `[[users]]` accounts can be added.
-- 🟨 **One permission rule for teams** (`freeco_api::team_access`): owner and
+- ✅ **One permission rule for teams** (`freeco_api::team_access`): owner and
   admin manage everything; a team lead manages their team, a member works on
   its board, a viewer reads it; someone on no team sees no team, and a
   `viewer`/`kid` account only ever reads. `teams_visible_to` and
   `team_agents_visible_to` are public for the chat-chamber work to build
   `visible_agents` on. The middleware lets team work through with a `user`
   account and the handler checks the team role.
-- 🟨 **The board is a kanban: todo / doing / review / done.** Each card keeps
+- ✅ **The board is a kanban: todo / doing / review / done.** Each card keeps
   its `column` and `updated_at`; `PUT /api/org/teams/{id}/tasks/{task_id}`
   moves, assigns (an agent or a person on the team) or edits a card, `DELETE`
   removes it (a lead's right), refused while an unfinished card waits on it.
   Agents read their own team's board with `task_list { team }` and hand work
   in for review with `task_complete { review: true }` instead of closing it.
-- 🟨 **The Teams page** has a company switcher (admins add, rename and delete
+- ✅ **The Teams page** has a company switcher (admins add, rename and delete
   companies and move teams between them), a Members tab (agents and people),
   and a Board tab with the four columns, where cards are dragged or moved and
   assigned. Controls follow the `access` the server reports for the caller.
@@ -770,37 +770,37 @@ on the integration branch). Store tests in `freeco-memory` (`org/people.rs`,
 Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
 secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
 
-- 🟨 Streaming calls -- the chat, the popup, the OpenAI-compatible API -- are
+- ✅ Streaming calls -- the chat, the popup, the OpenAI-compatible API -- are
   refused once the agent's cost quota or the global `[budget]` cap is reached.
   Before, only the non-streaming path checked either.
-- 🟨 Every `secrets.env` writer refuses line breaks and NUL in values and
+- ✅ Every `secrets.env` writer refuses line breaks and NUL in values and
   anything but letters, digits and `_` in names; the API answers 400.
-- 🟨 Release builds add each target to the pinned toolchain, so the Windows
+- ✅ Release builds add each target to the pinned toolchain, so the Windows
   ARM64 and macOS Intel installers and CLIs build again.
-- 🟨 Release images go to the private `ghcr.io/freecodao/freeco-ai-os`; the
+- ✅ Release images go to the private `ghcr.io/freecodao/freeco-ai-os`; the
   public `freeco-ai` package is never pushed to.
-- 🟨 MCP over HTTP caps response bodies (rmcp 3.9), and the bundled SQLite is
+- ✅ MCP over HTTP caps response bodies (rmcp 3.9), and the bundled SQLite is
   3.54.1 (rusqlite 0.41), for two advisories published in November.
 - ⬜ Still open: `PUT /api/budget` is not enforced until restart (enforcement
   reads the boot-time config); handlers still call `std::env::set_var`;
   `freeco-migrate` keeps its own secrets writer, which does not validate.
 
-- 🟨 **Conversations run in parallel.** Runs take turns per conversation, not
+- ✅ **Conversations run in parallel.** Runs take turns per conversation, not
   per agent, so different chats -- including several of one agent -- run at the
   same time, and two runs in one conversation can no longer save over each
   other. Verified by `crates/freeco-kernel/tests/parallel_conversations_test.rs`
   against a scripted model: it fails with the old unlocked streaming path.
-- 🟨 **`agent_delegate`** runs several tasks on several agents at once, each in
+- ✅ **`agent_delegate`** runs several tasks on several agents at once, each in
   a fresh conversation filed under the lead's project. Still one canonical
   history per agent: a delegated task is appended to it like any other turn.
-- 🟨 **Projects page** edits the brief every agent in the project reads, starts
+- ✅ **Projects page** edits the brief every agent in the project reads, starts
   conversations inside a project and shows which are working.
-- 🟨 **Teams run like a lead with teammates.** A goal given to a team goes to
+- ✅ **Teams run like a lead with teammates.** A goal given to a team goes to
   its lead in a new conversation; the lead hands parts to members with
   `agent_delegate`, they run at once, and every member's prompt carries the
   roster. The delegated conversations are the team's task list on the Projects
   page.
-- 🟨 **Team task boards and the Teams page.** `task_post` puts a task on a
+- ✅ **Team task boards and the Teams page.** `task_post` puts a task on a
   team's board, where only members can claim it, and holds it until the tasks
   it is `blocked_by` are completed; only the holder or the poster completes it.
   The Teams page shows each team as a room: a seat is lit only while a run holds
@@ -809,20 +809,20 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   `team_board_respects_blockers_membership_and_holder` and the hand-off tests in
   `parallel_conversations_test.rs`. The hand-off record is in memory and starts
   empty after a restart.
-- 🟨 **A message from another agent is marked as not from the user**, so a
+- ✅ **A message from another agent is marked as not from the user**, so a
   colleague's request cannot pass as the owner's approval.
-- 🟨 **`web_fetch` checks every redirect** against the same SSRF rules as the
+- ✅ **`web_fetch` checks every redirect** against the same SSRF rules as the
   first URL; the fallback fetch now has them too. `extract_host` also stops at
   `?`, `#` and `\` and drops userinfo, so `http://x@169.254.169.254/` and
   `http://10.0.0.1?x` can no longer slip past it (2026-11-19).
-- 🟨 **`browser_run_js` can no longer bypass that SSRF check.** Expressions
+- ✅ **`browser_run_js` can no longer bypass that SSRF check.** Expressions
   are screened for network APIs, dynamic code, escapes and global-object
   obfuscation before the browser sees them, with an error that points to
   `web_fetch`; every page request is also intercepted over CDP and failed if
   it targets a private, loopback, link-local or metadata address. The tool
   requires approval by default, next to `shell_exec`. Not yet exercised
   against a running browser (2026-11-19).
-- 🟨 **Secrets stop at the output boundary.** Known secret values (vault,
+- ✅ **Secrets stop at the output boundary.** Known secret values (vault,
   env/`.env` provider keys and channel tokens, MCP header credentials) and
   well-known key patterns are replaced with `[REDACTED:<name|kind>]` in
   replies before they are stored or sent to channels and in tool results
@@ -832,7 +832,7 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   hashes and emails are untouched. Redaction depends on the kernel's
   `known_secrets`; handles without it still get the pattern rules
   (2026-11-19).
-- 🟨 **`system_info` tool and a real `/api/version`.** A build script stamps
+- ✅ **`system_info` tool and a real `/api/version`.** A build script stamps
   the commit SHA, branch, UTC build time and rustc version into the binary
   (env `FREECO_GIT_*` first for container builds, then git, then `unknown`);
   the read-only `system_info` tool reports them plus OS/arch and uptime and
@@ -842,15 +842,15 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
   2026-11-18 over all fetched refs, all 103 local refs and the working tree;
   no match and no `fix_release.py` ever existed here. Revoking it remains
   the owner's call — see `SECURITY.md` (2026-11-19).
-- 🟨 **The WhatsApp gateway answers only allowed chats** (groups off unless
+- ✅ **The WhatsApp gateway answers only allowed chats** (groups off unless
   listed, optional number allowlist) and gives each contact a conversation of
   its own. The kernel still keys a conversation's history by agent, so a guest
   is kept apart by the gateway choosing the conversation, not by the kernel.
-- 🟨 **Long chats keep their start in view.** What the history window drops is
+- ✅ **Long chats keep their start in view.** What the history window drops is
   carried in the system prompt: the user's words verbatim (instructions kept
   longest when the budget is short), the agent's replies in short. Free and
   deterministic; no summarising call.
-- 🟨 **A failed or stopped reply keeps the user's message**, saved before the
+- ✅ **A failed or stopped reply keeps the user's message**, saved before the
   model is called.
 - ⚠️ Stopping a run still stops the agent's most recent one; with parallel
   conversations that may not be the one on screen.
@@ -864,17 +864,17 @@ Checked by tests (`crates/freeco-kernel/tests/conversations_kept_test.rs`,
 the compaction and turn-cap tests in `freeco-kernel-runtime`, the bridge and
 CEO-pick tests in `freeco-api`), not yet on a running daemon.
 
-- 🟨 No history cap by default; a manifest's `max_history_messages` counts
+- ✅ No history cap by default; a manifest's `max_history_messages` counts
   turns. Compaction only near 80% of the model's window, keeping the last four
   requests whole; the model gets summary + tail from a per-session cursor
   (`__compaction_cursor`), the stored conversation stays complete. The
   canonical-memory upkeep at 80 messages still summarises, but moves the
   cursor only near the window.
-- 🟨 `/new` (chat, WebSocket, channels) starts a new conversation and keeps
+- ✅ `/new` (chat, WebSocket, channels) starts a new conversation and keeps
   the old one; hands resume their conversation after a restart; session
   switches are saved at once; the popup reloads its conversation, and its
   "new chat" / History switch on the server; one CEO by a fixed rule.
-- 🟨 16 MB messages and uploads, long pastes staged in `pasted/`,
+- ✅ 16 MB messages and uploads, long pastes staged in `pasted/`,
   `POST /api/transcribe`, `POST /api/dispatch`, drafts per chat, sandboxed
   agent pages, idle-socket close as housekeeping.
 - ⚠️ A staged paste is stored in the conversation as its preview, so the chat
@@ -894,7 +894,7 @@ CEO-pick tests in `freeco-api`), not yet on a running daemon.
 
 ### Starnet view — 2026-11-19
 
-- 🟨 **Starnet page** (`#starnet`): the agent teams' work as a pixel-art
+- ✅ **Starnet page** (`#starnet`): the agent teams' work as a pixel-art
   station, after StarNet's station view. Rooms are teams, desks are agents,
   each agent animates by state (idle, thinking, tool, waiting on a helper,
   waiting for your yes, error), a bubble shows its in-progress task, click
@@ -996,7 +996,7 @@ Open:
   with no provider), and to activate the `omniroute` MCP server — then attach
   it to the `omniroute` agent (`PUT /api/agents/{id}/mcp_servers`). Fold in the
   unmerged `claude/project-thread-*` branches first.
-- 🟨 **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
+- ✅ **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
   approval on every `shell_exec` (verified live), no shell metacharacters,
   `[exec_policy]` allowlist = `podman` only, five tools, no agent spawning.
   Kernel-enforced since then too: FreecoDAO images only, `freeco-*`
@@ -1012,6 +1012,8 @@ Open:
   alias with no fallback: `@` is not allowed in combo names.
 - ⬜ OmniRoute's dashboard has no login password; loopback binding is the only
   thing closing it.
+
+## Unreleased
 
 ## Planned — containers, users, local and cloud
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-21
+
 ### Added
 
 - Agents can be put to sleep. `agent_sleep` stops an agent's background loop
