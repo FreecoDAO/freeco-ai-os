@@ -1232,11 +1232,15 @@ impl Default for ExecPolicy {
             // lets agents push to repositories without being asked. Add them
             // per-machine via `allowed_commands` if that is what you want, or
             // run code in the Docker sandbox, which is built for exactly this.
+            // No interpreters, wrappers or text editors here: `env` runs any
+            // binary (env bash = a shell) and `sed`'s e-flag executes shell
+            // text, so with them on the list the rest of the allowlist
+            // decides nothing. Add such tools per-machine via
+            // `allowed_commands` if a machine really needs them.
             safe_bins: vec![
                 "sleep", "true", "false", "cat", "sort", "uniq", "cut", "tr", "head", "tail", "wc",
-                "date", "echo", "printf", "basename", "dirname", "pwd", "env", "ls", "grep",
-                "find", "which", "stat", "du", "df", "file", "realpath", "readlink", "diff", "sed",
-                "awk",
+                "date", "echo", "printf", "basename", "dirname", "pwd", "ls", "grep", "find",
+                "which", "stat", "du", "df", "file", "realpath", "readlink", "diff", "awk",
             ]
             .into_iter()
             .map(String::from)

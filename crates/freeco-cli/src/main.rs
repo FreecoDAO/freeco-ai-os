@@ -1686,18 +1686,51 @@ fn cmd_stop() {
     }
 }
 
+/// Force-kill a pid. Through libc, never by shelling out to `kill`: on
+/// procps-ng 4 (Debian bookworm) `kill -9 -<pid>` without `--` is parsed as a
+/// signal option, which killed every process of the user. pid <= 1 is
+/// refused here the same way the kernel refuses it: 0 means our own group
+/// and 1 is init.
+///
+/// Owner-approved change to freeco-cli (mission, 2026-11-19), the one
+/// exception to the hands-off rule for this file.
+#[cfg(unix)]
 fn force_kill_pid(pid: u32) {
-    #[cfg(unix)]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
+    let Ok(p) = i32::try_from(pid) else { return };
+    if p <= 1 {
+        tracing::warn!(pid = p, "refusing to signal pid <= 1");
+        return;
     }
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
+    // SAFETY: a plain libc call on an integer argument.
+    unsafe { libc::kill(p, libc::SIGKILL) };
+}
+
+/// The pid guard as a pure function, for the test: true when a kill on this
+/// pid must be refused (0 would reach our own group, 1 is init).
+#[cfg(unix)]
+fn force_kill_pid_is_refused(pid: u32) -> bool {
+    pid <= 1
+}
+
+#[cfg(windows)]
+fn force_kill_pid(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
+}
+
+#[cfg(all(test, unix))]
+mod force_kill_pid_tests {
+    use super::force_kill_pid_is_refused;
+
+    #[test]
+    fn refuses_init_and_wildcard_pids() {
+        assert!(force_kill_pid_is_refused(0));
+        assert!(force_kill_pid_is_refused(1));
+        assert!(!force_kill_pid_is_refused(u32::MAX));
     }
 }
 

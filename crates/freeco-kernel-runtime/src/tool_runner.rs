@@ -747,9 +747,9 @@ pub async fn execute_tool(
         "process_start" => {
             tool_process_start(input, process_manager, caller_agent_id, exec_policy).await
         }
-        "process_poll" => tool_process_poll(input, process_manager).await,
-        "process_write" => tool_process_write(input, process_manager).await,
-        "process_kill" => tool_process_kill(input, process_manager).await,
+        "process_poll" => tool_process_poll(input, process_manager, caller_agent_id).await,
+        "process_write" => tool_process_write(input, process_manager, caller_agent_id).await,
+        "process_kill" => tool_process_kill(input, process_manager, caller_agent_id).await,
         "process_list" => tool_process_list(process_manager, caller_agent_id).await,
 
         // Skill install from GitHub (preview is read-only; install is approval-gated)
@@ -5341,12 +5341,14 @@ async fn tool_process_start(
 async fn tool_process_poll(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let pm = pm.ok_or("Process manager not available")?;
     let proc_id = input["process_id"]
         .as_str()
         .ok_or("Missing 'process_id' parameter")?;
-    let (stdout, stderr) = pm.read(proc_id).await?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for process_read")?;
+    let (stdout, stderr) = pm.read(agent_id, proc_id).await?;
     Ok(serde_json::json!({
         "stdout": stdout,
         "stderr": stderr,
@@ -5358,6 +5360,7 @@ async fn tool_process_poll(
 async fn tool_process_write(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let pm = pm.ok_or("Process manager not available")?;
     let proc_id = input["process_id"]
@@ -5370,7 +5373,8 @@ async fn tool_process_write(
     } else {
         format!("{data}\n")
     };
-    pm.write(proc_id, &data).await?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for process_write")?;
+    pm.write(agent_id, proc_id, &data).await?;
     Ok(r#"{"status": "written"}"#.to_string())
 }
 
@@ -5378,12 +5382,14 @@ async fn tool_process_write(
 async fn tool_process_kill(
     input: &serde_json::Value,
     pm: Option<&crate::process_manager::ProcessManager>,
+    caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
     let pm = pm.ok_or("Process manager not available")?;
     let proc_id = input["process_id"]
         .as_str()
         .ok_or("Missing 'process_id' parameter")?;
-    pm.kill(proc_id).await?;
+    let agent_id = caller_agent_id.ok_or("Agent ID required for process_kill")?;
+    pm.kill(agent_id, proc_id).await?;
     Ok(r#"{"status": "killed"}"#.to_string())
 }
 

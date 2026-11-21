@@ -85,6 +85,11 @@ impl ProcessManager {
         }
 
         let mut cmd = tokio::process::Command::new(command);
+        // Persistent processes get the same stripped environment as
+        // `shell_exec` children: with the inherited environment, every secret
+        // the daemon holds (API keys, tokens) would leak into the child, and
+        // allowlisted binaries like `env` or `grep` could print them.
+        crate::subprocess_sandbox::sandbox_command(&mut cmd, &[]);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -166,7 +171,11 @@ impl ProcessManager {
     }
 
     /// Write data to a process's stdin.
-    pub async fn write(&self, process_id: &str, data: &str) -> Result<(), String> {
+    /// Only the owning agent may write to its process: ids are a sequential
+    /// counter, so without this check any agent could drive another agent's
+    /// REPL (cross-agent command injection).
+    pub async fn write(&self, agent_id: &str, process_id: &str, data: &str) -> Result<(), String> {
+        self.require_owner(agent_id, process_id).await?;
         let mut entry = self
             .processes
             .get_mut(process_id)
@@ -189,7 +198,14 @@ impl ProcessManager {
     }
 
     /// Read accumulated stdout/stderr (non-blocking drain).
-    pub async fn read(&self, process_id: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    /// Owner-only (see `write`): draining another agent's stdout is
+    /// cross-agent data exfiltration.
+    pub async fn read(
+        &self,
+        agent_id: &str,
+        process_id: &str,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
+        self.require_owner(agent_id, process_id).await?;
         let entry = self
             .processes
             .get(process_id)
@@ -205,7 +221,9 @@ impl ProcessManager {
     }
 
     /// Kill a process.
-    pub async fn kill(&self, process_id: &str) -> Result<(), String> {
+    /// Owner-only (see `write`).
+    pub async fn kill(&self, agent_id: &str, process_id: &str) -> Result<(), String> {
+        self.require_owner(agent_id, process_id).await?;
         let (_, mut proc) = self
             .processes
             .remove(process_id)
@@ -220,6 +238,21 @@ impl ProcessManager {
     }
 
     /// List all processes for an agent.
+    /// Refuse when `process_id` was not started by `agent_id`.
+    async fn require_owner(&self, agent_id: &str, process_id: &str) -> Result<(), String> {
+        let owner_ok = self
+            .processes
+            .iter()
+            .any(|e| e.key().id == process_id && e.value().agent_id == agent_id);
+        if owner_ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "Process '{process_id}' does not belong to agent '{agent_id}'.                  Agents may only use their own processes."
+            ))
+        }
+    }
+
     pub fn list(&self, agent_id: &str) -> Vec<ProcessInfo> {
         self.processes
             .iter()
