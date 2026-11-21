@@ -318,7 +318,7 @@ pub async fn starnet_state(
     };
     let filtered_agents: Vec<StarnetAgent> = agents
         .into_iter()
-        .filter(|a| visible || access.can_see_agent(&a.agent_id, &a.name))
+        .filter(|a| visible || access.can_see_agent(&a.id, &a.name))
         .collect();
     let hidden = agents.len() - filtered_agents.len();
     let mut body = starnet_snapshot(&filtered_agents, &seen, &waiting, &teams, &tasks, now_ms);

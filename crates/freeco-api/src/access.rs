@@ -277,7 +277,9 @@ impl Access {
         Self::new(caller.clone(), tenant, &kernel.config.users)
     }
 
-    fn is_admin(&self) -> bool {
+    /// Owner/admin span tenants and see every agent; used by the read
+    /// routes (activity, Starnet, chats, tasks) that pre-filter rows.
+    pub(crate) fn is_admin(&self) -> bool {
         self.caller.role >= UserRole::Admin
     }
 
