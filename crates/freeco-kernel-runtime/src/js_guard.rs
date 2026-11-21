@@ -63,6 +63,12 @@ const DYNAMIC_CODE_WORDS: &[&str] = &[
     "fromCodePoint",
     "Reflect",
     "unescape",
+    // The remaining standard decoders: an encoded payload is as executable
+    // as a plain one, and `unescape` alone does not cover them.
+    "decodeuri",
+    "textdecoder",
+    // execCommand('insertHTML') writes raw markup on legacy paths.
+    "execcommand",
 ];
 
 /// Credential header names, used to make the refusal message specific.
@@ -431,11 +437,20 @@ fn check_html_injection(expr: &str, compact: &str) -> Option<String> {
             return Some(format!("injects code through `{needle}`"));
         }
     }
-    for sink in ["innerhtml=", "outerhtml="] {
-        for (i, _) in lower_compact.match_indices(sink) {
-            if !lower_compact[i + sink.len()..].starts_with('=') {
-                return Some("assigns HTML (`innerHTML`/`outerHTML`), which can run code".into());
-            }
+    // Any way of writing to the HTML sinks: `.innerHTML=`, `['innerHTML']=`,
+    // `.innerHTML+=` (the `=` of `+=` follows a `+`, which the compacted form
+    // still matches as `innerhtml+=`), and object-literal/`Object.assign`
+    // forms that name the property.
+    for p in [
+        "innerhtml=",
+        "outerhtml=",
+        "'innerhtml':",
+        "\"innerhtml\":",
+        "'outerhtml':",
+        "\"outerhtml\":",
+    ] {
+        if lower_compact.contains(p) {
+            return Some("assigns HTML (`innerHTML`/`outerHTML`), which can run code".into());
         }
     }
     for p in ["setattribute('on", "setattribute(\"on", "setattribute(`on"] {

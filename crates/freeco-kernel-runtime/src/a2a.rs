@@ -404,6 +404,10 @@ impl A2aClient {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                // Same rule as common fetch: every redirect hop must also
+                // pass the SSRF check, or an external "agent card" could
+                // bounce the request at a cloud metadata endpoint.
+                .redirect(crate::web_fetch::ssrf_checked_redirects(Vec::new()))
                 .build()
                 .unwrap_or_default(),
         }

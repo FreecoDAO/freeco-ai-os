@@ -261,15 +261,20 @@ pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<(), Stri
         return Err(format!("SSRF blocked: {hostname} is a restricted hostname"));
     }
 
-    // Check if the hostname is explicitly allowed before doing DNS resolution.
-    if is_host_allowed(hostname, allowed_hosts) {
-        return Ok(());
-    }
-
-    // Resolve DNS and check every returned IP
+    // An explicit host allowlist match skips the private-IP rules but NEVER
+    // the metadata rule: a wildcard entry must not be able to make
+    // 169.254.169.254 fetchable by pinning a name to it.
+    let host_match = is_host_allowed(hostname, allowed_hosts);
+    // Resolve DNS and check every returned IP. A failed lookup is an error,
+    // not a pass: an "if let Ok" here would let a broken resolver wave
+    // through whatever reqwest connects to later.
     let port = if url.starts_with("https") { 443 } else { 80 };
     let socket_addr = format!("{hostname}:{port}");
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
+    let addrs = socket_addr
+        .to_socket_addrs()
+        .map_err(|e| format!("SSRF blocked: DNS lookup for '{hostname}' failed: {e}"))?;
+    {
+        let _ = &addrs;
         for addr in addrs {
             let ip = addr.ip();
             if is_metadata_ip(&ip) {
@@ -277,6 +282,9 @@ pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<(), Stri
                 return Err(format!(
                     "SSRF blocked: {hostname} resolves to metadata IP {ip}"
                 ));
+            }
+            if host_match && !(ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip)) {
+                continue;
             }
             if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) {
                 // Check if the resolved IP matches a CIDR in the allowlist.
@@ -386,17 +394,39 @@ fn ip_in_cidr(ip: &IpAddr, base: &IpAddr, prefix_len: u32) -> bool {
 
 /// Check if an IP address is in a private range.
 fn is_private_ip(ip: &IpAddr) -> bool {
+    // `::ffff:a.b.c.d` is IPv4 in IPv6 syntax; both checkers must see the
+    // same address, or `http://[::ffff:127.0.0.1]:4200/` walks past the
+    // loopback rule.
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_private_ip(&IpAddr::V4(v4));
+    }
     match ip {
         IpAddr::V4(v4) => {
             let octets = v4.octets();
             matches!(
                 octets,
-                [10, ..] | [172, 16..=31, ..] | [192, 168, ..] | [169, 254, ..]
+                [10, ..]
+                    | [172, 16..=31, ..]
+                    | [192, 168, ..]
+                    | [169, 254, ..]
+                    // 100.64.0.0/10: CGNAT space, used by Tailscale and
+                    // carrier-grade NAT — not reachable from the internet,
+                    // still another machine's network.
+                    | [100, 64..=127, ..]
+                    // 198.18.0.0/15: RFC 2544 benchmarking, sometimes used
+                    // for internal routing tricks.
+                    | [198, 18 | 19, ..]
             )
         }
         IpAddr::V6(v6) => {
             let segments = v6.segments();
-            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+            // Unique-local, link-local, plus:
+            (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                // NAT64 well-known prefix 64:ff9b::/96 embeds IPv4 targets.
+                || segments[..5] == [0x0064, 0xff9b, 0, 0, 0]
+                // 6to4 2002::/16 embeds an IPv4 address in the low 32 bits.
+                || segments[0] == 0x2002
         }
     }
 }

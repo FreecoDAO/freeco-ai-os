@@ -2627,16 +2627,28 @@ async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, Stri
         .await
         .map_err(|e| format!("HTTP request failed: {}", crate::web_fetch::error_chain(&e)))?;
     let status = resp.status();
-    // Reject responses larger than 10MB to prevent memory exhaustion
+    // Reject responses larger than 10MB to prevent memory exhaustion. A
+    // chunked response sends no Content-Length, so the header check does
+    // not fire for it: the stream itself is capped below rather than
+    // trusting headers.
     if let Some(len) = resp.content_length() {
         if len > 10 * 1024 * 1024 {
             return Err(format!("Response too large: {len} bytes (max 10MB)"));
         }
     }
+    // `take(n)` caps the body stream itself: a chunked response has no
+    // Content-Length, so the header check above never fires for it. One
+    // extra byte is allowed so we can tell "exactly 10MB" from "over".
+    let mut resp = resp.take(10 * 1024 * 1024 + 1);
     let body = resp
         .text()
         .await
         .map_err(|e| format!("Failed to read response body: {e}"))?;
+    if body.len() > 10 * 1024 * 1024 {
+        return Err(
+            "Response too large: over 10MB streamed (chunked, no Content-Length)".to_string(),
+        );
+    }
     let max_len = 50_000;
     let truncated = if body.len() > max_len {
         format!(
