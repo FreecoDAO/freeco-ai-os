@@ -437,7 +437,7 @@ impl Default for ModelConfig {
 }
 
 /// A fallback model entry in a chain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FallbackModel {
     pub provider: String,
     pub model: String,
@@ -543,23 +543,29 @@ pub struct AgentManifest {
     /// on the next message. See issue #843.
     #[serde(default)]
     pub cache_context: bool,
-    /// Per-agent override for the maximum number of in-context message turns
-    /// kept before the safety-valve trim kicks in. `None` falls back to the
-    /// runtime default (20). Primary/orchestrator agents typically want more
-    /// (e.g. 40); short-lived worker agents want less (e.g. 4-6) so their
-    /// `agent_send` results stay focused. See issue #871.
+    /// Per-agent cap on the conversation turns sent to the model. `None` sends
+    /// the whole conversation (see `DEFAULT_MAX_HISTORY_MESSAGES`). Short-lived
+    /// worker agents can set a small number (e.g. 4-6) so their `agent_send`
+    /// results stay focused. See issue #871.
     #[serde(default)]
     pub max_history_messages: Option<usize>,
 }
 
-/// Runtime default for `AgentManifest::max_history_messages` when the agent
-/// does not specify an override. Kept in sync with `agent_loop::MAX_HISTORY_MESSAGES`.
-pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 20;
+/// Runtime default for `AgentManifest::max_history_messages`: `0`, no cap.
+///
+/// The whole conversation goes to the model, as in Claude Code. A count was
+/// the wrong tool: 20 raw messages, with two per tool call, let one
+/// tool-heavy answer push the request it answered out of view ("build it and
+/// test" got "this is the start of our conversation"). Size is kept in check
+/// by compaction near the model's context window, and the loop's overflow
+/// guards remain the safety net. Kept in sync with
+/// `agent_loop::MAX_HISTORY_MESSAGES`.
+pub const DEFAULT_MAX_HISTORY_MESSAGES: usize = 0;
 
 impl AgentManifest {
-    /// Resolve the effective history cap: agent manifest override, falling
-    /// back to `DEFAULT_MAX_HISTORY_MESSAGES`. Values of `Some(0)` are treated
-    /// as the default to avoid an agent accidentally disabling history.
+    /// Resolve the effective history cap in turns: the manifest override, or
+    /// `DEFAULT_MAX_HISTORY_MESSAGES` (0 = the whole conversation). `Some(0)`
+    /// also means the default.
     pub fn effective_max_history_messages(&self) -> usize {
         match self.max_history_messages {
             Some(n) if n > 0 => n,

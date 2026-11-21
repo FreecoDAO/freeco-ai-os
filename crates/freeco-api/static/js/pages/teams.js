@@ -3,7 +3,12 @@
 // Every team is a room: its members sit in it, a lit dot means a run is
 // working for that agent right now, and a line between two seats is a
 // hand-off the kernel recorded. Below the floor, the selected team's board:
-// tasks that are ready, tasks waiting on other tasks, work in progress, done.
+// four columns (to do, doing, review, done) that cards are dragged between,
+// and the team's members: agents, and people with a team role.
+//
+// Companies own teams: the switcher at the top narrows the floor to one.
+// Owners and admins see every team; anyone else only the teams they are on,
+// and the server decides what each may change (`access` on every team).
 //
 // The page shows only what the daemon can prove. It never animates work that
 // is not happening, and a hand-off says "done" only when the reply came back.
@@ -23,7 +28,22 @@ function teamsPage() {
     newTask: { title: '', description: '', assigned_to: '', blocked_by: [] },
     posting: false,
     newMember: { agent_id: '', role: '' },
+    newPerson: { user: '', role: 'member' },
+    accounts: [],
     newTeam: '',
+    companies: [],
+    companyId: '',
+    manageAll: false,
+    newCompany: '',
+    tab: 'board',
+    dragId: '',
+    dropCol: '',
+    columns: [
+      { id: 'todo', label: 'To do' },
+      { id: 'doing', label: 'Doing' },
+      { id: 'review', label: 'Review' },
+      { id: 'done', label: 'Done' }
+    ],
     goal: '',
     running: false,
     _timer: null,
@@ -52,9 +72,15 @@ function teamsPage() {
         this.teams = (res && res.teams) || [];
         this.unassigned = (res && res.unassigned) || [];
         this.handoffs = (res && res.handoffs) || [];
+        this.companies = (res && res.companies) || [];
+        this.manageAll = !!(res && res.manage_all);
         this.loadError = '';
-        if (!this.selectedId && this.teams.length) this.selectedId = this.teams[0].id;
-        if (this.selectedId && !this.selected()) this.selectedId = this.teams.length ? this.teams[0].id : '';
+        var self = this;
+        if (this.companyId && this.companyId !== 'none' &&
+            !this.companies.some(function (c) { return c.id === self.companyId; })) this.companyId = '';
+        var shown = this.visibleTeams();
+        if (!this.selectedId && shown.length) this.selectedId = shown[0].id;
+        if (this.selectedId && !this.selected()) this.selectedId = shown.length ? shown[0].id : '';
       } catch (e) {
         // Say what failed. An empty floor reads as "you have no teams".
         this.loadError = 'Could not load the teams: ' + e.message;
@@ -66,14 +92,112 @@ function teamsPage() {
 
     selected() {
       var id = this.selectedId;
-      return this.teams.filter(function (t) { return t.id === id; })[0] || null;
+      return this.visibleTeams().filter(function (t) { return t.id === id; })[0] || null;
     },
 
     select(t) {
       this.selectedId = t.id;
       this.newTask = { title: '', description: '', assigned_to: '', blocked_by: [] };
       this.newMember = { agent_id: '', role: '' };
+      this.newPerson = { user: '', role: 'member' };
+      this.accounts = [];
       this.goal = '';
+      if (this.tab === 'members') this.loadAccounts();
+    },
+
+    // ── Companies ────────────────────────────────────────────────────────
+
+    // The teams of the company picked in the switcher ('' all, 'none' the
+    // teams in no company).
+    visibleTeams() {
+      var c = this.companyId;
+      if (!c) return this.teams;
+      return this.teams.filter(function (t) {
+        return c === 'none' ? !t.company_id : t.company_id === c;
+      });
+    },
+
+    currentCompany() {
+      var c = this.companyId;
+      return this.companies.filter(function (x) { return x.id === c; })[0] || null;
+    },
+
+    onCompanyChange() {
+      var shown = this.visibleTeams();
+      if (!this.selected()) this.selectedId = shown.length ? shown[0].id : '';
+      var self = this;
+      this.$nextTick(function () { self.drawLanes(); });
+    },
+
+    async createCompany() {
+      var name = this.newCompany.trim();
+      if (!name) return;
+      try {
+        var c = await FreecoAPI.post('/api/org/companies', { name: name });
+        this.newCompany = '';
+        if (c && c.id) this.companyId = c.id;
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not add the company: ' + e.message);
+      }
+    },
+
+    async renameCompany() {
+      var c = this.currentCompany();
+      if (!c) return;
+      var name = (window.prompt('New name for ' + c.name, c.name) || '').trim();
+      if (!name || name === c.name) return;
+      try {
+        await FreecoAPI.put('/api/org/companies/' + encodeURIComponent(c.id), { name: name });
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not rename the company: ' + e.message);
+      }
+    },
+
+    async deleteCompany() {
+      var c = this.currentCompany();
+      if (!c) return;
+      if (!window.confirm('Delete ' + c.name + '? Its teams and projects stay, in no company.')) return;
+      try {
+        await FreecoAPI.del('/api/org/companies/' + encodeURIComponent(c.id));
+        this.companyId = '';
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not delete the company: ' + e.message);
+      }
+    },
+
+    async moveTeam() {
+      var t = this.selected();
+      if (!t) return;
+      var companyId = t.company_id || '';
+      try {
+        await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(t.id), { company_id: companyId });
+        await this.load(true);
+        // Keep the team in view when it left the company being shown.
+        if (!this.selected()) this.companyId = companyId || 'none';
+      } catch (e) {
+        FreecoToast.error('Could not move the team: ' + e.message);
+      }
+    },
+
+    // ── What the caller may do (decided by the server) ───────────────────
+
+    canManage() {
+      var t = this.selected();
+      return !!t && t.access === 'manage';
+    },
+
+    canWork() {
+      var t = this.selected();
+      return !!t && (t.access === 'manage' || t.access === 'work');
+    },
+
+    accessLabel(access) {
+      if (access === 'manage') return 'You manage this team';
+      if (access === 'work') return 'You work on this team';
+      return 'You can read this team';
     },
 
     allAgents() {
@@ -94,7 +218,7 @@ function teamsPage() {
     },
 
     readyTasks() {
-      return this.teams.reduce(function (sum, t) { return sum + (t.tasks.ready || 0); }, 0);
+      return this.visibleTeams().reduce(function (sum, t) { return sum + (t.tasks.ready || 0); }, 0);
     },
 
     liveHandoffs() {
@@ -115,11 +239,16 @@ function teamsPage() {
       return 'seat';
     },
 
-    nameOf(agentId) {
+    // A name for an assignee or poster: an agent id, `user:<name>` for a
+    // person, or the plain "user" an earlier dashboard post recorded.
+    nameOf(who) {
+      if (!who) return 'someone';
+      if (who === 'user') return 'you';
+      if (String(who).indexOf('user:') === 0) return String(who).slice(5);
       var all = [];
       this.teams.forEach(function (t) { all = all.concat(t.members); });
       all = all.concat(this.unassigned);
-      var m = all.filter(function (x) { return x.agent_id === agentId; })[0];
+      var m = all.filter(function (x) { return x.agent_id === who; })[0];
       return m ? m.name : 'someone';
     },
 
@@ -188,15 +317,63 @@ function teamsPage() {
       });
     },
 
+    // The cards in one column. The server says which column each is in.
     board(column) {
       var t = this.selected();
       if (!t) return [];
-      return t.board.filter(function (task) {
-        if (column === 'ready') return task.status === 'pending' && !task.blocked;
-        if (column === 'blocked') return task.blocked;
-        if (column === 'in_progress') return task.status === 'in_progress';
-        return task.status === 'completed';
-      });
+      return t.board.filter(function (task) { return (task.column || 'todo') === column; });
+    },
+
+    // Everyone a card can go to: the team's agents and its people.
+    assigneeOptions() {
+      var t = this.selected();
+      if (!t) return [];
+      var out = t.members.map(function (m) { return { id: m.agent_id, label: m.name + ' (agent)' }; });
+      (t.people || []).forEach(function (p) { out.push({ id: p.id, label: p.username }); });
+      return out;
+    },
+
+    async changeTask(task, change, what) {
+      var t = this.selected();
+      if (!t) return;
+      try {
+        await FreecoAPI.put('/api/org/teams/' + encodeURIComponent(t.id) + '/tasks/' + encodeURIComponent(task.id), change);
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not ' + what + ': ' + e.message);
+        await this.load(true);
+      }
+    },
+
+    moveTask(task, column) {
+      if (!column || column === task.column) return;
+      return this.changeTask(task, { status: column }, 'move the card');
+    },
+
+    assignTask(task, who) {
+      if ((who || '') === (task.assigned_to || '')) return;
+      return this.changeTask(task, { assigned_to: who || '' }, 'assign the card');
+    },
+
+    dropOn(column) {
+      var id = this.dragId;
+      this.dragId = '';
+      this.dropCol = '';
+      if (!id || !this.canWork()) return;
+      var t = this.selected();
+      var task = t && t.board.filter(function (x) { return x.id === id; })[0];
+      if (task) this.moveTask(task, column);
+    },
+
+    async deleteTask(task) {
+      var t = this.selected();
+      if (!t || !window.confirm('Delete the card "' + task.title + '"?')) return;
+      try {
+        await FreecoAPI.del('/api/org/teams/' + encodeURIComponent(t.id) + '/tasks/' + encodeURIComponent(task.id));
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not delete the card: ' + e.message);
+      }
     },
 
     openTasks() {
@@ -247,14 +424,55 @@ function teamsPage() {
       }
     },
 
-    async removeMember(m) {
+    // `id` is an agent id or `user:<name>` for a person.
+    async removeMember(id, name) {
       var t = this.selected();
       if (!t) return;
       try {
-        await FreecoAPI.del('/api/org/teams/' + encodeURIComponent(t.id) + '/members/' + encodeURIComponent(m.agent_id));
+        await FreecoAPI.del('/api/org/teams/' + encodeURIComponent(t.id) + '/members/' + encodeURIComponent(id));
         await this.load(true);
       } catch (e) {
-        FreecoToast.error('Could not take the agent off the team: ' + e.message);
+        FreecoToast.error('Could not take ' + name + ' off the team: ' + e.message);
+      }
+    },
+
+    openMembers() {
+      this.tab = 'members';
+      this.loadAccounts();
+    },
+
+    // The accounts a lead or admin may add; the server sends them only to
+    // someone who manages the team.
+    async loadAccounts() {
+      var t = this.selected();
+      if (!t || t.access !== 'manage') { this.accounts = []; return; }
+      try {
+        var res = await FreecoAPI.get('/api/org/teams/' + encodeURIComponent(t.id) + '/members');
+        this.accounts = (res && res.accounts) || [];
+      } catch (e) {
+        this.accounts = [];
+      }
+    },
+
+    accountsNotOnTeam() {
+      var t = this.selected();
+      if (!t) return [];
+      var on = (t.people || []).map(function (p) { return p.username; });
+      return this.accounts.filter(function (n) { return on.indexOf(n) < 0; });
+    },
+
+    async addPerson() {
+      var t = this.selected();
+      if (!t || !this.newPerson.user) return;
+      try {
+        await FreecoAPI.post('/api/org/teams/' + encodeURIComponent(t.id) + '/members', {
+          user: this.newPerson.user,
+          role: this.newPerson.role || 'member'
+        });
+        this.newPerson = { user: '', role: 'member' };
+        await this.load(true);
+      } catch (e) {
+        FreecoToast.error('Could not add the person: ' + e.message);
       }
     },
 
@@ -280,7 +498,8 @@ function teamsPage() {
       var name = this.newTeam.trim();
       if (!name) return;
       try {
-        var t = await FreecoAPI.post('/api/org/teams', { name: name });
+        var company = this.currentCompany();
+        var t = await FreecoAPI.post('/api/org/teams', { name: name, company_id: company ? company.id : null });
         this.newTeam = '';
         if (t && t.id) this.selectedId = t.id;
         await this.load(true);

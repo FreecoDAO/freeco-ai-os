@@ -141,44 +141,36 @@ function schedulerPage() {
       this.trigLoading = false;
     },
 
+    // Every recorded unattended run (schedules, triggers, background ticks),
+    // from the daemon's run log. The page used to build this from each job's
+    // last run and each trigger's counter: one line per job at most, nothing
+    // for background loops, and never a failure.
     async loadHistory() {
       this.historyLoading = true;
       try {
-        var historyItems = [];
-        var jobs = this.jobs || [];
-        for (var i = 0; i < jobs.length; i++) {
-          var job = jobs[i];
-          if (job.last_run) {
-            historyItems.push({
-              timestamp: job.last_run,
-              name: job.name || '(unnamed)',
-              type: 'schedule',
-              status: 'completed',
-              run_count: 0
-            });
-          }
-        }
-        var triggers = this.triggers || [];
-        for (var j = 0; j < triggers.length; j++) {
-          var t = triggers[j];
-          if (t.fire_count > 0) {
-            historyItems.push({
-              timestamp: t.created_at,
-              name: 'Trigger: ' + this.triggerType(t.pattern),
-              type: 'trigger',
-              status: 'fired',
-              run_count: t.fire_count
-            });
-          }
-        }
-        historyItems.sort(function(a, b) {
-          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+        var data = await FreecoAPI.get('/api/runs/history');
+        this.history = ((data && data.runs) || []).map(function (r) {
+          return {
+            timestamp: r.timestamp,
+            name: (r.agent_name ? r.agent_name + ' \u2014 ' : '') + (r.name || r.source),
+            type: r.source || 'schedule',
+            status: r.status,
+            error: r.error || '',
+            duration_ms: r.duration_ms || 0,
+            tokens: r.tokens || 0
+          };
         });
-        this.history = historyItems;
       } catch(e) {
         this.history = [];
       }
       this.historyLoading = false;
+    },
+
+    historyType(type) {
+      if (type === 'schedule') return 'Cron Job';
+      if (type === 'trigger') return 'Trigger';
+      if (type === 'background') return 'Background';
+      return type;
     },
 
     // ── Job CRUD ──

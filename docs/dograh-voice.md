@@ -23,6 +23,17 @@ This starts the dograh API (with its MCP server) on **port 8000**, plus its UI,
 Postgres, Redis, MinIO and a TURN server for WebRTC audio. See dograh's own
 README for BYOK model/voice configuration (STT/TTS/LLM or speech-to-speech).
 
+### Keep speech local (Speaches)
+
+dograh's own default transcriber and voice are cloud services. To keep
+callers' audio on this machine, run the bundled **Speaches** hand and, in
+dograh's UI, choose *Local Models (Speaches)* for speech-to-text and
+text-to-speech with base URL `http://host.containers.internal:8010/v1` (from
+inside dograh's container `localhost` is the container itself), the
+`SPEACHES_API_KEY` value as the key, and transcriber model
+`Systran/faster-whisper-small`. FreEco.ai's own dictation uses the same
+service through `[media]` (see `docs/configuration.md`, `local_only`).
+
 ## 2. Connect it in FreEco.ai
 
 Open **Settings → Tools → Voice AI & tool servers (MCP)**, confirm the URL

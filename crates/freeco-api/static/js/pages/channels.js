@@ -34,6 +34,10 @@ function channelsPage() {
     },
     qrPollTimer: null,
 
+    // WhatsApp allowlist + gateway status (GET /api/channels/whatsapp/status)
+    wa: { loading: false, data: null, error: '', saving: false },
+    waPollTimer: null,
+
     categories: [
       { key: 'all', label: 'All' },
       { key: 'messaging', label: 'Messaging' },
@@ -156,10 +160,81 @@ function channelsPage() {
       this.setupStep = ch.configured ? 3 : 1;
       this.testPassed = !!ch.configured;
       this.resetQR();
+      if (ch.name === 'whatsapp') this.watchWhatsApp();
       // Auto-start QR flow for QR-type channels
       if (ch.setup_type === 'qr') {
         this.startQR();
       }
+    },
+
+    // ── WhatsApp: allowlist and gateway status ─────────────────────
+
+    async loadWhatsAppStatus() {
+      this.wa.loading = !this.wa.data;
+      try {
+        this.wa.data = await FreecoAPI.get('/api/channels/whatsapp/status');
+        this.wa.error = '';
+      } catch(e) {
+        this.wa.error = e.message || 'Could not load the WhatsApp status';
+      }
+      this.wa.loading = false;
+    },
+
+    // Refresh while the WhatsApp settings are open; stops by itself when closed.
+    watchWhatsApp() {
+      var self = this;
+      this.wa = { loading: false, data: null, error: '', saving: false };
+      if (this.waPollTimer) clearInterval(this.waPollTimer);
+      this.loadWhatsAppStatus();
+      this.waPollTimer = setInterval(function() {
+        if (!self.setupModal || self.setupModal.name !== 'whatsapp') {
+          clearInterval(self.waPollTimer);
+          self.waPollTimer = null;
+          return;
+        }
+        self.loadWhatsAppStatus();
+      }, 5000);
+    },
+
+    waStateLabel() {
+      var st = this.wa.data && this.wa.data.state;
+      var labels = {
+        not_configured: { text: 'Not set up', cls: 'badge-muted' },
+        connected: { text: 'Connected', cls: 'badge-success' },
+        qr_needed: { text: 'QR scan needed', cls: 'badge-warn' },
+        connecting: { text: 'Connecting', cls: 'badge-info' },
+        starting: { text: 'Gateway starting', cls: 'badge-info' },
+        restarting: { text: 'Gateway restarting', cls: 'badge-warn' },
+        gave_up: { text: 'Gateway stopped after repeated crashes', cls: 'badge-error' },
+        node_missing: { text: 'Node.js not found', cls: 'badge-error' },
+        install_failed: { text: 'Gateway install failed', cls: 'badge-error' },
+        unreachable: { text: 'Gateway not answering', cls: 'badge-error' },
+        stopped: { text: 'Gateway stopped', cls: 'badge-muted' }
+      };
+      return labels[st] || { text: st ? String(st) : 'Unknown', cls: 'badge-muted' };
+    },
+
+    waList(kind) {
+      var list = this.wa.data && this.wa.data.allowlist;
+      return (list && Array.isArray(list[kind])) ? list[kind] : [];
+    },
+
+    // Save only who may talk to the agent; the daemon restarts the gateway
+    // with the new list (and starts it, the first time).
+    async saveWhatsAppAllowlist() {
+      if (this.wa.saving) return;
+      this.wa.saving = true;
+      try {
+        var res = await FreecoAPI.post('/api/channels/whatsapp/configure', { fields: this.formValues });
+        FreecoToast.success('WhatsApp allowlist saved. ' + ((res && res.note) || ''));
+        await this.loadWhatsAppStatus();
+        await this.refreshStatus();
+        var self = this;
+        if (!this.qr.connected) setTimeout(function() { if (self.setupModal && self.setupModal.name === 'whatsapp') self.startQR(); }, 3000);
+      } catch(e) {
+        FreecoToast.error('Failed: ' + (e.message || 'Unknown error'));
+      }
+      this.wa.saving = false;
     },
 
     // ── QR Code Flow (WhatsApp Web style) ──────────────────────────
@@ -304,6 +379,7 @@ function channelsPage() {
     destroy() {
       if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
       if (this.qrPollTimer) { clearInterval(this.qrPollTimer); this.qrPollTimer = null; }
+      if (this.waPollTimer) { clearInterval(this.waPollTimer); this.waPollTimer = null; }
     }
   };
 }

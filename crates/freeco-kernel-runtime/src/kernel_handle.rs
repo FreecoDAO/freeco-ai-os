@@ -123,6 +123,13 @@ pub trait KernelHandle: Send + Sync {
         Err("Agent activation not available".to_string())
     }
 
+    /// Put an agent to sleep: no background loop, no scheduled work, no
+    /// tokens, until a message or `activate_agent` wakes it.
+    fn sleep_agent(&self, agent_id: &str) -> Result<String, String> {
+        let _ = agent_id;
+        Err("Agent sleep not available".to_string())
+    }
+
     /// Store a value in shared memory (cross-agent accessible).
     /// The data gateway, when one is configured.
     ///
@@ -201,6 +208,32 @@ pub trait KernelHandle: Send + Sync {
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
 
+    /// One team's board (team by id or name), optionally one column
+    /// (`todo`, `doing`, `review`, `done`) or status. With `agent_id` set,
+    /// only an agent on the team may read it.
+    async fn team_task_list(
+        &self,
+        agent_id: Option<&str>,
+        team: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let _ = (agent_id, team, status);
+        Err("Team task boards are not available".to_string())
+    }
+
+    /// Hand a task in for review instead of completing it: it moves to the
+    /// board's `review` column with `result`. `by` must hold or have posted
+    /// the task, as for [`Self::task_complete_by`].
+    async fn task_hand_in(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<(), String> {
+        let _ = (task_id, result, by);
+        Err("Team task boards are not available".to_string())
+    }
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,
@@ -246,6 +279,25 @@ pub trait KernelHandle: Send + Sync {
     async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
         let _ = job_id;
         Err("Cron scheduler not available".to_string())
+    }
+
+    /// The agent's `capabilities.shell` patterns (its granted
+    /// `Capability::ShellExec` globs). Empty when it has none, which leaves
+    /// shell commands to the exec policy alone.
+    fn shell_patterns(&self, agent_id: &str) -> Vec<String> {
+        let _ = agent_id;
+        Vec::new()
+    }
+
+    /// Secret values the kernel knows, as `(name, value)`: vault entries,
+    /// secret-named environment and `.env` variables (provider keys, channel
+    /// tokens), MCP header values. Used only to redact them out of replies,
+    /// tool results and written files (`secret_redact`); never shown.
+    ///
+    /// Defaults to empty, so only the well-known key patterns are redacted
+    /// for a handle that does not provide them.
+    fn known_secrets(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// Check if a tool requires approval based on current policy.

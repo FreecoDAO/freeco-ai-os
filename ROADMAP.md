@@ -107,7 +107,8 @@ The current state of every feature, with how to check it, is in
   2026-09-15. Next build: the tick loop honours pause, and projects, tasks,
   schedules and CRM tasks wake agents instead of a timer; the CEO governs who
   sleeps.
-- ⬜ **`pause_hand` is dead wiring** — the flag is set and nothing reads it.
+- ✅ **`pause_hand` is dead wiring** — fixed: `pause_hand` stops the hand's
+  background agent and persists the paused state, and boot restores it paused.
 - ⬜ **The SQLite log grows unbounded while the daemon runs.** An open read keeps
   the WAL from being checkpointed (106 MB beside a 24 MB database). Backups
   now checkpoint first; the holder is not found.
@@ -675,6 +676,95 @@ Blocked work, reported by the assistant as not executed:
 
 ## Unreleased
 
+### Daemon work rescued from the October container -- ported onto main
+
+From the snapshot `rescue/daemon-work-2026-10`, re-implemented on main's
+mechanisms (main's `agent_delegate`, its team-member routes, its WhatsApp
+allowlist and its fallback report). Checked by unit and API tests, not yet
+on a running daemon.
+
+- 🟨 `agent_sleep`, wake on message, worker copies for `agent_delegate`
+  without an `agent` (max 4, no inherited schedule).
+- 🟨 Team lead appointment (`PUT /api/org/teams/{id}/members`), organisation
+  change log (`GET /api/org/changes`) and their Projects page UI.
+- 🟨 Hire security review on the agent spawn path (held for the owner) and on
+  `POST /api/agents` (reported).
+- 🟨 Prompt-injection marking for outside-content tool results and channel
+  messages.
+- 🟨 Run History from a server-side log (`GET /api/runs/history`).
+- 🟨 Claude Code `<model>@<effort>`, sign-in errors, IPv4-first.
+- 🟨 One retry on a failed connection; clearer hourly quota message.
+- 🟨 WhatsApp gateway restarts, alerts, install marker, media; one allowlist.
+- 🟨 WhatsApp allowed chats only, end to end: one list from config
+  (`allowed_users` + `owner_number`, empty = nobody but the owner), the same
+  normalisation in Rust and in the gateway, checked by the gateway on the way
+  in and out and by the daemon on receipt and on every send; the gateway
+  starts or restarts on channel reload; QR mode always has its adapter;
+  dashboard status and allowlist. Unit tests (Rust) and `node:test` tests for
+  `allowlist.js`, not yet on a running daemon or a real WhatsApp account.
+- 🟨 Service backups: 3 runs, 12 GB cap.
+- 🟨 `deploy/daemon/` Podman packaging and runbook; home path remap.
+- 📋 The ws `parallel` flag (a busy agent's worker takes a chat message) is
+  left to the CEO dispatcher work, which owns the socket protocol.
+
+### Chamber — one inbox for every channel, filtered per caller
+
+Coded with unit and HTTP tests (`crates/freeco-api/src/access.rs`,
+`crates/freeco-api/tests/chamber_test.rs`, `crates/freeco-api/src/ws.rs`);
+not yet run against a live daemon in this thread (owner rule: one check round
+on the integration branch).
+
+- 🟨 One place decides visibility, `crates/freeco-api/src/access.rs`: owners
+  and admins everything, others their `[[users]]` `agents` and `channels`
+  grants, kids no external channels, viewers read only; a signed-in caller
+  never sees another tenant's data; hidden items are 404.
+- 🟨 `/api/chamber/conversations`, `.../{id}/messages`, `.../{id}/reply` and
+  `/api/chamber/stream`, plus the Chamber page in the dashboard. Channel
+  replies use the existing channel send path, so they go out only from a
+  configured adapter.
+- 🟨 The WebSocket chat checks roles and grants; a viewer can no longer chat
+  over it.
+- ⬜ Open decisions for the owner are in `docs/chamber-access.md` (per-person
+  agent chats, peer display names, team grants, live HTTP history for
+  unlabelled conversations).
+
+### Companies, team members and team boards
+
+Written with its tests; not compiled or run yet (owner rule: one check round
+on the integration branch). Store tests in `freeco-memory` (`org/people.rs`,
+`board.rs`, the task-board tests in `substrate.rs`), the permission matrix in
+`freeco_api::team_access`, and HTTP tests over real sessions in
+`crates/freeco-api/tests/teams_api_test.rs`.
+
+- 🟨 **Companies own teams.** A team belongs to a company directly, or through
+  its project. `GET/POST /api/org/companies` (as before, now scoped per
+  caller), `GET/PUT/DELETE /api/org/companies/{id}`: rename, describe,
+  archive, delete. Deleting a company leaves its projects and teams in place,
+  in no company. Teams and companies are the existing `org` store rows; a
+  *tenant* stays the separate isolation boundary, not a second kind of
+  company.
+- 🟨 **People sit on teams with a team role** (`lead`, `member`, `viewer`),
+  next to the agents. `GET/POST /api/org/teams/{id}/members` (an agent by
+  `agent_id`, a person by `user`), `DELETE .../members/{member}` with an agent
+  id or `user:<name>`. Only existing `[[users]]` accounts can be added.
+- 🟨 **One permission rule for teams** (`freeco_api::team_access`): owner and
+  admin manage everything; a team lead manages their team, a member works on
+  its board, a viewer reads it; someone on no team sees no team, and a
+  `viewer`/`kid` account only ever reads. `teams_visible_to` and
+  `team_agents_visible_to` are public for the chat-chamber work to build
+  `visible_agents` on. The middleware lets team work through with a `user`
+  account and the handler checks the team role.
+- 🟨 **The board is a kanban: todo / doing / review / done.** Each card keeps
+  its `column` and `updated_at`; `PUT /api/org/teams/{id}/tasks/{task_id}`
+  moves, assigns (an agent or a person on the team) or edits a card, `DELETE`
+  removes it (a lead's right), refused while an unfinished card waits on it.
+  Agents read their own team's board with `task_list { team }` and hand work
+  in for review with `task_complete { review: true }` instead of closing it.
+- 🟨 **The Teams page** has a company switcher (admins add, rename and delete
+  companies and move teams between them), a Members tab (agents and people),
+  and a Board tab with the four columns, where cards are dragged or moved and
+  assigned. Controls follow the `access` the server reports for the caller.
+
 ### Spend limits and secrets.env -- from the 2026-09-14 audit
 
 Checked by tests (`crates/freeco-kernel/tests/spend_limit_test.rs`, the
@@ -722,7 +812,36 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
 - 🟨 **A message from another agent is marked as not from the user**, so a
   colleague's request cannot pass as the owner's approval.
 - 🟨 **`web_fetch` checks every redirect** against the same SSRF rules as the
-  first URL; the fallback fetch now has them too.
+  first URL; the fallback fetch now has them too. `extract_host` also stops at
+  `?`, `#` and `\` and drops userinfo, so `http://x@169.254.169.254/` and
+  `http://10.0.0.1?x` can no longer slip past it (2026-11-19).
+- 🟨 **`browser_run_js` can no longer bypass that SSRF check.** Expressions
+  are screened for network APIs, dynamic code, escapes and global-object
+  obfuscation before the browser sees them, with an error that points to
+  `web_fetch`; every page request is also intercepted over CDP and failed if
+  it targets a private, loopback, link-local or metadata address. The tool
+  requires approval by default, next to `shell_exec`. Not yet exercised
+  against a running browser (2026-11-19).
+- 🟨 **Secrets stop at the output boundary.** Known secret values (vault,
+  env/`.env` provider keys and channel tokens, MCP header credentials) and
+  well-known key patterns are replaced with `[REDACTED:<name|kind>]` in
+  replies before they are stored or sent to channels and in tool results
+  before they reach the model context and the dashboard; `file_write` and
+  `apply_patch` refuse to write a secret into a file. Pattern detection is
+  deliberately narrower than the data gateway's reversible mask, so slugs,
+  hashes and emails are untouched. Redaction depends on the kernel's
+  `known_secrets`; handles without it still get the pattern rules
+  (2026-11-19).
+- 🟨 **`system_info` tool and a real `/api/version`.** A build script stamps
+  the commit SHA, branch, UTC build time and rustc version into the binary
+  (env `FREECO_GIT_*` first for container builds, then git, then `unknown`);
+  the read-only `system_info` tool reports them plus OS/arch and uptime and
+  is granted to every agent. The Dockerfile takes them as build args and the
+  release workflow passes them (2026-11-19).
+- ✅ **Reported `ghp_` token in a release script: not in this repo.** Checked
+  2026-11-18 over all fetched refs, all 103 local refs and the working tree;
+  no match and no `fix_release.py` ever existed here. Revoking it remains
+  the owner's call — see `SECURITY.md` (2026-11-19).
 - 🟨 **The WhatsApp gateway answers only allowed chats** (groups off unless
   listed, optional number allowlist) and gives each contact a conversation of
   its own. The kernel still keys a conversation's history by agent, so a guest
@@ -738,6 +857,80 @@ secrets tests in `freeco-types` and `freeco-api`), not yet on a running daemon.
 - ⚠️ A chat of several hundred messages carries its earliest ordinary messages
   only as a count once the note's budget is full; instructions are kept
   longest. A paid summary for that case is not built.
+
+### Conversations kept whole -- ported from the 2026-10 daemon snapshot
+
+Checked by tests (`crates/freeco-kernel/tests/conversations_kept_test.rs`,
+the compaction and turn-cap tests in `freeco-kernel-runtime`, the bridge and
+CEO-pick tests in `freeco-api`), not yet on a running daemon.
+
+- 🟨 No history cap by default; a manifest's `max_history_messages` counts
+  turns. Compaction only near 80% of the model's window, keeping the last four
+  requests whole; the model gets summary + tail from a per-session cursor
+  (`__compaction_cursor`), the stored conversation stays complete. The
+  canonical-memory upkeep at 80 messages still summarises, but moves the
+  cursor only near the window.
+- 🟨 `/new` (chat, WebSocket, channels) starts a new conversation and keeps
+  the old one; hands resume their conversation after a restart; session
+  switches are saved at once; the popup reloads its conversation, and its
+  "new chat" / History switch on the server; one CEO by a fixed rule.
+- 🟨 16 MB messages and uploads, long pastes staged in `pasted/`,
+  `POST /api/transcribe`, `POST /api/dispatch`, drafts per chat, sandboxed
+  agent pages, idle-socket close as housekeeping.
+- ⚠️ A staged paste is stored in the conversation as its preview, so the chat
+  shows the preview, not the whole paste (the file has it).
+- ⚠️ A `/new` from a channel contact who is an operator starts a new
+  dashboard conversation for the agent; resetting only that contact's own
+  conversation is not built.
+- ⬜ Still hard deletes, by design but without an archive: "Delete
+  conversation" keeps only the trimmed canonical memory;
+  `DELETE /api/agents/{id}/history` and `DELETE /api/sessions/{id}`.
+- ⬜ Dashboard-spawned agents get random ids, so recreating the CEO orphans
+  its conversations (recoverable via `GET /api/sessions/orphaned` and
+  `POST .../adopt`); delegated tasks, team runs and per-contact chats live in
+  labelled conversations the chat page does not list.
+- ⬜ The popup's dispatcher cannot hand a message to a worker copy when the
+  CEO is busy (`parallel`): worker copies are not ported yet.
+
+### Starnet view — 2026-11-19
+
+- 🟨 **Starnet page** (`#starnet`): the agent teams' work as a pixel-art
+  station, after StarNet's station view. Rooms are teams, desks are agents,
+  each agent animates by state (idle, thinking, tool, waiting on a helper,
+  waiting for your yes, error), a bubble shows its in-progress task, click
+  opens its chat. Data: `GET /api/starnet/state` (read-only, behind the
+  usual auth). Sprites: 40 unmodified StarNet PNGs pinned to commit
+  `fbddbf9`, MIT notice in `crates/freeco-api/static/starnet/`. The audit
+  ruled out vendoring StarNet's 35k-line engine; the renderer is our own.
+  Unit and integration tests written; not yet built or watched live.
+  Not done: agents walking between desks, hand-off lines between rooms
+  (the Teams and Live pages already show those).
+
+### Local voice and readable books — 2026-11-19
+
+Written and covered by tests; not yet built or run on a daemon.
+
+- ✅ `[media] local_only`: speech-to-text and text-to-speech never
+  auto-detect or fall back to a cloud provider. A failing local endpoint is a
+  loud error that names the URL. Default: on when the configured speech URLs
+  are all local. Tests cover config parsing, a cloud provider never being
+  chosen, and a closed local port producing that error.
+- ✅ Voice `DATABASE_URL` uses `postgresql+asyncpg://` (board task 6). It was
+  already in the repo and now has a test. The live stack still has to be
+  recreated from the template.
+- ⬜ dograh's own STT/TTS selection lives in dograh's database. The hand and its
+  SKILL say to choose Speaches at `http://host.containers.internal:8010/v1`.
+  Not verified live: whether dograh's container reaches the host's 8010 that
+  way on rootless podman.
+- ✅ Accounting: a read-only `accounting_api` tool, and a Services -> Akaunting
+  Connect step that stores the login in the vault. The hand is wired to the
+  tool.
+- ⬜ Not verified live: Akaunting's API auth (Basic plus `X-Company`) and
+  `/api/ping`.
+- ⬜ Accounting decisions for the owner: country and tax rules, chart of
+  accounts, whether agents may write, pinning the upstream image, and one
+  install path instead of hand plus Services compose. Default proposal: a
+  country-neutral double-entry ledger, read-only for agents.
 
 ### OmniRoute as the one gateway — 2026-11-14
 
@@ -761,6 +954,40 @@ Live now (runtime config, no build needed):
 - ✅ OmniRoute MCP on (streamable HTTP, loopback); scoped key for the hand;
   registered in config.toml.
 
+In the repo (2026-11-18):
+
+- ✅ The bundled `omniroute` hand uses OmniRoute's MCP tools
+  (`mcp_servers = ["omniroute"]`, no shell) with the generic caretaker prompt;
+  the owner's combos and connections stay in the live override.
+- ✅ `${VAR}` in `[[mcp_servers]] headers` is resolved from the environment or
+  the vault, so the OmniRoute MCP key no longer has to sit in config.toml in
+  plain text. Example in `freeco-ai.toml.example` and `docs/configuration.md`.
+- ✅ `containers` is a bundled agent template (`agents/containers`):
+  podman-only `[exec_policy]` with `[exec_policy.containers]` (FreecoDAO
+  images, `freeco-*` names), approval on every `shell_exec`.
+- ✅ Security approvals have a UI: the Approvals page lists manifests held
+  by the Security Agent (`GET /api/security/pending`: hash, name,
+  capabilities, exec policy mode) with an Approve button that calls
+  `POST /api/security/approve/{hash}`.
+- ✅ Hands have per-hand `[exec_policy]` in HAND.toml, used by
+  `activate_hand` instead of `mode = "full"`. A hand listing `shell_exec`
+  without one gets shell denied. Every bundled shell hand declares what it
+  needs (researcher/lead/collector/predictor are allowlisted; the curl hands
+  keep full explicitly). Hand agents are still rebuilt from HAND.toml on
+  boot, so overrides belong in `~/.freeco-ai/hands/<id>/HAND.toml`.
+- ✅ MCP servers reconnect: every configured server has a health entry, and
+  failures are retried 5 s / 15 s / 60 s / every 5 min until connected or
+  removed from config (`reconnect_max_attempts` still caps it).
+- ✅ `capabilities.shell` is enforced for the builtin `shell_exec` and
+  `process_start`, before approval. Empty list = no restriction from that
+  field (`exec_policy` decides), which keeps today's agents working.
+- ✅ Container scope enforced by the kernel: `[exec_policy.containers]`
+  (`name_prefixes`, `images`, `allow_host_network`) checks every podman/docker
+  command from `shell_exec`/`process_start`, refuses host escapes, and keeps
+  `freeco-daemon` read-only. The `containers` agent uses it.
+- ✅ `hand_status` also probes the hand service's `health_path` over loopback
+  HTTP and reports status, latency and error next to the container state.
+
 Open:
 
 - ⬜ **Daemon rebuild needed** to ship: fallback picker rendering nothing
@@ -769,32 +996,15 @@ Open:
   with no provider), and to activate the `omniroute` MCP server — then attach
   it to the `omniroute` agent (`PUT /api/agents/{id}/mcp_servers`). Fold in the
   unmerged `claude/project-thread-*` branches first.
-- ⬜ **Security approvals have no UI.** `POST /api/security/approve/{hash}` is
-  never called by the dashboard, so a manifest with `shell_exec` can never be
-  approved by clicking. (The `containers` agent was approved through the API
-  on the owner's chat go-ahead, hash `5e6652e8…`.)
-- ⬜ **Hands cannot safely manage their own containers.** A hand that lists
-  `shell_exec` in HAND.toml gets `exec_policy` mode **Full** (any command;
-  `activate_hand`: "Hands are curated packages"). Needs a per-hand
-  `[exec_policy]` in HAND.toml (e.g. podman-only) and a container-name scope
-  checked by the kernel. Until then the `containers` agent does container
-  work. Also: hand agents are rebuilt from HAND.toml on every boot, so their
-  `agent.toml` edits are silently discarded (overrides go in
-  `~/.freeco-ai/hands/<id>/HAND.toml`; the `omniroute` hand now has one with
-  its OmniRoute MCP tools).
-- ⬜ **MCP servers are connected once at boot, with no retry.** The daemon
-  started 2 s before OmniRoute and never connected; `POST
-  /api/integrations/reload` fixed it by hand.
-- ⬜ **`capabilities.shell` is dead wiring.** It becomes `Capability::ShellExec`
-  and nothing checks it; only the agent's `[exec_policy]` limits commands.
 - 🟨 **Containers hand** (`containers`, live 2026-11-14): kernel-enforced —
   approval on every `shell_exec` (verified live), no shell metacharacters,
   `[exec_policy]` allowlist = `podman` only, five tools, no agent spawning.
-  Prompt-only (not enforced) — FreecoDAO images only, `freeco-*` containers
-  only, backup/rollback, 127.0.0.1 binding, never touching `freeco-daemon`.
-  `podman` with any arguments is still powerful (`run --privileged`, host
-  mounts); next: read-only podman without a click, mutating podman with one,
-  and an image/argument allowlist checked by the kernel.
+  Kernel-enforced since then too: FreecoDAO images only, `freeco-*`
+  containers and volumes only, 127.0.0.1 binding, `freeco-daemon` read-only,
+  no privileged/host-mount/host-namespace flags
+  (`[exec_policy.containers]`). Prompt-only: backup/rollback before
+  recreating. Next: read-only podman without a click, mutating podman with
+  one.
 - ⬜ **OmniRoute from the FreecoDAO fork.** `FreecoDAO/OmniRoute` is on
   `release/v3.8.50` (upstream v3.8.54) and its docker-publish run failed
   (2026-08-27); the container still runs `docker.io/diegosouzapw/omniroute`.
@@ -1050,7 +1260,9 @@ The rest, in priority order, with nothing here described as done:
 - 📋 Automated backup and recovery workflows.
 - 📋 Company chart and live multi-agent view.
 - 📋 Global assistant widget and voice experience.
-- 📋 Multi-user and multi-company tenancy.
+- 🟨 Multi-user and multi-company tenancy: teams, companies, members and
+  boards exist and are permission-checked per caller (see Unreleased); cloud
+  tenancy and sign-in provisioning are still open.
 - 📋 Expanded language support, CRM integrations, Deskmate, and the FreEco.ai
   OS distribution.
 

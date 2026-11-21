@@ -818,6 +818,42 @@ List all active sessions across agents.
 }
 ```
 
+### GET /api/starnet/state
+
+What the dashboard's Starnet page draws, in one read-only poll. Rooms are
+teams (sorted by name), with a last "No team" room for agents on no team;
+every agent appears in exactly one room. `state` is `idle`, `thinking`,
+`tool`, `waiting_on_helper`, `waiting_for_you` or `error` (the agent crashed,
+or its last tool failed less than a minute ago). `task` is the newest
+in-progress task assigned to the agent. `degraded` lists `teams` or `tasks`
+when that part could not be read; the agents are still returned.
+
+**Response** `200 OK`:
+
+```json
+{
+  "now_ms": 1763510400000,
+  "rooms": [
+    { "id": "t1b2...", "name": "Research", "project": "Launch", "agents": ["a1b2c3d4-..."] },
+    { "id": null, "name": "No team", "project": null, "agents": ["e5f6..."] }
+  ],
+  "agents": [
+    {
+      "agent_id": "a1b2c3d4-...",
+      "name": "researcher",
+      "state": "tool",
+      "tool": "web_fetch",
+      "since_ms": 1763510395000,
+      "turns": 1,
+      "waiting_approvals": 0,
+      "task": "Compare three suppliers",
+      "room": "t1b2..."
+    }
+  ],
+  "degraded": []
+}
+```
+
 ### DELETE /api/sessions/{id}
 
 Delete a specific session and its conversation history.
@@ -1733,15 +1769,17 @@ Run the migration. Converts manifests, imports skills, and optionally imports se
 
 ### POST /api/agents/{id}/session/reset
 
-Reset an agent's session, clearing all conversation history.
+Start a new conversation and make it the agent's current one. The previous
+conversation is kept and stays listed in `GET /api/agents/{id}/sessions`;
+delete one explicitly with `DELETE /api/sessions/{id}`.
 
 **Response** `200 OK`:
 
 ```json
 {
-  "status": "reset",
-  "agent_id": "a1b2c3d4-...",
-  "new_session_id": "s5e6f7g8-..."
+  "status": "ok",
+  "message": "New conversation started",
+  "session_id": "s5e6f7g8-..."
 }
 ```
 
@@ -2340,7 +2378,9 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/agents/{id}/message/stream` | Send message (SSE stream) |
 | GET | `/api/agents/{id}/session` | Get conversation history |
 | GET | `/api/agents/{id}/ws` | WebSocket chat |
-| POST | `/api/agents/{id}/session/reset` | Reset session |
+| POST | `/api/agents/{id}/session/reset` | Start a new conversation (the old one is kept) |
+| POST | `/api/dispatch` | Which conversation a popup message belongs in (`here`, `session`, `new_task`, `propose`) |
+| POST | `/api/transcribe` | Words in an audio body (`Content-Type: audio/*`, max 16 MB); nothing stored |
 | POST | `/api/agents/{id}/session/compact` | LLM-based compaction |
 | POST | `/api/agents/{id}/stop` | Cancel current run |
 | PUT | `/api/agents/{id}/model` | Switch model |

@@ -4,6 +4,10 @@
 function approvalsPage() {
   return {
     approvals: [],
+    // Manifests and workflows the Security Agent held for approval
+    // (GET /api/security/pending). Approving one lets that exact content
+    // through the next time it is submitted.
+    securityPending: [],
     filterStatus: 'all',
     loading: true,
     loadError: '',
@@ -74,7 +78,54 @@ function approvalsPage() {
       } catch(e) {
         this.loadError = e.message || 'Could not load approvals.';
       }
+      await this.loadSecurityPending();
       this.loading = false;
+    },
+
+    // Separate from loadData's error: the runtime queue stays usable when
+    // this list cannot be read.
+    async loadSecurityPending() {
+      try {
+        var data = await FreecoAPI.get('/api/security/pending');
+        this.securityPending = data.pending || [];
+      } catch(e) {
+        this.securityPending = [];
+      }
+    },
+
+    // Capability lists of a pending manifest, as [label, values] rows.
+    securityCaps(p) {
+      var caps = (p.summary && p.summary.capabilities) || {};
+      var rows = [];
+      Object.keys(caps).forEach(function(k) {
+        var v = caps[k];
+        if (Array.isArray(v)) {
+          if (v.length) rows.push([k, v.join(', ')]);
+        } else if (v === true) {
+          rows.push([k, 'yes']);
+        } else if (v !== false && v !== null && v !== undefined && typeof v !== 'object') {
+          rows.push([k, String(v)]);
+        }
+      });
+      return rows;
+    },
+
+    approveSecurity(p) {
+      var self = this;
+      var name = (p.summary && p.summary.name) || p.subject;
+      FreecoToast.confirm(
+        'Approve ' + name,
+        'This lets this exact content through the security check. It does not create anything by itself: submit it again afterwards. Approve only if you trust what it asks for.',
+        async function() {
+          try {
+            await FreecoAPI.post('/api/security/approve/' + encodeURIComponent(p.content_hash), {});
+            FreecoToast.success('Approved: submit it again to create it');
+            await self.loadSecurityPending();
+          } catch(e) {
+            FreecoToast.error(e.message);
+          }
+        }
+      );
     },
 
     async approve(id) {

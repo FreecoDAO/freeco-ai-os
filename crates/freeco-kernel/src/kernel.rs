@@ -648,6 +648,91 @@ fn gethostname() -> Option<String> {
 /// runs in practice.
 const AUTO_COMPACT_AT: usize = 80;
 
+/// Manifest metadata flag for an agent put to sleep: no background loop, no
+/// scheduled work, no tokens, until a message or `agent_activate` wakes it.
+/// Kept in the manifest so it survives a restart, which marks every agent
+/// Suspended on shutdown and so cannot carry the meaning itself.
+pub const ASLEEP_KEY: &str = "asleep";
+
+/// Manifest metadata on a worker copy: the id of the agent it works for.
+pub const WORKER_OF_KEY: &str = "worker_of";
+
+/// Most worker copies one agent may have.
+pub const MAX_WORKERS: usize = 4;
+
+/// Shared-store key for the log of unattended runs (schedules, triggers,
+/// background ticks), capped at `RUN_HISTORY_MAX` entries.
+const RUN_HISTORY_KEY: &str = "__run_history";
+const RUN_HISTORY_MAX: usize = 500;
+
+/// Shared-store key for the organisation change log.
+const ORG_CHANGES_KEY: &str = "__org_changes";
+const ORG_CHANGES_MAX: usize = 300;
+
+fn is_asleep(manifest: &AgentManifest) -> bool {
+    manifest
+        .metadata
+        .get(ASLEEP_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+fn is_worker(manifest: &AgentManifest) -> bool {
+    manifest.metadata.contains_key(WORKER_OF_KEY)
+}
+
+/// A path inside another machine's FreEco home, mapped into this one.
+///
+/// When the data directory moves -- the Windows home copied into the Linux
+/// container (deploy/daemon) -- agents keep paths such as
+/// `C:\Users\me\.freeco-ai\workspaces\crm`, which on Linux name a file in
+/// the working directory. Anything under a `.freeco-ai` folder (or the
+/// container's `freeco` home) is re-rooted at `home`; other paths are left
+/// alone. Returns `None` when the path needs no change.
+pub fn remap_home_path(path: &Path, home: &Path) -> Option<std::path::PathBuf> {
+    if path.starts_with(home) {
+        return None;
+    }
+    let unified = path.to_string_lossy().replace('\\', "/");
+    // Only paths written for a different machine: a Windows drive path on a
+    // non-Windows host, or a Unix path on Windows.
+    let windows_style = unified.len() > 2 && unified.as_bytes()[1] == b':';
+    if windows_style == cfg!(windows) {
+        return None;
+    }
+    let marker = ["/.freeco-ai/", "/freeco/"]
+        .iter()
+        .find_map(|m| unified.find(m).map(|i| i + m.len()))?;
+    let mut out = home.to_path_buf();
+    for part in unified[marker..].split('/').filter(|p| !p.is_empty()) {
+        out.push(part);
+    }
+    Some(out)
+}
+
+/// Remap the manifest's own paths (workspace, private state) into `home`.
+fn remap_manifest_home(manifest: &mut AgentManifest, home: &Path) -> bool {
+    let mut changed = false;
+    for p in [&mut manifest.workspace, &mut manifest.state_dir]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(new) = remap_home_path(p, home) {
+            *p = new;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Per-agent store key recording where the last compaction of a session
+/// ended: `{"session": <id>, "cursor": <message index>}`.
+const COMPACTION_CURSOR_KEY: &str = "__compaction_cursor";
+
+fn compaction_cursor_value(session_id: SessionId, cursor: usize) -> serde_json::Value {
+    serde_json::json!({ "session": session_id.0.to_string(), "cursor": cursor })
+}
+
 impl FreecoKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
@@ -690,6 +775,8 @@ impl FreecoKernel {
 
     /// Boot the kernel with an explicit configuration.
     pub fn boot_with_config(mut config: KernelConfig) -> KernelResult<Self> {
+        // Anchor the system_info / /api/version uptime clock at boot.
+        freeco_kernel_runtime::build_info::mark_start();
         if rustls::crypto::ring::default_provider()
             .install_default()
             .is_err()
@@ -1216,7 +1303,13 @@ impl FreecoKernel {
                 config.media.tts_openai_base_url.clone(),
                 config.media.tts_elevenlabs_base_url.clone(),
             )
-            .with_local_api_key_env(config.media.local_audio_api_key_env.clone());
+            .with_local_api_key_env(config.media.local_audio_api_key_env.clone())
+            // `[media].local_only`: speech never auto-detects or falls back
+            // to a cloud provider; see MediaConfig::local_only_effective.
+            .with_local_only(config.media.local_only_effective());
+        if config.media.local_only_effective() {
+            info!("[media].local_only is on: speech-to-text and text-to-speech use local endpoints only, no cloud fallback");
+        }
         let mut pairing = crate::pairing::PairingManager::new(config.pairing.clone());
 
         // Load paired devices from database and set up persistence callback
@@ -1423,6 +1516,13 @@ impl FreecoKernel {
 
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
+                    // Data moved from another machine (Windows to the Linux
+                    // container) keeps the old home in its paths; point them
+                    // at this home before anything compares or uses them.
+                    if remap_manifest_home(&mut entry.manifest, &kernel.config.home_dir) {
+                        info!(agent = %name, "Agent paths moved to this home directory");
+                        let _ = kernel.memory.save_agent(&entry);
+                    }
                     let toml_path = kernel
                         .config
                         .home_dir
@@ -1435,7 +1535,11 @@ impl FreecoKernel {
                                 match toml::from_str::<freeco_types::agent::AgentManifest>(
                                     &toml_str,
                                 ) {
-                                    Ok(disk_manifest) => {
+                                    Ok(mut disk_manifest) => {
+                                        remap_manifest_home(
+                                            &mut disk_manifest,
+                                            &kernel.config.home_dir,
+                                        );
                                         // Capture whether agent.toml defines exec_policy
                                         // explicitly (so we don't blow it away with the
                                         // kernel default below).
@@ -2218,6 +2322,160 @@ impl FreecoKernel {
         }
     }
 
+    /// Append `item` to a capped list in the shared store.
+    ///
+    /// One lock for every such list: two runs finishing together each read
+    /// the list, pushed and wrote it back, and the later write dropped the
+    /// earlier entry.
+    fn append_capped(&self, key: &str, item: serde_json::Value, max: usize) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let store = shared_memory_agent_id();
+        let mut list: Vec<serde_json::Value> = self
+            .memory
+            .structured_get(store, key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.push(item);
+        if list.len() > max {
+            let excess = list.len() - max;
+            list.drain(..excess);
+        }
+        let _ = self
+            .memory
+            .structured_set(store, key, serde_json::Value::Array(list));
+    }
+
+    /// A capped list from the shared store, newest first.
+    fn read_capped(&self, key: &str, limit: usize) -> Vec<serde_json::Value> {
+        let mut list: Vec<serde_json::Value> = self
+            .memory
+            .structured_get(shared_memory_agent_id(), key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        list.reverse();
+        list.truncate(limit);
+        list
+    }
+
+    /// Record a change to the organisation -- a company, project or team
+    /// created, a member set or taken off, an agent hired or a hire held -- so
+    /// the owner sees it on the Projects page and the CEO in `org_overview`.
+    /// Changes made by agents used to leave no trace outside the conversation
+    /// that made them.
+    ///
+    /// `actor` is a name, or an agent id, which is shown as the agent's name.
+    pub fn record_org_change(&self, actor: &str, what: impl Into<String>) {
+        let what = what.into();
+        let actor = actor
+            .parse::<AgentId>()
+            .ok()
+            .and_then(|id| self.registry.get(id))
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| actor.to_string());
+        info!(actor = %actor, change = %what, "Organisation changed");
+        self.append_capped(
+            ORG_CHANGES_KEY,
+            serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "actor": actor,
+                "change": what,
+            }),
+            ORG_CHANGES_MAX,
+        );
+    }
+
+    /// Recorded organisation changes, newest first.
+    pub fn org_changes(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.read_capped(ORG_CHANGES_KEY, limit)
+    }
+
+    /// Who an organisation change made through a tool is by: the calling
+    /// agent's name, or "an agent" when the run cannot be told.
+    fn org_actor(&self) -> String {
+        self.calling_agent()
+            .map(|(_, name)| name)
+            .unwrap_or_else(|| "an agent".to_string())
+    }
+
+    /// Record one run that started on its own -- a schedule, a trigger, a
+    /// background tick -- for the Run History page.
+    ///
+    /// That page was assembled in the browser from each job's *last* run and
+    /// each trigger's fire counter, so it showed one line per job at most,
+    /// nothing at all for background loops, and never a failure.
+    pub fn record_run(
+        &self,
+        agent_id: AgentId,
+        source: &str,
+        name: &str,
+        started: chrono::DateTime<chrono::Utc>,
+        result: &KernelResult<AgentLoopResult>,
+    ) {
+        match result {
+            Ok(r) => self.record_run_outcome(
+                agent_id,
+                source,
+                name,
+                started,
+                Ok(()),
+                r.total_usage.input_tokens + r.total_usage.output_tokens,
+                r.cost_usd.unwrap_or(0.0),
+            ),
+            Err(e) => {
+                self.record_run_outcome(agent_id, source, name, started, Err(e.to_string()), 0, 0.0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_run_outcome(
+        &self,
+        agent_id: AgentId,
+        source: &str,
+        name: &str,
+        started: chrono::DateTime<chrono::Utc>,
+        outcome: Result<(), String>,
+        tokens: u64,
+        cost_usd: f64,
+    ) {
+        let agent_name = self
+            .registry
+            .get(agent_id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let finished = chrono::Utc::now();
+        let (status, error) = match outcome {
+            Ok(()) => ("completed", None),
+            Err(e) => ("failed", Some(e.chars().take(300).collect::<String>())),
+        };
+        self.append_capped(
+            RUN_HISTORY_KEY,
+            serde_json::json!({
+                "timestamp": started.to_rfc3339(),
+                "duration_ms": (finished - started).num_milliseconds().max(0),
+                "agent_id": agent_id.to_string(),
+                "agent_name": agent_name,
+                "source": source,
+                "name": name,
+                "status": status,
+                "error": error,
+                "tokens": tokens,
+                "cost_usd": cost_usd,
+            }),
+            RUN_HISTORY_MAX,
+        );
+    }
+
+    /// The recorded unattended runs, newest first.
+    pub fn run_history(&self, limit: usize) -> Vec<serde_json::Value> {
+        self.read_capped(RUN_HISTORY_KEY, limit)
+    }
+
     /// The agent whose run is asking, if a run is asking: the owner of the
     /// conversation this task is working in.
     fn calling_agent(&self) -> Option<(AgentId, String)> {
@@ -2624,6 +2882,7 @@ impl FreecoKernel {
             .check_quota(agent_id)
             .map_err(KernelError::Freeco)
             .map_err(refused)?;
+        self.wake_if_asleep(agent_id);
 
         // Read after waiting: the manifest may have changed while this queued.
         // The conversation is the one locked, whichever is current by now.
@@ -2825,6 +3084,7 @@ impl FreecoKernel {
         self.scheduler
             .check_quota(agent_id)
             .map_err(KernelError::Freeco)?;
+        self.wake_if_asleep(agent_id);
 
         let entry = self
             .registry
@@ -3135,6 +3395,7 @@ impl FreecoKernel {
                 );
             }
         }
+        self.mark_history_from(&mut manifest, agent_id, session.id);
 
         let memory = Arc::clone(&self.memory);
         // Build link context from user message (auto-extract URLs for the agent)
@@ -3319,21 +3580,15 @@ impl FreecoKernel {
 
                     // Post-loop compaction check: if session now exceeds token threshold,
                     // trigger compaction in background for the next call.
+                    // Measured against this model's own window, and on what
+                    // the model is sent (from the compaction point on).
                     {
-                        use freeco_kernel_runtime::compactor::{
-                            estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
-                        };
-                        let config = CompactionConfig::default();
-                        let estimated = estimate_token_count(&session.messages, None, None);
-                        if needs_compaction_by_tokens(estimated, &config) {
-                            let kc = kernel_clone.clone();
-                            tokio::spawn(async move {
-                                info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
-                                if let Err(e) = kc.compact_agent_session(agent_id).await {
-                                    warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
-                                }
-                            });
-                        }
+                        let kc = kernel_clone.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = kc.compact_agent_session_if_needed(agent_id).await {
+                                warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
+                            }
+                        });
                     }
 
                     Ok(result)
@@ -3769,6 +4024,7 @@ impl FreecoKernel {
                 );
             }
         }
+        self.mark_history_from(&mut manifest, agent_id, session.id);
 
         let is_stable = self.config.mode == freeco_types::config::KernelMode::Stable;
 
@@ -3919,7 +4175,11 @@ impl FreecoKernel {
             if long_enough {
                 if let Some(me) = self.self_handle.get().and_then(|w| w.upgrade()) {
                     tokio::spawn(async move {
-                        match me.compact_agent_session(agent_id).await {
+                        // The canonical memory gets its summary either way;
+                        // what the model is sent moves only near the
+                        // context window.
+                        let near_window = me.window_compaction_due(agent_id).is_some();
+                        match me.compact_agent_session_with(agent_id, near_window).await {
                             Ok(summary) => info!(%agent_id, "auto-compacted session: {summary}"),
                             Err(e) => warn!(%agent_id, "auto-compaction failed: {e}"),
                         }
@@ -4035,14 +4295,68 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         // Update registry with new session ID
-        self.registry
-            .update_session_id(agent_id, new_session.id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
 
         // Reset quota tracking so /new clears "token quota exceeded"
         self.scheduler.reset_usage(agent_id);
 
         info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        Ok(())
+    }
+
+    /// Start a fresh conversation and make it current, keeping the old one.
+    ///
+    /// What `/new` means. It used to be `reset_session`, which deletes the
+    /// current conversation -- and a `/new` typed on Telegram or WhatsApp
+    /// reached the same call, so it wiped the conversation the dashboard was
+    /// showing. The old conversation stays listed under History; only an
+    /// explicit delete removes one. A message still waiting on the old
+    /// conversation is redirected here, as after a reset.
+    pub fn start_new_session(&self, agent_id: AgentId) -> KernelResult<SessionId> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+
+        if let Ok(Some(old_session)) = self.memory.get_session(entry.session_id) {
+            // An empty conversation is reused rather than piled up.
+            if old_session.messages.is_empty() {
+                self.scheduler.reset_usage(agent_id);
+                return Ok(entry.session_id);
+            }
+            if old_session.messages.len() >= 2 {
+                self.save_session_summary(agent_id, &entry, &old_session);
+            }
+        }
+        self.mark_conversation_ended(entry.session_id);
+
+        let new_session = self
+            .memory
+            .create_session(agent_id)
+            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
+        self.scheduler.reset_usage(agent_id);
+
+        info!(agent_id = %agent_id, old = %entry.session_id.0, new = %new_session.id.0, "New conversation started; the old one is kept");
+        Ok(new_session.id)
+    }
+
+    /// Make `session_id` the agent's current conversation, and persist that
+    /// at once.
+    ///
+    /// The switch lived only in memory until a clean shutdown saved it, so
+    /// after a crash or a killed container the agent came back pointing at the
+    /// conversation it had before -- possibly one deleted since -- and the
+    /// chat opened on the wrong conversation, or on none.
+    fn set_current_session(&self, agent_id: AgentId, session_id: SessionId) -> KernelResult<()> {
+        self.registry
+            .update_session_id(agent_id, session_id)
+            .map_err(KernelError::Freeco)?;
+        if let Some(updated) = self.registry.get(agent_id) {
+            if let Err(e) = self.memory.save_agent(&updated) {
+                warn!(agent_id = %agent_id, "Could not persist the current conversation: {e}");
+            }
+        }
         Ok(())
     }
 
@@ -4068,9 +4382,7 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         // Update registry with new session ID
-        self.registry
-            .update_session_id(agent_id, new_session.id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, new_session.id)?;
 
         info!(agent_id = %agent_id, "All agent history cleared");
         Ok(())
@@ -4162,9 +4474,7 @@ impl FreecoKernel {
             .map_err(KernelError::Freeco)?;
 
         if switch_to {
-            self.registry
-                .update_session_id(agent_id, session.id)
-                .map_err(KernelError::Freeco)?;
+            self.set_current_session(agent_id, session.id)?;
         }
 
         info!(agent_id = %agent_id, label = ?label, switch_to, "Created new session");
@@ -4202,9 +4512,7 @@ impl FreecoKernel {
             )));
         }
 
-        self.registry
-            .update_session_id(agent_id, session_id)
-            .map_err(KernelError::Freeco)?;
+        self.set_current_session(agent_id, session_id)?;
 
         info!(agent_id = %agent_id, session_id = %session_id.0, "Switched session");
         Ok(())
@@ -4644,14 +4952,126 @@ impl FreecoKernel {
         }
     }
 
+    /// Compaction settings for this agent's model: its real context window
+    /// from the catalog, falling back to 200k when the model is not listed.
+    fn compaction_config_for(
+        &self,
+        manifest: &freeco_types::agent::AgentManifest,
+    ) -> freeco_kernel_runtime::compactor::CompactionConfig {
+        let window = self
+            .model_catalog
+            .read()
+            .ok()
+            .and_then(|cat| {
+                cat.find_model(&manifest.model.model)
+                    .map(|m| m.context_window as usize)
+            })
+            .unwrap_or(0);
+        freeco_kernel_runtime::compactor::CompactionConfig::for_context_window(window)
+    }
+
+    /// Where the last compaction of `session_id` ended, if it was compacted.
+    ///
+    /// Compaction keeps the stored conversation whole (the user can still
+    /// scroll back through all of it) and records its summary separately. The
+    /// model is sent the summary and the messages after this point; without
+    /// it every call carried the whole stored history, and compaction saved
+    /// nothing.
+    fn compaction_cursor(&self, agent_id: AgentId, session_id: SessionId) -> Option<usize> {
+        let v = self
+            .memory
+            .structured_get(agent_id, COMPACTION_CURSOR_KEY)
+            .ok()
+            .flatten()?;
+        if v.get("session")?.as_str()? != session_id.0.to_string() {
+            return None;
+        }
+        v.get("cursor")?.as_u64().map(|c| c as usize)
+    }
+
+    /// Tell the agent loop where the history it sends should start.
+    fn mark_history_from(
+        &self,
+        manifest: &mut freeco_types::agent::AgentManifest,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) {
+        if let Some(cursor) = self.compaction_cursor(agent_id, session_id) {
+            manifest.metadata.insert(
+                freeco_kernel_runtime::agent_loop::HISTORY_FROM_KEY.to_string(),
+                serde_json::json!(cursor),
+            );
+        }
+    }
+
+    /// Compact only when the conversation nears the model's context window.
+    ///
+    /// The automatic path. It used to fire at 30 messages, which one or two
+    /// tool-heavy requests reach, so agents lost what they had just been
+    /// asked; now the whole conversation stays until size makes it necessary.
+    pub async fn compact_agent_session_if_needed(&self, agent_id: AgentId) -> KernelResult<String> {
+        if self.registry.get(agent_id).is_none() {
+            return Err(KernelError::Freeco(FreecoError::AgentNotFound(
+                agent_id.to_string(),
+            )));
+        }
+        match self.window_compaction_due(agent_id) {
+            None => Ok("No compaction needed: the conversation is well within the \
+                        model's context window"
+                .to_string()),
+            Some(estimated) => {
+                info!(agent_id = %agent_id, estimated_tokens = estimated, "Compacting: conversation nears the context window");
+                self.compact_agent_session(agent_id).await
+            }
+        }
+    }
+
+    /// The estimated tokens the model is sent, when that nears its context
+    /// window (`None` otherwise, or when the agent is unknown).
+    fn window_compaction_due(&self, agent_id: AgentId) -> Option<usize> {
+        use freeco_kernel_runtime::compactor::{estimate_token_count, needs_compaction_by_tokens};
+        let entry = self.registry.get(agent_id)?;
+        let mut messages = self
+            .memory
+            .get_session(entry.session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        // Measure what the model is sent, not the whole stored history:
+        // otherwise, once compacted, every message would compact again.
+        if let Some(cursor) = self.compaction_cursor(agent_id, entry.session_id) {
+            messages.drain(..cursor.min(messages.len()));
+        }
+        let config = self.compaction_config_for(&entry.manifest);
+        let estimated = estimate_token_count(
+            &messages,
+            Some(entry.manifest.model.system_prompt.as_str()),
+            None,
+        );
+        needs_compaction_by_tokens(estimated, &config).then_some(estimated)
+    }
+
     /// Compact an agent's session using LLM-based summarization.
     ///
-    /// Replaces the existing text-truncation compaction with an intelligent
-    /// LLM-generated summary of older messages, keeping only recent messages.
+    /// The model is then sent the summary plus the last few requests, whole;
+    /// the stored conversation keeps every message. Asked for (`/compact`),
+    /// it compacts whenever there is anything older than those requests: it
+    /// used to refuse below 30 messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        use freeco_kernel_runtime::compactor::{
-            compact_session, needs_compaction, CompactionConfig,
-        };
+        self.compact_agent_session_with(agent_id, true).await
+    }
+
+    /// Summarise the session into the canonical memory. With `move_cursor`,
+    /// the model is also sent only the summary and what follows from then on;
+    /// without it (canonical-memory upkeep) the model keeps the whole
+    /// conversation.
+    async fn compact_agent_session_with(
+        &self,
+        agent_id: AgentId,
+        move_cursor: bool,
+    ) -> KernelResult<String> {
+        use freeco_kernel_runtime::compactor::compact_session;
 
         let entry = self
             .registry
@@ -4670,15 +5090,7 @@ impl FreecoKernel {
                 label: None,
             });
 
-        let config = CompactionConfig::default();
-
-        if !needs_compaction(&session, &config) {
-            return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
-                session.messages.len(),
-                config.threshold
-            ));
-        }
+        let config = self.compaction_config_for(&entry.manifest);
 
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
@@ -4686,11 +5098,33 @@ impl FreecoKernel {
         let result = compact_session(driver, &model, &session, &config)
             .await
             .map_err(|e| KernelError::Freeco(FreecoError::Internal(e)))?;
+        if result.compacted_count == 0 {
+            return Ok(format!(
+                "Nothing to compact yet: the conversation's last {} requests are \
+                 always kept whole.",
+                config.keep_recent_turns
+            ));
+        }
 
         // Store the LLM summary in the canonical session
         self.memory
             .store_llm_summary(agent_id, &result.summary, result.kept_messages.clone())
             .map_err(KernelError::Freeco)?;
+        // And where it ends, so the model is sent the summary plus what
+        // follows rather than the whole history again.
+        if move_cursor {
+            let _ = self.memory.structured_set(
+                agent_id,
+                COMPACTION_CURSOR_KEY,
+                compaction_cursor_value(
+                    session.id,
+                    session
+                        .messages
+                        .len()
+                        .saturating_sub(result.kept_messages.len()),
+                ),
+            );
+        }
 
         // Post-compaction audit: validate and repair the kept messages
         let (repaired_messages, repair_stats) =
@@ -4804,11 +5238,27 @@ impl FreecoKernel {
 
         let was_state = entry.state;
         let name = entry.name.clone();
+        let was_asleep = is_asleep(&entry.manifest);
+        let schedule = entry.manifest.schedule.clone();
         drop(entry);
 
         self.registry
             .set_state(agent_id, AgentState::Running)
             .map_err(KernelError::Freeco)?;
+        if was_asleep {
+            let _ = self.registry.update_metadata(
+                agent_id,
+                ASLEEP_KEY.to_string(),
+                serde_json::Value::Bool(false),
+            );
+            if let Some(updated) = self.registry.get(agent_id) {
+                let _ = self.memory.save_agent(&updated);
+            }
+            // Its loop was stopped when it went to sleep.
+            if let Some(kernel) = self.self_handle.get().and_then(|w| w.upgrade()) {
+                kernel.start_background_for_agent(agent_id, &name, &schedule);
+            }
+        }
 
         info!(
             agent = %name,
@@ -4820,8 +5270,142 @@ impl FreecoKernel {
         Ok(name)
     }
 
+    /// Put an agent to sleep: its background loop stops, scheduled work
+    /// stops, and it uses no tokens until a message or `agent_activate`
+    /// wakes it. Survives a restart.
+    ///
+    /// Activation existed without its opposite, so an orchestrator could wake
+    /// helpers but never stand them down: every agent ever started kept its
+    /// loops, and the tokens they cost, running.
+    pub fn sleep_agent(&self, agent_id: AgentId) -> KernelResult<String> {
+        let entry = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        if entry.state == AgentState::Terminated {
+            return Err(KernelError::Freeco(FreecoError::Internal(format!(
+                "Agent {} is Terminated",
+                entry.name
+            ))));
+        }
+        let name = entry.name.clone();
+        drop(entry);
+        self.background.stop_agent(agent_id);
+        self.registry
+            .update_metadata(
+                agent_id,
+                ASLEEP_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            )
+            .map_err(KernelError::Freeco)?;
+        self.registry
+            .set_state(agent_id, AgentState::Suspended)
+            .map_err(KernelError::Freeco)?;
+        if let Some(updated) = self.registry.get(agent_id) {
+            let _ = self.memory.save_agent(&updated);
+        }
+        info!(agent = %name, id = %agent_id, "Agent put to sleep");
+        Ok(name)
+    }
+
+    /// A message to a sleeping agent wakes it rather than failing.
+    fn wake_if_asleep(&self, agent_id: AgentId) {
+        if self
+            .registry
+            .get(agent_id)
+            .is_some_and(|e| is_asleep(&e.manifest))
+        {
+            let _ = self.activate_agent(agent_id);
+        }
+    }
+
+    /// Whether the agent is working in any conversation right now.
+    pub fn is_busy(&self, agent_id: AgentId) -> bool {
+        self.busy_conversations().into_iter().any(
+            |sid| matches!(self.memory.get_session(sid), Ok(Some(s)) if s.agent_id == agent_id),
+        )
+    }
+
+    /// An idle worker copy of `agent_id`, started if there is none yet.
+    ///
+    /// A worker is a copy of the agent -- same model, instructions, tools and
+    /// workspace, its own conversations and private state -- reused when one
+    /// is idle, at most [`MAX_WORKERS`] per agent, and put to sleep when its
+    /// task ends so it costs nothing between tasks. A worker of a worker is a
+    /// worker of the original agent. Returns `None` when every worker is busy.
+    pub fn worker_for(&self, agent_id: AgentId) -> KernelResult<Option<AgentId>> {
+        let first = self
+            .registry
+            .get(agent_id)
+            .ok_or_else(|| KernelError::Freeco(FreecoError::AgentNotFound(agent_id.to_string())))?;
+        let owner_id = first
+            .manifest
+            .metadata
+            .get(WORKER_OF_KEY)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<AgentId>().ok())
+            .unwrap_or(agent_id);
+        let parent = if owner_id == agent_id {
+            first
+        } else {
+            self.registry.get(owner_id).ok_or_else(|| {
+                KernelError::Freeco(FreecoError::AgentNotFound(owner_id.to_string()))
+            })?
+        };
+        let parent_key = owner_id.to_string();
+        let workers: Vec<AgentEntry> = self
+            .registry
+            .list()
+            .into_iter()
+            .filter(|e| {
+                e.manifest
+                    .metadata
+                    .get(WORKER_OF_KEY)
+                    .and_then(|v| v.as_str())
+                    == Some(parent_key.as_str())
+            })
+            .collect();
+        if let Some(idle) = workers
+            .iter()
+            .find(|w| w.id != agent_id && !self.is_busy(w.id))
+        {
+            return Ok(Some(idle.id));
+        }
+        if workers.len() >= MAX_WORKERS {
+            return Ok(None);
+        }
+        let mut n = workers.len() + 1;
+        let mut name = format!("{} worker {n}", parent.name);
+        while self.registry.find_by_name(&name).is_some() {
+            n += 1;
+            name = format!("{} worker {n}", parent.name);
+        }
+        let mut manifest = parent.manifest.clone();
+        manifest.name = name;
+        manifest.state_dir = None;
+        // A worker answers the task it was given and nothing else. The clone
+        // kept the parent's schedule, so every worker of the CEO ran the CEO's
+        // own heartbeat as well -- an LLM call every two minutes, around the
+        // clock, while it was meant to be asleep.
+        manifest.schedule = ScheduleMode::Reactive;
+        manifest.autonomous = None;
+        manifest.metadata.remove(ASLEEP_KEY);
+        manifest
+            .metadata
+            .insert(WORKER_OF_KEY.to_string(), serde_json::json!(parent_key));
+        let id = self.spawn_agent_with_parent(manifest, Some(owner_id), None)?;
+        info!(parent = %parent.name, worker = %id, "Started a worker copy");
+        Ok(Some(id))
+    }
+
     /// Kill an agent.
     pub fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+        self.kill_agent_opts(agent_id, false)
+    }
+
+    /// Kill an agent; with `keep_conversations`, its conversations stay in
+    /// the store for the agent that replaces it under the same id.
+    fn kill_agent_opts(&self, agent_id: AgentId, keep_conversations: bool) -> KernelResult<()> {
         let entry = self
             .registry
             .remove(agent_id)
@@ -4841,7 +5425,11 @@ impl FreecoKernel {
         }
 
         // Remove from persistent storage
-        let _ = self.memory.remove_agent(agent_id);
+        if keep_conversations {
+            let _ = self.memory.remove_agent_keeping_sessions(agent_id);
+        } else {
+            let _ = self.memory.remove_agent(agent_id);
+        }
 
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
@@ -4853,6 +5441,33 @@ impl FreecoKernel {
 
         info!(agent = %entry.name, id = %agent_id, "Agent killed");
         Ok(())
+    }
+
+    /// Point a just-respawned agent back at the conversation it had, and drop
+    /// the empty one spawn created. Does nothing when that conversation is
+    /// gone or is not the agent's.
+    fn resume_session_after_respawn(&self, agent_id: AgentId, previous: SessionId) {
+        let Some(fresh) = self.registry.get(agent_id).map(|e| e.session_id) else {
+            return;
+        };
+        if fresh == previous {
+            return;
+        }
+        let owned = matches!(
+            self.memory.get_session(previous),
+            Ok(Some(s)) if s.agent_id == agent_id
+        );
+        if !owned {
+            return;
+        }
+        if self.set_current_session(agent_id, previous).is_ok() {
+            if let Ok(Some(empty)) = self.memory.get_session(fresh) {
+                if empty.messages.is_empty() {
+                    let _ = self.memory.delete_session(fresh);
+                }
+            }
+            info!(agent_id = %agent_id, session_id = %previous.0, "Resumed the conversation the agent had before");
+        }
     }
 
     // ─── Hand lifecycle ─────────────────────────────────────────────────────
@@ -4902,6 +5517,59 @@ impl FreecoKernel {
             .collect::<Vec<_>>()
             .join("");
         Ok(text.trim().trim_matches('"').trim().to_string())
+    }
+
+    /// One completion with an agent's own model and fallback chain.
+    ///
+    /// For the CEO's popup: its routing decisions are made by the model the
+    /// CEO runs on, not the system default, so the popup thinks like the agent
+    /// it is. Falls back to the default model when the agent's chain fails.
+    pub async fn complete_once_as(
+        &self,
+        agent_id: AgentId,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        use freeco_kernel_runtime::llm_driver::CompletionRequest;
+        use freeco_types::message::Message;
+
+        let Some(entry) = self.registry.get(agent_id) else {
+            return self.complete_once(system, user, max_tokens).await;
+        };
+        let driver = match self.resolve_driver(&entry.manifest) {
+            Ok(d) => d,
+            Err(_) => return self.complete_once(system, user, max_tokens).await,
+        };
+        let req = CompletionRequest {
+            model: entry.manifest.model.model.clone(),
+            messages: vec![Message::user(user)],
+            tools: vec![],
+            max_tokens,
+            temperature: 0.0,
+            system: Some(system.to_string()),
+            thinking: None,
+        };
+        match driver.complete(req).await {
+            Ok(resp) => {
+                let text = resp
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        freeco_types::message::ContentBlock::Text { text, .. } => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                Ok(text.trim().trim_matches('"').trim().to_string())
+            }
+            Err(e) => {
+                warn!(agent = %entry.name, "Agent's model unavailable for a quick completion, using the default: {e}");
+                self.complete_once(system, user, max_tokens).await
+            }
+        }
     }
 
     /// Start the container behind a service hand, if it has one.
@@ -5154,17 +5822,9 @@ impl FreecoKernel {
             },
             skills: def.skills.clone(),
             mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(freeco_types::config::ExecPolicy {
-                    mode: freeco_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
+            // The hand's own [exec_policy]; shell denied when it lists
+            // shell_exec without one (see `hand_exec_policy`).
+            exec_policy: hand_exec_policy(&def),
             tool_blocklist: Vec::new(),
             // Custom profile avoids ToolProfile-based expansion overriding the
             // explicit tool list.
@@ -5232,11 +5892,6 @@ impl FreecoKernel {
         let saved_crons: Vec<freeco_types::scheduler::CronJob> = old_agent_id
             .map(|id| self.cron_scheduler.list_jobs(id))
             .unwrap_or_default();
-        if let Some(old) = existing {
-            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            let _ = self.kill_agent(old.id);
-        }
-
         // Spawn the agent with a fixed ID based on hand_id for stable identity across restarts.
         // This ensures triggers and cron jobs continue to work after daemon restart.
         // Named instances derive the UUID from instance_id so each coexists with a
@@ -5247,7 +5902,32 @@ impl FreecoKernel {
         } else {
             AgentId::from_string(hand_id)
         };
+        // The conversation the hand's chat was on. Reactivation (every boot)
+        // killed the agent, which deleted all its conversations, and spawned
+        // it with a fresh empty one: the chat came back blank each restart.
+        let previous_session = existing
+            .as_ref()
+            .filter(|e| e.id == fixed_agent_id)
+            .map(|e| e.session_id)
+            .or_else(|| {
+                self.memory
+                    .load_agent(fixed_agent_id)
+                    .ok()
+                    .flatten()
+                    .map(|e| e.session_id)
+            });
+        if let Some(old) = existing {
+            info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
+            // Its conversations are kept: under the same id they are the
+            // new agent's, and under an old random id they stay recoverable
+            // through the orphaned-sessions view.
+            let _ = self.kill_agent_opts(old.id, true);
+        }
+
         let agent_id = self.spawn_agent_with_parent(manifest, None, Some(fixed_agent_id))?;
+        if let Some(previous) = previous_session {
+            self.resume_session_after_respawn(agent_id, previous);
+        }
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {
@@ -5569,7 +6249,11 @@ impl FreecoKernel {
                     let aid = *agent_id;
                     let msg = message.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = kernel.send_message(aid, &msg).await {
+                        let started = chrono::Utc::now();
+                        let result = kernel.send_message(aid, &msg).await;
+                        let name: String = msg.chars().take(60).collect();
+                        kernel.record_run(aid, "trigger", &name, started, &result);
+                        if let Err(e) = result {
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     });
@@ -5810,6 +6494,10 @@ impl FreecoKernel {
                 .is_some_and(|inst| inst.status == freeco_hands::HandStatus::Paused)
             {
                 info!(agent = %entry.name, "Not starting background loop: its hand is paused");
+                continue;
+            }
+            if is_asleep(&entry.manifest) || is_worker(&entry.manifest) {
+                info!(agent = %entry.name, "Not starting background loop: asleep or a worker copy");
                 continue;
             }
             bg_agents.push((
@@ -6369,6 +7057,17 @@ impl FreecoKernel {
         name: &str,
         schedule: &ScheduleMode,
     ) {
+        // Workers run only what they are handed. Those started before
+        // `worker_for` reset the schedule still carry their parent's, and each
+        // wake would restart the parent's heartbeat in the worker. A sleeping
+        // agent runs nothing until it is woken.
+        if self
+            .registry
+            .get(agent_id)
+            .is_some_and(|e| is_worker(&e.manifest) || is_asleep(&e.manifest))
+        {
+            return;
+        }
         // For proactive agents, auto-register triggers from conditions
         if let ScheduleMode::Proactive { conditions } = schedule {
             for condition in conditions {
@@ -6389,13 +7088,13 @@ impl FreecoKernel {
             .start_agent(agent_id, name, schedule, move |aid, msg| {
                 let k = Arc::clone(&kernel);
                 tokio::spawn(async move {
-                    match k.send_message(aid, &msg).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            // send_message already records the panic in supervisor,
-                            // just log the background context here
-                            warn!(agent_id = %aid, error = %e, "Background tick failed");
-                        }
+                    let started = chrono::Utc::now();
+                    let result = k.send_message(aid, &msg).await;
+                    k.record_run(aid, "background", "Background tick", started, &result);
+                    if let Err(e) = result {
+                        // send_message already records the panic in supervisor,
+                        // just log the background context here
+                        warn!(agent_id = %aid, error = %e, "Background tick failed");
                     }
                 })
             });
@@ -6652,6 +7351,93 @@ impl FreecoKernel {
             .unwrap_or_else(|e| e.into_inner())
             .resolve(key)
             .map(|z| z.to_string())
+    }
+
+    /// Expand `${VAR}` in an MCP server's `headers`, from the process
+    /// environment first, then the vault / `.env` (the same sources as its
+    /// `env = [...]`). An unresolved variable is an error naming the server
+    /// and the variable; resolved values are never logged.
+    fn resolve_mcp_headers(
+        &self,
+        server: &freeco_types::config::McpServerConfigEntry,
+    ) -> Result<Vec<String>, String> {
+        freeco_kernel_runtime::mcp::expand_header_vars(&server.headers, |name| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| self.resolve_credential(name))
+        })
+        .map_err(|e| format!("MCP server '{}': {e}", server.name))
+    }
+
+    /// Secret values this kernel knows, as `(name, value)`, for redaction
+    /// (`freeco_kernel_runtime::secret_redact`). Never log or return them.
+    ///
+    /// Sources: every vault entry; `.env` and process environment variables
+    /// with secret-like names (`*_API_KEY`, `*_TOKEN`, `*_SECRET`,
+    /// `*PASSWORD`, ... -- provider keys and channel tokens are configured
+    /// that way); the env variable named by `default_model.api_key_env`;
+    /// and the credential part of every `[[mcp_servers]]` header, after
+    /// `${VAR}` expansion. Implausible values (short, numeric, URLs without
+    /// credentials, paths) are dropped by `is_plausible_secret_value`.
+    pub fn known_secrets(&self) -> Vec<(String, String)> {
+        use freeco_kernel_runtime::secret_redact::{
+            header_secret_value, is_plausible_secret_value, is_secret_env_name,
+        };
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut push = |name: &str, value: &str| {
+            let v = value.trim();
+            if is_plausible_secret_value(v) && !out.iter().any(|(_, known)| known == v) {
+                out.push((name.to_string(), v.to_string()));
+            }
+        };
+        {
+            let resolver = self
+                .credential_resolver
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (name, value) in resolver.vault_entries() {
+                push(name.as_str(), value.as_str());
+            }
+            for (name, value) in resolver.dotenv_entries() {
+                if is_secret_env_name(&name) {
+                    push(name.as_str(), value.as_str());
+                }
+            }
+        }
+        // vars_os: std::env::vars panics on a variable that is not UTF-8.
+        for (name, value) in std::env::vars_os() {
+            if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+                if is_secret_env_name(name) {
+                    push(name, value);
+                }
+            }
+        }
+        let model_key_env = self.config.default_model.api_key_env.as_str();
+        if !model_key_env.is_empty() {
+            if let Ok(value) = std::env::var(model_key_env) {
+                push(model_key_env, value.as_str());
+            }
+        }
+        // Effective list: config.toml servers plus installed integrations.
+        let mcp_servers = self
+            .effective_mcp_servers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for server in &mcp_servers {
+            let headers = self
+                .resolve_mcp_headers(server)
+                .unwrap_or_else(|_| server.headers.clone());
+            for header in &headers {
+                if let Some(value) = header_secret_value(header) {
+                    let header_name = header.split(':').next().unwrap_or("header").trim();
+                    let label = format!("mcp:{}:{}", server.name, header_name);
+                    push(label.as_str(), value.as_str());
+                }
+            }
+        }
+        out
     }
 
     /// Store a credential in the vault (best-effort — falls through silently if no vault).
@@ -7171,6 +7957,12 @@ impl FreecoKernel {
             .unwrap_or_default();
 
         for server_config in &servers {
+            // Every server gets a health entry, not only installed
+            // integrations: a [[mcp_servers]] entry that failed at boot (the
+            // daemon started before OmniRoute) is then retried by
+            // `run_extension_health_loop` and its state shows in the UI.
+            self.extension_health.register(&server_config.name);
+
             let transport = match &server_config.transport {
                 McpTransportEntry::Stdio { command, args } => McpTransport::Stdio {
                     command: command.clone(),
@@ -7191,12 +7983,22 @@ impl FreecoKernel {
                 }
             }
 
+            let headers = match self.resolve_mcp_headers(server_config) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(server = %server_config.name, error = %e, "MCP server not connected");
+                    self.extension_health
+                        .report_error(&server_config.name, e.clone());
+                    continue;
+                }
+            };
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
-                headers: server_config.headers.clone(),
+                headers,
             };
 
             match McpConnection::connect(mcp_config).await {
@@ -7301,15 +8103,25 @@ impl FreecoKernel {
                 McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
             };
 
+            self.extension_health.register(&server_config.name);
+
+            let headers = match self.resolve_mcp_headers(server_config) {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(server = %server_config.name, error = %e, "MCP server not connected");
+                    self.extension_health
+                        .report_error(&server_config.name, e.clone());
+                    continue;
+                }
+            };
+
             let mcp_config = McpServerConfig {
                 name: server_config.name.clone(),
                 transport,
                 timeout_secs: server_config.timeout_secs,
                 env: server_config.env.clone(),
-                headers: server_config.headers.clone(),
+                headers,
             };
-
-            self.extension_health.register(&server_config.name);
 
             match McpConnection::connect(mcp_config).await {
                 Ok(conn) => {
@@ -7421,12 +8233,20 @@ impl FreecoKernel {
             McpTransportEntry::Http { url } => McpTransport::Http { url: url.clone() },
         };
 
+        let headers = match self.resolve_mcp_headers(&server_config) {
+            Ok(h) => h,
+            Err(e) => {
+                self.extension_health.report_error(id, e.clone());
+                return Err(e);
+            }
+        };
+
         let mcp_config = McpServerConfig {
             name: server_config.name.clone(),
             transport,
             timeout_secs: server_config.timeout_secs,
             env: server_config.env.clone(),
-            headers: server_config.headers.clone(),
+            headers,
         };
 
         match McpConnection::connect(mcp_config).await {
@@ -7451,37 +8271,71 @@ impl FreecoKernel {
         }
     }
 
-    /// Background loop that checks extension MCP health and auto-reconnects.
+    /// Background loop that reconnects MCP servers whose connection failed.
+    ///
+    /// Each failed server is retried on its own schedule
+    /// ([`mcp_retry_delay`]: 5 s, 15 s, 60 s, then every 5 minutes) until it
+    /// connects, its config is removed, or `extensions.reconnect_max_attempts`
+    /// is used up. `extensions.health_check_interval_secs = 0` or
+    /// `auto_reconnect = false` turns this off. Before, the loop slept the
+    /// backoff inline inside a 60 s tick and only covered installed
+    /// integrations, so a `[[mcp_servers]]` entry that was down at boot stayed
+    /// down until someone called `POST /api/integrations/reload`.
     async fn run_extension_health_loop(self: &Arc<Self>) {
         let interval_secs = self.extension_health.config().check_interval_secs;
         if interval_secs == 0 {
             return;
         }
 
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        // When each server was last tried (or first seen failing).
+        let mut last_try: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let mut interval = tokio::time::interval(MCP_RETRY_TICK);
         interval.tick().await; // skip first immediate tick
 
         loop {
             interval.tick().await;
 
-            // Check each registered integration
-            let health_entries = self.extension_health.all_health();
-            for entry in health_entries {
-                // Try reconnect for errored integrations
-                if self.extension_health.should_reconnect(&entry.id) {
-                    let backoff = self
-                        .extension_health
-                        .backoff_duration(entry.reconnect_attempts);
-                    debug!(
-                        server = %entry.id,
-                        attempt = entry.reconnect_attempts + 1,
-                        backoff_secs = backoff.as_secs(),
-                        "Auto-reconnecting extension MCP server"
-                    );
-                    tokio::time::sleep(backoff).await;
+            let configured: std::collections::HashSet<String> = self
+                .effective_mcp_servers
+                .read()
+                .map(|s| s.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            let connected: std::collections::HashSet<String> = self
+                .mcp_connections
+                .lock()
+                .await
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect();
 
-                    if let Err(e) = self.reconnect_extension_mcp(&entry.id).await {
-                        debug!(server = %entry.id, error = %e, "Auto-reconnect failed");
+            for entry in self.extension_health.all_health() {
+                // Connected, or no longer configured: nothing to retry.
+                if connected.contains(&entry.id) || !configured.contains(&entry.id) {
+                    last_try.remove(&entry.id);
+                    continue;
+                }
+                if !self.extension_health.should_reconnect(&entry.id) {
+                    last_try.remove(&entry.id);
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                let since = *last_try.entry(entry.id.clone()).or_insert(now);
+                if !mcp_reconnect_due(entry.reconnect_attempts, now.duration_since(since)) {
+                    continue;
+                }
+                debug!(
+                    server = %entry.id,
+                    attempt = entry.reconnect_attempts + 1,
+                    "Reconnecting MCP server"
+                );
+                match self.reconnect_extension_mcp(&entry.id).await {
+                    Ok(_) => {
+                        last_try.remove(&entry.id);
+                    }
+                    Err(e) => {
+                        debug!(server = %entry.id, error = %e, "MCP reconnect failed");
+                        last_try.insert(entry.id.clone(), std::time::Instant::now());
                     }
                 }
             }
@@ -7584,6 +8438,9 @@ impl FreecoKernel {
                             // agent that may `agent_send` may `agent_delegate`
                             // without every manifest having to list both.
                             || (d == "agent_send" && t.name == "agent_delegate")
+                            // Waking an agent and standing it down again
+                            // are one permission.
+                            || (d == "agent_activate" && t.name == "agent_sleep")
                     })
                 })
                 .collect()
@@ -7604,6 +8461,7 @@ impl FreecoKernel {
                                     // As for declared tools: a profile with
                                     // `agent_send` may hand out tasks too.
                                     || (a == "agent_send" && t.name == "agent_delegate")
+                                    || (a == "agent_activate" && t.name == "agent_sleep")
                             })
                         })
                         .collect()
@@ -7701,6 +8559,16 @@ impl FreecoKernel {
                 {
                     all_tools.push(def);
                 }
+            }
+        }
+
+        // Step 3.6: Read-only tools every agent gets (system_info). Also
+        // before step 4, so the blocklist can still remove them.
+        for def in builtin_tool_definitions() {
+            if freeco_kernel_runtime::tool_policy::ALWAYS_GRANTED_TOOLS.contains(&def.name.as_str())
+                && !all_tools.iter().any(|t| t.name == def.name)
+            {
+                all_tools.push(def);
             }
         }
 
@@ -8175,12 +9043,27 @@ impl FreecoKernel {
                 let delivery = job.delivery.clone();
                 let delivery_targets = job.delivery_targets.clone();
                 let kh: Arc<dyn KernelHandle> = self.clone();
-                match tokio::time::timeout(
+                let started = chrono::Utc::now();
+                let outcome = tokio::time::timeout(
                     timeout,
                     self.send_message_with_handle(agent_id, message, Some(kh), None, None),
                 )
-                .await
-                {
+                .await;
+                match &outcome {
+                    Ok(result) => {
+                        self.record_run(agent_id, "schedule", job_name.as_str(), started, result)
+                    }
+                    Err(_) => self.record_run_outcome(
+                        agent_id,
+                        "schedule",
+                        job_name.as_str(),
+                        started,
+                        Err(format!("timed out after {timeout_s}s")),
+                        0,
+                        0.0,
+                    ),
+                }
+                match outcome {
                     Ok(Ok(result)) => {
                         // Multi-destination fan-out (never aborts the job on delivery error).
                         cron_fan_out_targets(self, job_name, &result.response, &delivery_targets)
@@ -8320,6 +9203,54 @@ pub(crate) fn merge_disk_manifest_preserving_kernel_defaults(
         disk.exec_policy = entry.exec_policy.clone();
     }
     disk
+}
+
+/// How often the MCP reconnect loop looks for a server that is due.
+const MCP_RETRY_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait before reconnect attempt number `attempts + 1` of a failed MCP
+/// server: 5 s, 15 s, 60 s, then every 5 minutes.
+fn mcp_retry_delay(attempts: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(match attempts {
+        0 => 5,
+        1 => 15,
+        2 => 60,
+        _ => 300,
+    })
+}
+
+/// Is a server that has had `attempts` reconnect attempts, the last one
+/// `since_last` ago, due for the next?
+fn mcp_reconnect_due(attempts: u32, since_last: std::time::Duration) -> bool {
+    since_last >= mcp_retry_delay(attempts)
+}
+
+/// The exec policy a hand's agent runs with.
+///
+/// Hands used to get `mode = "full"` (any command, no approval) just for
+/// listing `shell_exec`. Now the hand's own `[exec_policy]` in HAND.toml is
+/// used as written. A hand that lists `shell_exec` without one gets shell
+/// denied, so a hand nobody gave a policy cannot run anything on the host.
+/// A hand without `shell_exec` keeps `None` and inherits the kernel's policy
+/// like any agent (it has no shell tool to use it with).
+fn hand_exec_policy(
+    def: &freeco_hands::HandDefinition,
+) -> Option<freeco_types::config::ExecPolicy> {
+    if let Some(policy) = &def.exec_policy {
+        return Some(policy.clone());
+    }
+    if def.tools.iter().any(|t| t == "shell_exec") {
+        warn!(
+            hand = %def.id,
+            "Hand lists shell_exec but has no [exec_policy] in HAND.toml; shell is denied for it"
+        );
+        return Some(freeco_types::config::ExecPolicy {
+            mode: freeco_types::config::ExecSecurityMode::Deny,
+            safe_bins: Vec::new(),
+            ..Default::default()
+        });
+    }
+    None
 }
 
 fn manifest_to_capabilities(manifest: &AgentManifest) -> Vec<Capability> {
@@ -8995,11 +9926,38 @@ impl KernelHandle for FreecoKernel {
                     .to_string(),
             );
         }
+        // Security review. Inheritance alone passed anything the CEO hired,
+        // since the CEO holds every capability. Whatever reaches outside a
+        // sandbox, can hire again, or reads like an attempt to subvert the
+        // agent waits for the owner; the rest is hired and logged.
+        let actor = parent_id
+            .map(str::to_string)
+            .unwrap_or_else(|| self.org_actor());
+        let from_template = crate::hire_review::is_catalogue_template(&manifest.name);
+        let review = crate::hire_review::review(&manifest, from_template);
+        if !review.passed() {
+            self.record_org_change(
+                &actor,
+                format!(
+                    "hire of \"{}\" held for the owner: {}",
+                    manifest.name,
+                    review.summary()
+                ),
+            );
+            return Err(format!(
+                "Hire of \"{}\" not made -- it {}. Propose it to the owner with these points \
+                 and a reason for each, or narrow the manifest (start from a catalogue template, \
+                 drop host tools and shell access) and hire again.",
+                manifest.name,
+                review.summary()
+            ));
+        }
         let name = manifest.name.clone();
         let parent = parent_id.and_then(|pid| pid.parse::<AgentId>().ok());
         let id = self
             .spawn_agent_with_parent(manifest, parent, None)
             .map_err(|e| format!("Spawn failed: {e}"))?;
+        self.record_org_change(&actor, format!("hired \"{name}\" ({})", review.summary()));
         Ok((id.to_string(), name))
     }
 
@@ -9136,10 +10094,24 @@ impl KernelHandle for FreecoKernel {
                     .map(|e| e.id)
                     .ok_or_else(|| format!("Agent not found: {name}"))?,
             },
-            None => caller
-                .as_ref()
-                .map(|c| c.id)
-                .ok_or("Name the agent to hand this task to")?,
+            // Left out: a worker copy of the caller takes it, so the part runs
+            // with the caller's model, tools and workspace but its own private
+            // state, and sleeps afterwards. With every worker busy it runs in
+            // a fresh conversation of the caller itself.
+            None => {
+                let caller_id = caller
+                    .as_ref()
+                    .map(|c| c.id)
+                    .ok_or("Name the agent to hand this task to")?;
+                match self.worker_for(caller_id) {
+                    Ok(Some(worker)) => worker,
+                    Ok(None) => caller_id,
+                    Err(e) => {
+                        warn!(agent = %caller_id, "Could not start a worker copy: {e}");
+                        caller_id
+                    }
+                }
+            }
         };
         let target = self
             .registry
@@ -9207,6 +10179,11 @@ impl KernelHandle for FreecoKernel {
             })
             .await;
         self.finish_handoff(&handoff_id, result.is_ok(), None);
+        // A worker sleeps once its task is done; the next task, or a message
+        // to it, wakes it with its conversations intact.
+        if is_worker(&target.manifest) && !self.is_busy(target_id) {
+            let _ = FreecoKernel::sleep_agent(self, target_id);
+        }
         let result = result.map_err(|e| format!("{} could not finish it: {e}", target.name))?;
         Ok(kernel_handle::DelegatedTask {
             agent_id: target_id.to_string(),
@@ -9257,6 +10234,18 @@ impl KernelHandle for FreecoKernel {
                 .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
         };
         FreecoKernel::activate_agent(self, id).map_err(|e| format!("Activate failed: {e}"))
+    }
+
+    fn sleep_agent(&self, agent_id: &str) -> Result<String, String> {
+        let id: AgentId = match agent_id.parse() {
+            Ok(id) => id,
+            Err(_) => self
+                .registry
+                .find_by_name(agent_id)
+                .map(|e| e.id)
+                .ok_or_else(|| format!("Agent not found: {agent_id}"))?,
+        };
+        FreecoKernel::sleep_agent(self, id).map_err(|e| format!("Sleep failed: {e}"))
     }
 
     fn memory_store(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
@@ -9398,6 +10387,52 @@ impl KernelHandle for FreecoKernel {
             .task_list(status)
             .await
             .map_err(|e| format!("Task list failed: {e}"))
+    }
+
+    async fn team_task_list(
+        &self,
+        agent_id: Option<&str>,
+        team: &str,
+        status: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let org = self.memory.org();
+        let (team_id, name) = org
+            .find_team(team)
+            .map_err(|e| format!("Task list failed: {e}"))?
+            .ok_or_else(|| format!("No team called \"{team}\""))?;
+        if let Some(agent) = agent_id.map(str::trim).filter(|a| !a.is_empty()) {
+            let on_team = org
+                .teams_for_agent(agent)
+                .map_err(|e| format!("Task list failed: {e}"))?
+                .contains(&team_id);
+            if !on_team {
+                return Err(format!(
+                    "You are not on the team \"{name}\": only its members read its board"
+                ));
+            }
+        }
+        let status = match status.map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(s) => Some(freeco_memory::board::board_status(s).ok_or_else(|| {
+                format!("\"{s}\" is not a board column: use todo, doing, review or done")
+            })?),
+        };
+        self.memory
+            .task_board(status, Some(&team_id))
+            .await
+            .map_err(|e| format!("Task list failed: {e}"))
+    }
+
+    async fn task_hand_in(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .task_hand_in(task_id, result, by)
+            .await
+            .map_err(|e| format!("Hand-in failed: {e}"))
     }
 
     async fn publish_event(
@@ -9677,12 +10712,15 @@ impl KernelHandle for FreecoKernel {
             .find(|i| i.hand_id == hand_id)
             .ok_or_else(|| format!("No active instance found for hand '{hand_id}'"))?;
 
-        let (def_name, def_icon, is_service) = {
+        let (def_name, def_icon, is_service, health_url) = {
             let def = self.hand_registry.get_definition(hand_id);
             (
                 def.as_ref().map(|d| d.name.clone()).unwrap_or_default(),
                 def.as_ref().map(|d| d.icon.clone()).unwrap_or_default(),
                 def.as_ref().map(|d| d.container.is_some()).unwrap_or(false),
+                def.as_ref()
+                    .and_then(|d| d.container.as_ref())
+                    .and_then(freeco_hands::container::health_url),
             )
         };
 
@@ -9698,6 +10736,19 @@ impl KernelHandle for FreecoKernel {
             None
         };
 
+        // A running container is not a working service: ask its health_path
+        // too (loopback only, short timeout), alongside the container state.
+        let health = match &health_url {
+            Some(url) => Some(
+                freeco_hands::container::probe_health(
+                    url,
+                    freeco_hands::container::HEALTH_PROBE_TIMEOUT,
+                )
+                .await,
+            ),
+            None => None,
+        };
+
         Ok(serde_json::json!({
             "hand_id": hand_id,
             "name": def_name,
@@ -9708,6 +10759,9 @@ impl KernelHandle for FreecoKernel {
             // null for a non-service hand; true/false only when there is a
             // container whose state could be checked.
             "serving": serving,
+            // null when the hand declares no health_path; otherwise
+            // {url, status, latency_ms, ok, error} from one HTTP probe.
+            "health": health,
             "agent_id": instance.agent_id.map(|a| a.to_string()),
             "agent_name": instance.agent_name,
             "activated_at": instance.activated_at.to_rfc3339(),
@@ -9716,11 +10770,18 @@ impl KernelHandle for FreecoKernel {
     }
 
     async fn org_overview(&self) -> Result<serde_json::Value, String> {
-        self.memory
+        let projects = self
+            .memory
             .org()
             .org_overview()
             .map(serde_json::Value::from)
-            .map_err(|e| format!("{e}"))
+            .map_err(|e| format!("{e}"))?;
+        // The latest changes travel with the structure, so the CEO learns of
+        // a new team or a held hire the next time it looks.
+        Ok(serde_json::json!({
+            "projects": projects,
+            "recent_changes": self.org_changes(15),
+        }))
     }
 
     async fn team_create(&self, name: &str, project_id: Option<&str>) -> Result<String, String> {
@@ -9733,6 +10794,7 @@ impl KernelHandle for FreecoKernel {
             .org()
             .create_team(name, project_id)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(&self.org_actor(), format!("created team \"{}\"", team.name));
         Ok(format!("Created team \"{}\" (id {})", team.name, team.id))
     }
 
@@ -9756,6 +10818,15 @@ impl KernelHandle for FreecoKernel {
             .org()
             .add_team_member(team_id, agent_id, role)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!(
+                "added {} to team {}{}",
+                entry.name,
+                team_id,
+                role.map(|r| format!(" as {r}")).unwrap_or_default()
+            ),
+        );
         Ok(format!(
             "Added {} to team {}{}",
             entry.name,
@@ -9787,6 +10858,10 @@ impl KernelHandle for FreecoKernel {
             .org()
             .create_company(name, description)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!("created company \"{}\"", company.name),
+        );
         Ok(format!(
             "Created company \"{}\" (id {})",
             company.name, company.id
@@ -9809,6 +10884,10 @@ impl KernelHandle for FreecoKernel {
             // The store takes (name, company, description).
             .create_project(name, company_id, description)
             .map_err(|e| format!("{e}"))?;
+        self.record_org_change(
+            &self.org_actor(),
+            format!("created project \"{}\"", project.name),
+        );
         Ok(format!(
             "Created project \"{}\" (id {})",
             project.name, project.id
@@ -9971,8 +11050,26 @@ impl KernelHandle for FreecoKernel {
         Ok(())
     }
 
+    fn shell_patterns(&self, agent_id: &str) -> Vec<String> {
+        let Ok(id) = agent_id.parse::<AgentId>() else {
+            return Vec::new();
+        };
+        self.capabilities
+            .list(id)
+            .into_iter()
+            .filter_map(|c| match c {
+                Capability::ShellExec(pattern) => Some(pattern),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn requires_approval(&self, tool_name: &str) -> bool {
         self.approval_manager.requires_approval(tool_name)
+    }
+
+    fn known_secrets(&self) -> Vec<(String, String)> {
+        FreecoKernel::known_secrets(self)
     }
 
     async fn request_approval(
@@ -10707,6 +11804,152 @@ mod tests {
     use freeco_types::config::ExecPolicy;
     use std::collections::HashMap;
 
+    /// Data copied from Windows into the Linux container: agent paths under
+    /// the old `.freeco-ai` home land in the new home; others stay.
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_home_paths_move_into_the_container_home() {
+        let home = std::path::Path::new("/home/user/freeco");
+        let old = std::path::Path::new(r"C:\Users\me\.freeco-ai\workspaces\crm");
+        assert_eq!(
+            remap_home_path(old, home),
+            Some(std::path::PathBuf::from("/home/user/freeco/workspaces/crm"))
+        );
+        assert_eq!(remap_home_path(&home.join("workspaces/crm"), home), None);
+        assert_eq!(
+            remap_home_path(std::path::Path::new(r"C:\Users\me\dev\project"), home),
+            None
+        );
+        // A Unix path on a Unix host is this machine's own: left alone.
+        assert_eq!(
+            remap_home_path(std::path::Path::new("/srv/freeco/workspaces/x"), home),
+            None
+        );
+
+        let mut manifest = AgentManifest {
+            workspace: Some(old.to_path_buf()),
+            ..Default::default()
+        };
+        assert!(remap_manifest_home(&mut manifest, home));
+        assert_eq!(
+            manifest.workspace.as_deref(),
+            Some(std::path::Path::new("/home/user/freeco/workspaces/crm"))
+        );
+    }
+
+    /// And back: a container path read on Windows lands in the Windows home.
+    #[cfg(windows)]
+    #[test]
+    fn container_home_paths_move_into_the_windows_home() {
+        let home = std::path::Path::new(r"C:\Users\me\.freeco-ai");
+        let old = std::path::Path::new("/home/user/freeco/workspaces/crm");
+        assert_eq!(
+            remap_home_path(old, home),
+            Some(home.join("workspaces").join("crm"))
+        );
+        assert_eq!(remap_home_path(&home.join("workspaces"), home), None);
+    }
+
+    fn hand_toml(tools: &str, extra: &str) -> freeco_hands::HandDefinition {
+        let toml_str = format!(
+            r#"
+id = "h"
+name = "H"
+description = "d"
+category = "content"
+tools = {tools}
+
+[agent]
+name = "h"
+description = "d"
+system_prompt = "p"
+{extra}
+"#
+        );
+        freeco_hands::parse_hand_toml(&toml_str).expect("hand parses")
+    }
+
+    #[test]
+    fn mcp_retry_schedule_is_5s_15s_60s_then_5min() {
+        use std::time::Duration;
+        assert_eq!(mcp_retry_delay(0), Duration::from_secs(5));
+        assert_eq!(mcp_retry_delay(1), Duration::from_secs(15));
+        assert_eq!(mcp_retry_delay(2), Duration::from_secs(60));
+        assert_eq!(mcp_retry_delay(3), Duration::from_secs(300));
+        assert_eq!(mcp_retry_delay(50), Duration::from_secs(300));
+        assert_eq!(mcp_retry_delay(u32::MAX), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn mcp_reconnect_due_follows_the_schedule() {
+        use std::time::Duration;
+        assert!(!mcp_reconnect_due(0, Duration::from_secs(4)));
+        assert!(mcp_reconnect_due(0, Duration::from_secs(5)));
+        assert!(!mcp_reconnect_due(1, Duration::from_secs(14)));
+        assert!(mcp_reconnect_due(1, Duration::from_secs(15)));
+        assert!(!mcp_reconnect_due(2, Duration::from_secs(59)));
+        assert!(mcp_reconnect_due(2, Duration::from_secs(60)));
+        assert!(!mcp_reconnect_due(7, Duration::from_secs(299)));
+        assert!(mcp_reconnect_due(7, Duration::from_secs(300)));
+        // The tick is short enough to hit the first retry on time.
+        assert!(MCP_RETRY_TICK <= mcp_retry_delay(0));
+    }
+
+    #[test]
+    fn hand_with_shell_and_no_exec_policy_is_denied_not_full() {
+        let def = hand_toml(r#"["shell_exec", "file_read"]"#, "");
+        let policy = hand_exec_policy(&def).expect("a shell hand gets a policy");
+        assert_eq!(policy.mode, freeco_types::config::ExecSecurityMode::Deny);
+        assert!(policy.safe_bins.is_empty());
+    }
+
+    #[test]
+    fn hand_exec_policy_from_hand_toml_is_used_as_written() {
+        let def = hand_toml(
+            r#"["shell_exec"]"#,
+            r#"
+[exec_policy]
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+timeout_secs = 120
+
+[exec_policy.containers]
+name_prefixes = ["freeco-"]
+images = ["ghcr.io/freecodao/*"]
+"#,
+        );
+        let policy = hand_exec_policy(&def).expect("policy");
+        assert_eq!(
+            policy.mode,
+            freeco_types::config::ExecSecurityMode::Allowlist
+        );
+        assert_eq!(policy.allowed_commands, vec!["podman"]);
+        assert!(policy.safe_bins.is_empty());
+        assert_eq!(policy.timeout_secs, 120);
+        let c = policy.containers.expect("containers parsed");
+        assert_eq!(c.name_prefixes, vec!["freeco-"]);
+    }
+
+    #[test]
+    fn hand_without_shell_inherits_kernel_policy() {
+        let def = hand_toml(r#"["file_read"]"#, "");
+        assert!(hand_exec_policy(&def).is_none());
+    }
+
+    #[test]
+    fn no_bundled_shell_hand_silently_loses_or_gains_shell() {
+        for (id, toml_content, skill) in freeco_hands::bundled::bundled_hands() {
+            let def = freeco_hands::bundled::parse_bundled(id, toml_content, skill).unwrap();
+            if def.tools.iter().any(|t| t == "shell_exec") {
+                assert!(
+                    def.exec_policy.is_some(),
+                    "bundled hand '{id}' lists shell_exec but has no [exec_policy]"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
@@ -11322,6 +12565,195 @@ mod tests {
         kernel.shutdown();
     }
 
+    fn boot_test_kernel(tmp: &tempfile::TempDir, name: &str) -> FreecoKernel {
+        let home_dir = tmp.path().join(name);
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        FreecoKernel::boot_with_config(config).expect("kernel boots")
+    }
+
+    #[test]
+    fn a_worker_does_not_inherit_its_parents_heartbeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-worker-test");
+        let parent = register_test_agent(&kernel, "ceo");
+        let mut entry = kernel.registry.remove(parent).unwrap();
+        entry.manifest.schedule = ScheduleMode::Periodic {
+            cron: "*/2 * * * *".to_string(),
+        };
+        kernel.registry.register(entry).unwrap();
+
+        let worker = kernel
+            .worker_for(parent)
+            .expect("worker_for")
+            .expect("a worker is started");
+        let entry = kernel.registry.get(worker).expect("worker registered");
+        assert!(
+            matches!(entry.manifest.schedule, ScheduleMode::Reactive),
+            "a worker answers what it is handed, it has no schedule of its own"
+        );
+        assert!(entry.manifest.autonomous.is_none());
+        assert_eq!(
+            entry.manifest.metadata.get(WORKER_OF_KEY),
+            Some(&serde_json::json!(parent.to_string()))
+        );
+        assert_eq!(entry.name, "ceo worker 1");
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn idle_workers_are_reused_and_capped_per_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-worker-cap-test");
+        let parent = register_test_agent(&kernel, "lead");
+
+        let first = kernel.worker_for(parent).unwrap().unwrap();
+        // Idle, so it is handed out again rather than a second copy started.
+        assert_eq!(kernel.worker_for(parent).unwrap(), Some(first));
+        // A worker asking for a worker gets a sibling, never itself, and the
+        // sibling works for the original agent.
+        let sibling = kernel.worker_for(first).unwrap().unwrap();
+        assert_ne!(sibling, first);
+        assert_eq!(
+            kernel.registry.get(sibling).unwrap().manifest.metadata[WORKER_OF_KEY],
+            serde_json::json!(parent.to_string())
+        );
+        let workers = kernel
+            .registry
+            .list()
+            .into_iter()
+            .filter(|e| is_worker(&e.manifest))
+            .count();
+        assert_eq!(workers, 2);
+        assert!(workers <= MAX_WORKERS);
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn org_changes_are_logged_newest_first_with_names_and_capped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-org-log-test");
+        let agent = register_test_agent(&kernel, "ceo");
+
+        kernel.record_org_change("owner", "created team \"Ops\"");
+        kernel.record_org_change(&agent.to_string(), "hired \"writer\"");
+        let log = kernel.org_changes(10);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0]["actor"], "ceo", "an agent id reads as its name");
+        assert_eq!(log[0]["change"], "hired \"writer\"");
+        assert_eq!(log[1]["actor"], "owner");
+
+        for i in 0..ORG_CHANGES_MAX + 5 {
+            kernel.record_org_change("owner", format!("change {i}"));
+        }
+        let all = kernel.org_changes(usize::MAX);
+        assert_eq!(all.len(), ORG_CHANGES_MAX);
+        assert_eq!(all[0]["change"], format!("change {}", ORG_CHANGES_MAX + 4));
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn unattended_runs_are_recorded_with_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-run-history-test");
+        let agent = register_test_agent(&kernel, "night-shift");
+        let started = chrono::Utc::now();
+
+        let failed: KernelResult<AgentLoopResult> = Err(KernelError::Freeco(
+            FreecoError::Internal("provider down".to_string()),
+        ));
+        kernel.record_run(agent, "schedule", "nightly report", started, &failed);
+        kernel.record_run_outcome(
+            agent,
+            "background",
+            "Background tick",
+            started,
+            Ok(()),
+            1200,
+            0.01,
+        );
+
+        let runs = kernel.run_history(10);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0]["source"], "background");
+        assert_eq!(runs[0]["status"], "completed");
+        assert_eq!(runs[0]["tokens"], 1200);
+        assert_eq!(runs[1]["status"], "failed");
+        assert_eq!(runs[1]["agent_name"], "night-shift");
+        assert!(runs[1]["error"].as_str().unwrap().contains("provider down"));
+        assert_eq!(kernel.run_history(1).len(), 1);
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn an_agents_hire_passes_the_security_review_first() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-hire-review-test");
+        let ceo = register_test_agent(&kernel, "boss").to_string();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let held = rt.block_on(KernelHandle::spawn_agent(
+            &kernel,
+            "name = \"shell-bot\"\nmodule = \"builtin:chat\"\n\
+             [capabilities]\nshell = [\"*\"]\ntools = [\"shell_exec\"]\n",
+            Some(&ceo),
+        ));
+        let err = held.unwrap_err();
+        assert!(err.contains("not made"), "{err}");
+        assert!(err.contains("shell"), "{err}");
+        assert!(kernel.registry.find_by_name("shell-bot").is_none());
+
+        let hired = rt.block_on(KernelHandle::spawn_agent(
+            &kernel,
+            "name = \"researcher\"\nmodule = \"builtin:chat\"\n\
+             [capabilities]\ntools = [\"web_fetch\"]\n",
+            Some(&ceo),
+        ));
+        assert!(hired.is_ok(), "{hired:?}");
+
+        let log = kernel.org_changes(10);
+        assert_eq!(log[0]["actor"], "boss");
+        assert!(log[0]["change"]
+            .as_str()
+            .unwrap()
+            .starts_with("hired \"researcher\""));
+        assert!(log[1]["change"]
+            .as_str()
+            .unwrap()
+            .starts_with("hire of \"shell-bot\" held for the owner"));
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn a_sleeping_agent_stays_asleep_until_woken() {
+        use freeco_kernel_runtime::kernel_handle::KernelHandle;
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = boot_test_kernel(&tmp, "freeco-kernel-sleep-test");
+        let agent = register_test_agent(&kernel, "helper");
+
+        let name = KernelHandle::sleep_agent(&kernel, "helper").expect("sleep by name");
+        assert_eq!(name, "helper");
+        let entry = kernel.registry.get(agent).unwrap();
+        assert_eq!(entry.state, AgentState::Suspended);
+        assert!(is_asleep(&entry.manifest), "the flag survives a restart");
+
+        // What a message does before it runs.
+        kernel.wake_if_asleep(agent);
+        let entry = kernel.registry.get(agent).unwrap();
+        assert_eq!(entry.state, AgentState::Running);
+        assert!(!is_asleep(&entry.manifest));
+
+        assert!(KernelHandle::sleep_agent(&kernel, "ghost").is_err());
+        kernel.shutdown();
+    }
+
     #[test]
     fn test_activate_agent_handle_accepts_name_and_uuid() {
         use freeco_kernel_runtime::kernel_handle::KernelHandle;
@@ -11501,13 +12933,20 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), ceo_tools.len(), "no tool listed twice");
 
-        // Without the role nothing is added beyond its own tools and the two
-        // read-only skill tools every agent that sees skills gets.
+        // Without the role nothing is added beyond its own tools, the two
+        // read-only skill tools every agent that sees skills gets, and the
+        // read-only system_info every agent gets.
         let mut helper_tools = names(helper);
         helper_tools.sort();
         assert_eq!(
             helper_tools,
-            ["memory_store", "skill_describe", "skill_list", "web_fetch"],
+            [
+                "memory_store",
+                "skill_describe",
+                "skill_list",
+                "system_info",
+                "web_fetch"
+            ],
             "{helper_tools:?}"
         );
 
@@ -12163,6 +13602,123 @@ mod tests {
         kernel.shutdown();
     }
 
+    /// `${VAR}` in MCP headers comes from the process env (then the vault);
+    /// an unset variable is a per-server error, never a literal `${...}`.
+    #[test]
+    fn mcp_headers_expand_env_vars() {
+        use freeco_types::config::{DefaultModelConfig, McpServerConfigEntry, McpTransportEntry};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-mcp-headers");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "groq".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                api_key_env: "GROQ_API_KEY".to_string(),
+                base_url: None,
+                subprocess_timeout_secs: None,
+            },
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+
+        // Unique names so parallel tests cannot collide.
+        std::env::set_var("FREECO_TEST_MCP_HDR_KEY_7f3a", "scoped-test-key");
+        let entry = |headers: Vec<&str>| McpServerConfigEntry {
+            name: "omniroute".to_string(),
+            transport: McpTransportEntry::Http {
+                url: "http://127.0.0.1:20128/api/mcp/stream".to_string(),
+            },
+            timeout_secs: 120,
+            env: vec![],
+            headers: headers.into_iter().map(String::from).collect(),
+        };
+
+        let ok = kernel
+            .resolve_mcp_headers(&entry(vec![
+                "Authorization: Bearer ${FREECO_TEST_MCP_HDR_KEY_7f3a}",
+            ]))
+            .unwrap();
+        assert_eq!(
+            ok,
+            vec!["Authorization: Bearer scoped-test-key".to_string()]
+        );
+
+        let err = kernel
+            .resolve_mcp_headers(&entry(vec![
+                "Authorization: Bearer ${FREECO_TEST_MCP_HDR_UNSET_7f3a}",
+            ]))
+            .unwrap_err();
+        assert!(err.contains("omniroute"));
+        assert!(err.contains("FREECO_TEST_MCP_HDR_UNSET_7f3a"));
+
+        std::env::remove_var("FREECO_TEST_MCP_HDR_KEY_7f3a");
+        kernel.shutdown();
+    }
+
+    /// The values redaction works from: secret-named env vars and the
+    /// credential part of MCP headers, never ordinary settings.
+    #[test]
+    fn known_secrets_cover_env_tokens_and_mcp_headers() {
+        use freeco_types::config::{DefaultModelConfig, McpServerConfigEntry, McpTransportEntry};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("freeco-known-secrets");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        // Unique names so parallel tests cannot collide.
+        std::env::set_var("FREECO_TEST_KS_BOT_TOKEN_91c2", "ks-token-4f8a2b9c7d1e");
+        std::env::set_var("FREECO_TEST_KS_BASE_URL_91c2", "http://127.0.0.1:9999/v1");
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            default_model: DefaultModelConfig {
+                provider: "groq".to_string(),
+                model: "llama-3.1-70b".to_string(),
+                api_key_env: "GROQ_API_KEY".to_string(),
+                base_url: None,
+                subprocess_timeout_secs: None,
+            },
+            mcp_servers: vec![McpServerConfigEntry {
+                name: "omniroute".to_string(),
+                transport: McpTransportEntry::Http {
+                    url: "http://127.0.0.1:20128/api/mcp/stream".to_string(),
+                },
+                timeout_secs: 120,
+                env: vec![],
+                headers: vec![
+                    "Authorization: Bearer ks-header-7c3e9a1b5d2f".to_string(),
+                    "Accept: application/json".to_string(),
+                ],
+            }],
+            ..KernelConfig::default()
+        };
+        let kernel = FreecoKernel::boot_with_config(config).expect("kernel boots");
+        let known = kernel.known_secrets();
+        let has = |v: &str| known.iter().any(|(_, k)| k == v);
+        assert!(has("ks-token-4f8a2b9c7d1e"), "secret-named env var");
+        assert!(has("ks-header-7c3e9a1b5d2f"), "MCP header credential");
+        assert!(
+            !has("http://127.0.0.1:9999/v1"),
+            "a URL setting is not a secret"
+        );
+        assert!(
+            !has("application/json"),
+            "a non-credential header is not a secret"
+        );
+        let (name, _) = known
+            .iter()
+            .find(|(_, k)| k == "ks-token-4f8a2b9c7d1e")
+            .unwrap();
+        assert_eq!(name, "FREECO_TEST_KS_BOT_TOKEN_91c2");
+
+        std::env::remove_var("FREECO_TEST_KS_BOT_TOKEN_91c2");
+        std::env::remove_var("FREECO_TEST_KS_BASE_URL_91c2");
+        kernel.shutdown();
+    }
+
     #[test]
     fn test_1188_referenced_providers_walks_skill_tags() {
         use freeco_types::config::DefaultModelConfig;
@@ -12563,8 +14119,8 @@ system_prompt = "You are a test agent."
     fn restricted_agent_gets_only_the_read_only_skill_tools() {
         // Small or large install, an agent with a fixed tool list keeps its own
         // tools and gets the two read-only skill tools the summary tells it to
-        // use (skill_describe always, skill_list for the skills the cap hides).
-        // Nothing that runs code is added.
+        // use (skill_describe always, skill_list for the skills the cap hides)
+        // and the read-only system_info. Nothing that runs code is added.
         for extra in [0, 300] {
             let tmp = tempfile::tempdir().unwrap();
             let (kernel, agent) = kernel_with_restricted_agent(tmp.path(), extra);
@@ -12579,7 +14135,8 @@ system_prompt = "You are a test agent."
                 vec![
                     "file_read".to_string(),
                     "skill_describe".to_string(),
-                    "skill_list".to_string()
+                    "skill_list".to_string(),
+                    "system_info".to_string()
                 ],
                 "extra={extra}"
             );

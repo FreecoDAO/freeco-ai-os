@@ -1,5 +1,35 @@
 <body x-data="app" :data-theme="theme">
 
+<!-- Command Palette (Ctrl/Cmd+K) -->
+<div x-show="$store.app.paletteOpen" x-cloak
+     @keydown.escape="$store.app.closePalette()"
+     @click.self="$store.app.closePalette()"
+     class="palette-backdrop" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="palette" x-ref="palette" x-transition:enter="transition ease-out duration-100" x-transition:enter-start="opacity-0 transform -translate-y-4" x-transition:enter-end="opacity-100 transform translate-y-0">
+    <div class="palette-header">
+      <svg class="palette-icon" viewBox="0 0 24 24" aria-hidden="true" width="16" height="16"><path d="M12 5v14M5 12h14"/></svg>
+      <input type="search" id="palette-input" x-model="$store.app.paletteQuery" placeholder="Type a command..." autocomplete="off" spellcheck="false" aria-label="Command palette search">
+      <kbd class="palette-hint">⌘K</kbd>
+    </div>
+    <div class="palette-list" role="listbox" aria-label="Commands">
+      <template x-for="(cmd, idx) in $store.app.paletteFilter()" :key="cmd.id">
+        <button type="button" role="option" class="palette-item" :class="{ selected: idx === $store.app.paletteSelected }"
+                @click="$store.app.paletteSelect(idx); $store.app.paletteExecute()"
+                @mouseenter="$store.app.paletteSelect(idx)"
+                :aria-selected="idx === $store.app.paletteSelected">
+          <span class="palette-icon-wrap" x-html="paletteIcon(cmd.icon)"></span>
+          <div class="palette-text">
+            <span class="palette-label" x-text="cmd.label"></span>
+            <span class="palette-hint" x-text="cmd.hint"></span>
+          </div>
+        </button>
+      </template>
+      <div class="palette-empty" x-show="!$store.app.paletteFilter().length">No commands match</div>
+    </div>
+    <div class="palette-footer">Press <kbd>Enter</kbd> to run, <kbd>↑↓</kbd> to navigate, <kbd>Esc</kbd> to close</div>
+  </div>
+</div>
+
 <!-- Alpine backdrop: sky, two ridges, a lake (stars show only at night).
      Colours come from the theme tokens; see .app-backdrop in layout.css. -->
 <svg class="app-backdrop" aria-hidden="true" focusable="false" viewBox="0 0 1440 560" preserveAspectRatio="xMidYMin slice">
@@ -127,9 +157,17 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
               <span class="nav-label">Chat</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'chamber' }" @click="navigate('chamber')" :aria-current="page === 'chamber' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg></span>
+              <span class="nav-label">Chamber</span>
+            </a>
             <a class="nav-item" :class="{ active: page === 'live' }" @click="navigate('live')" :aria-current="page === 'live' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span>
               <span class="nav-label">Live</span>
+            </a>
+            <a class="nav-item" :class="{ active: page === 'starnet' }" @click="navigate('starnet')" :aria-current="page === 'starnet' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="15" rx="2"/><path d="M3 11h18M12 4v15"/><path d="M8 22h8"/></svg></span>
+              <span class="nav-label">Starnet</span>
             </a>
             <a class="nav-item" :class="{ active: page === 'projects' }" @click="navigate('projects')" :aria-current="page === 'projects' ? 'page' : false">
               <span class="nav-icon">&#128193;</span><span class="nav-label">Projects</span>
@@ -279,6 +317,19 @@
             <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V7l8-4 8 4v14"/><path d="M9 21v-5h6v5"/></svg></span>
             <span class="sn-mi-text"><span class="sn-mi-title">Company</span><span class="sn-mi-hint">Projects and teams under one roof</span></span>
           </button>
+          <div class="sn-menu-sep"></div>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('agent')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Agent</span><span class="sn-mi-hint">Create a new agent (wizard)</span></span>
+          </button>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('scheduled')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Scheduled task</span><span class="sn-mi-hint">Recurring or one-shot on a cron</span></span>
+          </button>
+          <button type="button" role="menuitem" class="sn-mi" @click="startNew('workflow')">
+            <span class="sn-mi-ic"><svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></span>
+            <span class="sn-mi-text"><span class="sn-mi-title">Workflow</span><span class="sn-mi-hint">Multi-agent pipeline with steps</span></span>
+          </button>
         </div>
       </div>
       <button type="button" class="sn-iconbtn" @click="$store.app.toggleSideNav(); $store.app.sideNavMobile = false" title="Hide this sidebar" aria-label="Hide this sidebar">
@@ -296,6 +347,10 @@
         <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg>
         <span class="sn-grow">Live</span>
         <span class="sn-pill" x-show="working > 0" x-text="working + ' working'"></span>
+      </a>
+      <a class="sn-row" :class="{ active: page === 'starnet' }" href="#starnet" @click="$store.app.sideNavMobile = false">
+        <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="15" rx="2"/><path d="M3 11h18M12 4v15"/><path d="M8 22h8"/></svg>
+        <span class="sn-grow">Starnet</span>
       </a>
       <a class="sn-row" :class="{ active: page === 'approvals' }" href="#approvals" @click="$store.app.sideNavMobile = false">
         <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>
@@ -371,21 +426,81 @@
       </template>
       <div class="sn-empty" x-show="loaded && !visibleTasks.length">No open tasks.</div>
 
-      <template x-for="g in chatGroups" :key="g.name">
+      <!-- Conversations: filter chips, group by, needs-you pinned, then grouped list -->
+      <div class="sn-sec">
+        <span>Chats</span>
+        <div class="sn-plus-group" style="display:flex;gap:4px;flex-wrap:wrap">
+          <select class="sn-filter-select" x-model="convFilter" aria-label="Filter conversations" style="font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--text)">
+            <option value="all">All</option>
+            <option value="needs-me">Needs me</option>
+            <option value="running">Running</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="done">Done</option>
+          </select>
+          <select class="sn-filter-select" x-model="convGroupBy" aria-label="Group conversations by" style="font-size:11px;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--text)">
+            <option value="date">By date</option>
+            <option value="agent">By agent</option>
+            <option value="team">By team</option>
+            <option value="company">By company</option>
+            <option value="project">By project</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Needs-you (pinned) -->
+      <template x-if="needsYouChats.length && convFilter !== 'done'">
+        <div class="sn-sec"><span>Needs you</span></div>
+        <template x-for="c in needsYouChats" :key="c.id">
+          <button type="button" class="sn-row sn-needs-you" :class="{ active: activeSession === c.id }" @click="openChat(c)" @contextmenu="openContextMenu(c, $event)" :data-conv-id="c.id">
+            <span class="sn-av" aria-hidden="true" x-text="initials(c.agent_name)"></span>
+            <span class="sn-grow sn-trunc" x-text="chatTitle(c)"></span>
+            <span class="sn-dot sn-dot-you" aria-label="needs your input"></span>
+          </button>
+        </template>
+        <div class="sn-sep" style="margin:4px 0;border-top:1px solid var(--border)"></div>
+      </template>
+
+      <template x-for="g in groupedChats" :key="g.name">
         <div>
           <div class="sn-sec"><span x-text="g.name === 'Today' ? 'Chats · Today' : g.name"></span></div>
           <template x-for="c in g.chats" :key="c.id">
-            <button type="button" class="sn-row" :class="{ active: activeSession === c.id }" @click="openChat(c)">
+            <button type="button" class="sn-row" :class="{ active: activeSession === c.id }" @click="openChat(c)" @contextmenu="openContextMenu(c, $event)" :data-conv-id="c.id">
               <span class="sn-av" aria-hidden="true" x-text="initials(c.agent_name)"></span>
               <span class="sn-grow sn-trunc" x-text="chatTitle(c)"></span>
               <span class="sn-dot sn-dot-live" x-show="c.busy" aria-label="working"></span>
+              <span class="sn-dot sn-dot-you" x-show="c.unread > 0" aria-label="unread"></span>
             </button>
           </template>
         </div>
       </template>
-      <div class="sn-sec" x-show="loaded && !chatGroups.length"><span>Chats</span></div>
-      <div class="sn-empty" x-show="loaded && !chatGroups.length">No chats yet. Use New to start one.</div>
+      <div class="sn-sec" x-show="loaded && !groupedChats.length && !needsYouChats.length"><span>Chats</span></div>
+      <div class="sn-empty" x-show="loaded && !groupedChats.length && !needsYouChats.length">No chats yet. Use New to start one.</div>
       <a class="sn-row sn-muted" href="#sessions" @click="$store.app.sideNavMobile = false">All chats and archive</a>
+
+      <!-- Context menu -->
+      <div class="sn-context-menu" x-show="contextMenu.show" x-cloak
+           :style="'left:' + contextMenu.x + 'px; top:' + contextMenu.y + 'px'"
+           @click.outside="contextMenu.show = false" role="menu" aria-label="Conversation actions">
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('open')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 3l6 6-6 6"/></svg> Open
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('split')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg> Split view
+        </button>
+        <div class="sn-cm-sep"></div>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('rename')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/></svg> Rename
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('pin')" x-show="false">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 12l3-3 3 3"/></svg> Pin (not supported)
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" @click="contextMenuAction('archive')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 21V7l-8-4-8 4v14"/><path d="M3 21v-5h18v5"/></svg> Archive
+        </button>
+        <button type="button" role="menuitem" class="sn-cm-item" style="color:var(--danger)" @click="contextMenuAction('delete')">
+          <svg class="sn-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> Delete
+        </button>
+      </div>
     </div>
 
     <!-- New task / project / team / company -->
@@ -573,6 +688,54 @@
               </div>
             </section>
           </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Page: Starnet. The teams' work as a pixel-art station: rooms are
+         teams, desks are agents, and each agent moves by what it is doing.
+         The canvas is drawn by js/pages/starnet.js; the list under it says
+         the same in words for screen readers. Sprites: StarNet (MIT), see
+         static/starnet/THIRD_PARTY_NOTICES.md. -->
+    <template x-if="page === 'starnet'">
+      <div x-data="starnetPage" x-init="start()">
+        <div class="page-header">
+          <div>
+            <h2>Starnet</h2>
+            <div class="text-sm text-dim">Your teams at work<span x-show="paused"> · updates paused</span></div>
+          </div>
+          <div class="flex gap-2 items-center" style="flex-wrap:wrap">
+            <div class="live-seg" role="group" aria-label="Zoom">
+              <button type="button" :class="{ active: zoom === 1 }" :aria-pressed="zoom === 1 ? 'true' : 'false'" @click="setZoom(1)">1&times;</button>
+              <button type="button" :class="{ active: zoom === 2 }" :aria-pressed="zoom === 2 ? 'true' : 'false'" @click="setZoom(2)">2&times;</button>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" @click="paused = !paused" x-text="paused ? 'Resume updates' : 'Pause updates'"></button>
+          </div>
+        </div>
+        <div class="page-body">
+          <p class="live-error" x-show="error" x-text="error" role="status"></p>
+          <p class="text-sm text-dim" x-show="degraded.length" x-text="'Showing desks only: ' + degraded.join(' and ') + ' could not be read.'"></p>
+          <div class="starnet-legend" aria-hidden="true">
+            <span><i class="live-s-idle"></i>idle</span>
+            <span><i class="live-s-think"></i>thinking</span>
+            <span><i class="live-s-tool"></i>using a tool</span>
+            <span><i class="live-s-help"></i>waiting on a helper</span>
+            <span><i class="live-s-you"></i>waiting for your yes</span>
+            <span><i class="live-s-fail"></i>error</span>
+          </div>
+          <div class="starnet-wrap" x-ref="wrap">
+            <canvas class="starnet-canvas" x-ref="canvas" aria-hidden="true"></canvas>
+          </div>
+          <div class="empty-state" x-show="loaded && !agents.length">No agents yet. Start one and it gets a desk here.</div>
+          <h3 class="sr-only">Agents on the station</h3>
+          <ul class="starnet-list" aria-label="Agents on the station">
+            <template x-for="a in agents" :key="a.agent_id">
+              <li>
+                <button type="button" @click="openAgent(a.agent_id)" x-text="describe(a)"></button>
+              </li>
+            </template>
+          </ul>
+          <p class="text-xs text-dim starnet-credit">Click an agent to open its chat. Pixel art from StarNet by Andrew Sims, MIT License.</p>
         </div>
       </div>
     </template>
@@ -989,6 +1152,108 @@
       </div>
     </template>
 
+    <!-- Page: Chamber. Every conversation in one window: agent chats and each
+         person's WhatsApp, Telegram, email, ... conversation. The server
+         shows each caller only what access.rs allows. Message text is always
+         x-text, never x-html: it comes from people outside. -->
+    <template x-if="page === 'chamber'">
+      <div x-data="chamberPage" class="page-body chamber-page">
+        <div class="page-header">
+          <h1 class="page-title">Chamber</h1>
+          <p class="page-subtitle">Every conversation you may see, from every channel, in one place.</p>
+        </div>
+
+        <div x-show="loadError" class="alert alert-error" role="alert" x-text="loadError"></div>
+
+        <div class="chamber">
+          <aside class="chamber-list" aria-label="Conversations">
+            <div class="chamber-filters">
+              <select class="form-select" x-model="filter.channel" @change="load()" aria-label="Channel">
+                <option value="">All channels</option>
+                <template x-for="ch in channels" :key="ch">
+                  <option :value="ch" x-text="channelLabel(ch)"></option>
+                </template>
+              </select>
+              <select class="form-select" x-model="filter.agent" @change="load()" aria-label="Agent">
+                <option value="">All agents</option>
+                <template x-for="a in agents" :key="a.id">
+                  <option :value="a.id" x-text="a.name"></option>
+                </template>
+              </select>
+              <label class="chamber-unread-toggle">
+                <input type="checkbox" x-model="filter.unread" @change="load()">
+                <span>Unread</span>
+              </label>
+            </div>
+
+            <div x-show="loading" class="chamber-empty">Loading…</div>
+            <div x-show="!loading && !conversations.length && !loadError" class="chamber-empty">
+              Nothing here. Conversations you are allowed to see appear as they arrive.
+            </div>
+
+            <ul class="chamber-items" role="listbox" aria-label="Conversations">
+              <template x-for="c in conversations" :key="c.id">
+                <li role="option" :aria-selected="c.id === selectedId">
+                  <button type="button" class="chamber-item" :class="{ 'chamber-item-selected': c.id === selectedId, 'chamber-item-unread': c.unread > 0 }"
+                          @click="openThread(c.id)">
+                    <span class="channel-icon chamber-tag" :class="'chamber-tag-' + c.channel" :title="channelLabel(c.channel)" x-text="tag(c.channel)"></span>
+                    <span class="chamber-item-body">
+                      <span class="chamber-item-top">
+                        <span class="chamber-item-title" x-text="c.title"></span>
+                        <span class="chamber-item-when" x-text="when(c.updated_at)"></span>
+                      </span>
+                      <span class="chamber-item-agent" x-text="c.agent_name"></span>
+                      <span class="chamber-item-preview" x-text="preview(c)"></span>
+                    </span>
+                    <span class="badge badge-swiss" x-show="c.unread > 0" x-text="c.unread" :aria-label="c.unread + ' unread'"></span>
+                  </button>
+                </li>
+              </template>
+            </ul>
+          </aside>
+
+          <section class="chamber-thread" aria-label="Conversation">
+            <div x-show="!selected && !threadLoading" class="chamber-empty chamber-thread-empty">
+              Pick a conversation on the left.
+            </div>
+            <template x-if="selected">
+              <div class="chamber-thread-inner">
+                <header class="chamber-thread-head">
+                  <span class="channel-icon chamber-tag" :class="'chamber-tag-' + selected.channel" x-text="tag(selected.channel)"></span>
+                  <div>
+                    <div class="chamber-thread-title" x-text="selected.title"></div>
+                    <div class="chamber-thread-sub">
+                      <span x-text="channelLabel(selected.channel)"></span>
+                      <span aria-hidden="true">·</span>
+                      <span x-text="selected.agent_name"></span>
+                    </div>
+                  </div>
+                </header>
+                <div x-show="threadError" class="alert alert-error" role="alert" x-text="threadError"></div>
+                <div class="chamber-messages" x-ref="thread" aria-live="polite">
+                  <div x-show="threadLoading" class="chamber-empty">Loading…</div>
+                  <template x-for="m in messages" :key="m.id">
+                    <div class="chamber-msg" :class="m.role === 'user' ? 'chamber-msg-in' : 'chamber-msg-out'">
+                      <div class="chamber-msg-who" x-text="who(m)"></div>
+                      <div class="chamber-msg-text" x-text="m.text"></div>
+                    </div>
+                  </template>
+                </div>
+                <form class="chamber-reply" @submit.prevent="send()">
+                  <textarea class="form-input" rows="2" x-model="draft" :placeholder="replyHint()" :aria-label="replyHint()"
+                            :disabled="!selected.can_reply || sending"
+                            @keydown.enter="if (!$event.shiftKey) { $event.preventDefault(); send(); }"></textarea>
+                  <button type="submit" class="btn btn-primary" :disabled="!selected.can_reply || sending || !draft.trim()">
+                    <span x-text="sending ? 'Sending…' : 'Send'"></span>
+                  </button>
+                </form>
+              </div>
+            </template>
+          </section>
+        </div>
+      </div>
+    </template>
+
     <!-- Page: Teams. Every team is a room with its members' seats. A lit seat
          means a run is working for that agent now; a line between two seats
          is a hand-off the kernel recorded. Below, the selected team's board.
@@ -1012,10 +1277,32 @@
           <div class="teams-stat"><span class="teams-stat-num" x-text="liveHandoffs()"></span><span class="teams-stat-label">hand-offs running</span></div>
         </div>
 
+        <!-- Company switcher: which company's teams the floor shows. -->
+        <div class="teams-companies" role="group" aria-label="Company">
+          <label class="text-xs text-dim" for="teams-company">Company</label>
+          <select id="teams-company" class="form-input teams-company-select" x-model="companyId" @change="onCompanyChange()">
+            <option value="">All companies</option>
+            <template x-for="c in companies" :key="c.id">
+              <option :value="c.id" x-text="c.name"></option>
+            </template>
+            <option value="none">No company</option>
+          </select>
+          <template x-if="manageAll">
+            <span class="teams-inline-form">
+              <input class="form-input" x-model="newCompany" placeholder="New company name..." aria-label="New company name"
+                     @keydown.enter="createCompany()">
+              <button class="btn btn-ghost btn-sm" @click="createCompany()" :disabled="!newCompany.trim()">Add company</button>
+              <button class="btn btn-ghost btn-sm" x-show="currentCompany()" @click="renameCompany()">Rename</button>
+              <button class="btn btn-ghost btn-sm" x-show="currentCompany()" @click="deleteCompany()">Delete</button>
+            </span>
+          </template>
+        </div>
+
         <div x-show="loading" class="text-dim">Loading...</div>
 
         <div x-show="!loading && !teams.length && !loadError" class="teams-empty">
-          No teams yet. Create one below, then put agents on it.
+          <span x-show="manageAll">No teams yet. Create one below, then put agents and people on it.</span>
+          <span x-show="!manageAll">You are not on a team yet. An admin or a team lead can add you.</span>
         </div>
 
         <!-- The floor: rooms reflow like any HTML; the lines are drawn over
@@ -1026,7 +1313,7 @@
           <svg class="teams-lanes" x-ref="lanesSvg" :width="floorW" :height="floorH" :viewBox="'0 0 ' + floorW + ' ' + floorH"
                aria-hidden="true" focusable="false"></svg>
 
-          <template x-for="t in teams" :key="t.id">
+          <template x-for="t in visibleTeams()" :key="t.id">
             <button type="button" class="teams-room" :class="{ 'teams-room-selected': t.id === selectedId }"
                     @click="select(t)" :aria-pressed="t.id === selectedId ? 'true' : 'false'"
                     :aria-label="'Team ' + t.name + ', ' + t.members.length + ' member' + (t.members.length === 1 ? '' : 's')">
@@ -1045,10 +1332,13 @@
                 </template>
                 <span class="text-xs text-dim" x-show="!t.members.length">No one on this team yet.</span>
               </span>
+              <span class="teams-room-people" x-show="t.people && t.people.length"
+                    x-text="t.people.length + ' ' + (t.people.length === 1 ? 'person' : 'people')"></span>
               <span class="teams-room-counts">
                 <span x-text="t.tasks.ready + ' ready'"></span>
                 <span x-text="t.tasks.blocked + ' waiting'"></span>
                 <span x-text="t.tasks.in_progress + ' in progress'"></span>
+                <span x-text="(t.tasks.review || 0) + ' in review'"></span>
                 <span x-text="t.tasks.completed + ' done'"></span>
               </span>
             </button>
@@ -1068,42 +1358,64 @@
           </div>
         </div>
 
-        <div class="teams-new-team">
+        <div class="teams-new-team" x-show="manageAll">
           <input class="form-input" x-model="newTeam" placeholder="New team name..." aria-label="New team name"
                  @keydown.enter="createTeam()">
-          <button class="btn btn-ghost" @click="createTeam()" :disabled="!newTeam.trim()">Create team</button>
+          <button class="btn btn-ghost" @click="createTeam()" :disabled="!newTeam.trim()"
+                  x-text="currentCompany() ? 'Create team in ' + currentCompany().name : 'Create team'"></button>
         </div>
 
         <!-- The selected team: its people, its goal, its board. -->
         <template x-if="selected()">
-          <section class="teams-detail" :aria-label="selected().name + ' board'">
-            <h2 class="teams-detail-title" x-text="selected().name"></h2>
+          <section class="teams-detail" :aria-label="selected().name">
+            <div class="teams-detail-head">
+              <h2 class="teams-detail-title" x-text="selected().name"></h2>
+              <span class="teams-access" x-text="accessLabel(selected().access)"></span>
+              <template x-if="manageAll">
+                <select class="form-input teams-company-select" aria-label="Company of this team"
+                        x-model="selected().company_id" @change="moveTeam()">
+                  <option value="">No company</option>
+                  <template x-for="c in companies" :key="c.id">
+                    <option :value="c.id" x-text="c.name"></option>
+                  </template>
+                </select>
+              </template>
+            </div>
 
-            <div class="teams-detail-row">
+            <div class="teams-tabs" role="tablist" aria-label="Team views">
+              <button type="button" role="tab" class="teams-tab" :class="{ 'teams-tab-on': tab === 'board' }"
+                      :aria-selected="tab === 'board' ? 'true' : 'false'" @click="tab = 'board'">Board</button>
+              <button type="button" role="tab" class="teams-tab" :class="{ 'teams-tab-on': tab === 'members' }"
+                      :aria-selected="tab === 'members' ? 'true' : 'false'" @click="openMembers()">Members</button>
+            </div>
+
+            <!-- Members: agents and people, each with a role on the team. -->
+            <div x-show="tab === 'members'" role="tabpanel" class="teams-detail-row">
               <div class="card teams-card">
-                <h3 class="teams-card-title">Members</h3>
+                <h3 class="teams-card-title">Agents</h3>
                 <ul class="teams-members">
                   <template x-for="m in selected().members" :key="m.agent_id">
                     <li>
                       <span x-text="m.name"></span>
                       <span class="text-xs text-dim" x-show="m.role" x-text="'(' + m.role + ')'"></span>
-                      <button class="btn btn-ghost btn-sm" @click="removeMember(m)"
+                      <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="removeMember(m.agent_id, m.name)"
                               :aria-label="'Take ' + m.name + ' off the team'">Remove</button>
                     </li>
                   </template>
+                  <li class="text-xs text-dim" x-show="!selected().members.length">No agents on this team.</li>
                 </ul>
-                <div class="teams-inline-form">
+                <div class="teams-inline-form" x-show="canManage()">
                   <select class="form-input" x-model="newMember.agent_id" aria-label="Agent to add">
                     <option value="">Add an agent...</option>
                     <template x-for="a in notOnTeam()" :key="a.id">
                       <option :value="a.id" x-text="a.name"></option>
                     </template>
                   </select>
-                  <input class="form-input teams-role" x-model="newMember.role" placeholder="Role, e.g. lead" aria-label="Role on the team">
+                  <input class="form-input teams-role" x-model="newMember.role" placeholder="Role, e.g. lead" aria-label="Agent's role on the team">
                   <button class="btn btn-sm" @click="addMember()" :disabled="!newMember.agent_id">Add</button>
                 </div>
-                <p class="text-xs text-dim">The member with the role <em>lead</em> splits a goal and hands the parts out.</p>
-                <div class="teams-inline-form" x-show="selected().members.length">
+                <p class="text-xs text-dim">The agent with the role <em>lead</em> splits a goal and hands the parts out.</p>
+                <div class="teams-inline-form" x-show="manageAll && selected().members.length">
                   <input class="form-input" x-model="goal" placeholder="Give the team a goal..." aria-label="Team goal"
                          @keydown.enter="runTeam()">
                   <button class="btn btn-sm" @click="runTeam()" :disabled="running || !goal.trim()">Run team</button>
@@ -1111,14 +1423,47 @@
               </div>
 
               <div class="card teams-card">
+                <h3 class="teams-card-title">People</h3>
+                <ul class="teams-members">
+                  <template x-for="p in (selected().people || [])" :key="p.id">
+                    <li>
+                      <span x-text="p.username"></span>
+                      <span class="teams-role-badge" :class="'teams-role-' + p.role" x-text="p.role"></span>
+                      <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="removeMember(p.id, p.username)"
+                              :aria-label="'Take ' + p.username + ' off the team'">Remove</button>
+                    </li>
+                  </template>
+                  <li class="text-xs text-dim" x-show="!(selected().people || []).length">No people on this team.</li>
+                </ul>
+                <div class="teams-inline-form" x-show="canManage()">
+                  <select class="form-input" x-model="newPerson.user" aria-label="Person to add">
+                    <option value="">Add a person...</option>
+                    <template x-for="name in accountsNotOnTeam()" :key="name">
+                      <option :value="name" x-text="name"></option>
+                    </template>
+                  </select>
+                  <select class="form-input teams-role" x-model="newPerson.role" aria-label="Their role on the team">
+                    <option value="member">member</option>
+                    <option value="lead">lead</option>
+                    <option value="viewer">viewer</option>
+                  </select>
+                  <button class="btn btn-sm" @click="addPerson()" :disabled="!newPerson.user">Add</button>
+                </div>
+                <p class="text-xs text-dim">A <em>lead</em> manages the team and its board, a <em>member</em> works on the board, a <em>viewer</em> reads it.</p>
+              </div>
+            </div>
+
+            <!-- Board: four columns; drag a card or use its menus. -->
+            <div x-show="tab === 'board'" role="tabpanel">
+              <div class="card teams-card teams-new-task" x-show="canWork()">
                 <h3 class="teams-card-title">New task</h3>
                 <input class="form-input" x-model="newTask.title" placeholder="What needs doing" aria-label="Task title">
                 <textarea class="form-input" rows="2" x-model="newTask.description" placeholder="Details (optional)" aria-label="Task details"></textarea>
                 <div class="teams-inline-form">
                   <select class="form-input" x-model="newTask.assigned_to" aria-label="Who does it">
                     <option value="">Anyone on the team</option>
-                    <template x-for="m in selected().members" :key="m.agent_id">
-                      <option :value="m.agent_id" x-text="m.name"></option>
+                    <template x-for="o in assigneeOptions()" :key="o.id">
+                      <option :value="o.id" x-text="o.label"></option>
                     </template>
                   </select>
                 </div>
@@ -1130,29 +1475,52 @@
                 </select>
                 <button class="btn" @click="postTask()" :disabled="posting || !newTask.title.trim()">Add to the board</button>
               </div>
-            </div>
 
-            <div class="teams-board">
-              <template x-for="col in [['ready','Ready'],['blocked','Waiting'],['in_progress','In progress'],['completed','Done']]" :key="col[0]">
-                <div class="teams-col" :class="'teams-col-' + col[0]">
-                  <h3 class="teams-col-title"><span x-text="col[1]"></span> <span class="teams-col-count" x-text="board(col[0]).length"></span></h3>
-                  <template x-for="task in board(col[0])" :key="task.id">
-                    <div class="teams-task">
-                      <div class="teams-task-title" x-text="task.title"></div>
-                      <div class="teams-task-meta">
-                        <span x-show="task.assigned_to" x-text="nameOf(task.assigned_to)"></span>
-                        <span x-show="!task.assigned_to">anyone</span>
-                        <span x-text="ago(task.completed_at || task.created_at)"></span>
+              <div class="teams-board">
+                <template x-for="col in columns" :key="col.id">
+                  <div class="teams-col" :class="{ ['teams-col-' + col.id]: true, 'teams-col-drop': dropCol === col.id }"
+                       @dragover.prevent="canWork() && (dropCol = col.id)" @dragleave="dropCol = ''"
+                       @drop.prevent="dropOn(col.id)">
+                    <h3 class="teams-col-title"><span x-text="col.label"></span> <span class="teams-col-count" x-text="board(col.id).length"></span></h3>
+                    <template x-for="task in board(col.id)" :key="task.id">
+                      <div class="teams-task" :draggable="canWork() ? 'true' : 'false'"
+                           @dragstart="dragId = task.id" @dragend="dragId = ''; dropCol = ''">
+                        <div class="teams-task-title" x-text="task.title"></div>
+                        <div class="teams-task-desc" x-show="task.description" x-text="task.description"></div>
+                        <div class="teams-task-meta">
+                          <span x-text="task.assigned_to ? nameOf(task.assigned_to) : 'anyone'"></span>
+                          <span x-text="ago(task.updated_at || task.completed_at || task.created_at)"></span>
+                        </div>
+                        <div class="teams-task-meta" x-show="task.created_by">
+                          <span x-text="'from ' + nameOf(task.created_by)"></span>
+                        </div>
+                        <div class="teams-task-wait" x-show="task.blocked">
+                          Waits for <span x-text="task.blocked_by.map(function (id) { return taskTitle(id); }).join(', ')"></span>
+                        </div>
+                        <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
+                        <div class="teams-task-actions" x-show="canWork()">
+                          <select class="form-input" :aria-label="'Move ' + task.title" x-model="task.column"
+                                  @change="moveTask(task, $event.target.value)">
+                            <template x-for="c in columns" :key="c.id">
+                              <option :value="c.id" x-text="c.label"></option>
+                            </template>
+                          </select>
+                          <select class="form-input" :aria-label="'Assign ' + task.title" x-model="task.assigned_to"
+                                  @change="assignTask(task, $event.target.value)">
+                            <option value="">Anyone</option>
+                            <template x-for="o in assigneeOptions()" :key="o.id">
+                              <option :value="o.id" x-text="o.label"></option>
+                            </template>
+                          </select>
+                          <button class="btn btn-ghost btn-sm" x-show="canManage()" @click="deleteTask(task)"
+                                  :aria-label="'Delete ' + task.title">Delete</button>
+                        </div>
                       </div>
-                      <div class="teams-task-wait" x-show="task.blocked">
-                        Waits for <span x-text="task.blocked_by.map(function (id) { return taskTitle(id); }).join(', ')"></span>
-                      </div>
-                      <div class="teams-task-result" x-show="task.result" x-text="task.result"></div>
-                    </div>
-                  </template>
-                  <div class="text-xs text-dim" x-show="!board(col[0]).length">Nothing here.</div>
-                </div>
-              </template>
+                    </template>
+                    <div class="text-xs text-dim" x-show="!board(col.id).length">Nothing here.</div>
+                  </div>
+                </template>
+              </div>
             </div>
           </section>
         </template>
@@ -1226,6 +1594,19 @@
           </template>
         </div>
 
+        <!-- What changed in the organisation, by the owner or by agents:
+             structure created, members set, hires made or held. -->
+        <div class="card" style="margin-top:18px;padding:10px 14px" x-show="changes.length">
+          <div class="font-bold" style="font-size:13px;margin-bottom:6px">Recent changes</div>
+          <template x-for="(c, i) in changes.slice(0, 12)" :key="i">
+            <div class="text-xs" style="display:flex;gap:8px;padding:2px 0">
+              <span class="text-dim" style="white-space:nowrap" x-text="when(c.timestamp)"></span>
+              <strong x-text="c.actor"></strong>
+              <span x-text="c.change" :style="c.change.indexOf('held for the owner') !== -1 ? 'color:var(--warning)' : ''"></span>
+            </div>
+          </template>
+        </div>
+
         <!-- A project's own history: what this whole structure is for. -->
         <div x-show="selected" style="margin-top:26px">
           <h2 style="font-size:1.1rem;margin-bottom:10px">
@@ -1281,8 +1662,21 @@
                     <span class="text-xs text-dim"
                           x-text="t.member_count + ' member' + (t.member_count === 1 ? '' : 's')"></span>
                   </div>
-                  <p class="text-xs" style="margin:4px 0 0"
-                     x-show="t.members && t.members.length" x-text="memberLine(t)"></p>
+                  <!-- Members by name with the lead marked: the owner appoints
+                       the lead or takes a member off here; each change is
+                       logged under Recent changes. -->
+                  <template x-for="m in (t.members || [])" :key="m.agent_id">
+                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:12px">
+                      <span x-text="agentName(m.agent_id) || String(m.agent_id).slice(0, 8)"></span>
+                      <span class="badge" x-show="isLead(t, m)" style="font-size:10px">lead</span>
+                      <span class="text-dim" x-show="m.role && !/^(lead|member|supervisor)$/i.test(m.role)" x-text="m.role"></span>
+                      <span style="flex:1"></span>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" x-show="!isLead(t, m)"
+                              @click="makeLead(t, m.agent_id)" title="Make this agent the team's lead">make lead</button>
+                      <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px"
+                              @click="removeMember(t, m.agent_id)" title="Take off the team" aria-label="Take off the team">&#x2715;</button>
+                    </div>
+                  </template>
                   <p class="text-xs text-dim" style="margin:4px 0 0"
                      x-show="!t.members || !t.members.length">No members yet. Add the agents who will do the work.</p>
                   <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
@@ -1423,7 +1817,7 @@
                  sandbox (never the host), its browser, and its background work. -->
             <aside x-show="panelOpen && currentAgent" x-cloak class="chat-side-panel" x-transition>
               <div class="chat-side-tabs">
-                <template x-for="t in [['files','Files'],['changes','Changes'],['artifacts','Artifacts'],['terminal','Terminal'],['browser','Browser'],['background','Background'],['archive','Archive']]" :key="t[0]">
+                <template x-for="t in [['files','Files'],['changes','Changes'],['artifacts','Artifacts'],['terminal','Terminal'],['browser','Browser'],['background','Background'],['run','Run'],['context','Context'],['archive','Archive']]" :key="t[0]">
                   <button :class="{ active: panelTab === t[0] }" @click="panelTab = t[0]; refreshPanel()" x-text="t[1]"></button>
                 </template>
                 <button class="chat-side-close" @click="panelOpen = false" aria-label="Close panel">&times;</button>
@@ -1453,6 +1847,7 @@
                         <div class="chat-side-bar">
                           <button class="btn btn-ghost btn-sm" @click="fileView = null">← Back</button>
                           <span class="text-xs truncate" style="flex:1" x-text="fileView.path"></span>
+                          <a class="btn btn-ghost btn-sm" x-show="isPage(fileView.path)" :href="fileOpenUrl(fileView.path)" target="_blank" rel="noopener">Open</a>
                           <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(fileView.path)">Download</a>
                         </div>
                         <pre class="chat-side-pre" x-show="fileView.content !== null" x-text="fileView.content"></pre>
@@ -1486,6 +1881,7 @@
                       <div class="chat-side-row">
                         <span class="truncate" style="flex:1;cursor:pointer" @click="panelTab = 'files'; openFile(a.path)" x-text="a.path"></span>
                         <span class="text-xs text-dim" x-text="fmtBytes(a.size)"></span>
+                        <a class="btn btn-ghost btn-sm" x-show="isPage(a.path)" :href="fileOpenUrl(a.path)" target="_blank" rel="noopener" title="Open">Open</a>
                         <a class="btn btn-ghost btn-sm" :href="fileDownloadUrl(a.path)" title="Download">⭳</a>
                       </div>
                     </template>
@@ -1553,6 +1949,67 @@
                       </div>
                     </template>
                     <div class="text-xs text-dim" style="padding:12px" x-show="!archivesList.length">Nothing archived.</div>
+                  </div>
+                </template>
+                <!-- Run: agent's run history and current run controls -->
+                <template x-if="panelTab === 'run'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">Run history (last 20)</span>
+                      <button class="btn btn-ghost btn-sm" @click="loadRun()" title="Refresh">⟳</button>
+                    </div>
+                    <template x-if="runHistory && runHistory.length">
+                      <template x-for="r in runHistory" :key="r.id || r.timestamp">
+                        <div class="chat-side-row" :class="r.status === 'completed' ? '' : 'sn-two'">
+                          <span class="truncate" style="flex:1" x-text="r.name || r.source || 'Run'"></span>
+                          <span class="sn-pill" :class="r.status === 'completed' ? '' : 'badge-suspended'" x-text="r.status || 'completed'"></span>
+                          <template x-if="r.status !== 'completed'">
+                            <span class="sn-sub" x-text="fmtAgo(Date.now() - (r.timestamp || Date.now()))"></span>
+                          </template>
+                        </div>
+                      </template>
+                    </template>
+                    <div class="text-xs text-dim" style="padding:12px" x-show="!runHistory || !runHistory.length">No runs yet.</div>
+
+                    <div class="chat-side-bar" style="margin-top:12px;border-top:1px solid var(--border);padding-top:8px">
+                      <span class="text-xs text-dim">Current run</span>
+                    </div>
+                    <div style="padding:8px">
+                      <button class="btn btn-danger btn-sm" @click="stopAgent()" :disabled="!sending" style="width:100%" x-text="sending ? 'Stop current run' : 'No active run'"></button>
+                    </div>
+                  </div>
+                </template>
+                <!-- Context: project/team info and context pressure -->
+                <template x-if="panelTab === 'context'">
+                  <div>
+                    <div class="chat-side-bar">
+                      <span class="text-xs text-dim">Context & project</span>
+                    </div>
+                    <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+                      <div>
+                        <div class="text-xs text-dim">Context pressure</div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                          <span style="width:10px;height:10px;border-radius:50%" :style="'background:' + contextDotColor"></span>
+                          <span class="text-sm font-mono" x-text="contextPressure"></span>
+                        </div>
+                        <div class="text-xs text-dim" style="margin-top:4px" x-text="tokenCount ? '≈ ' + tokenCount + ' tokens in current turn' : ''"></div>
+                      </div>
+                      <div style="border-top:1px solid var(--border);padding-top:8px">
+                        <div class="text-xs text-dim">Project / Team</div>
+                        <template x-if="agentContext && (agentContext.project || agentContext.team)">
+                          <div class="sn-row sn-muted" style="padding:6px 0;background:none;border:none">
+                            <span class="sn-grow sn-trunc" x-text="agentContext.project ? '📁 ' + agentContext.project : '👥 ' + agentContext.team"></span>
+                          </div>
+                        </template>
+                        <div class="text-xs text-dim" style="padding:4px 0" x-show="!agentContext || (!agentContext.project && !agentContext.team)">No project or team linked.</div>
+                      </div>
+                      <div style="border-top:1px solid var(--border);padding-top:8px">
+                        <div class="text-xs text-dim">Model</div>
+                        <div class="sn-row sn-muted" style="padding:6px 0;background:none;border:none">
+                          <span class="sn-grow sn-trunc" x-text="currentAgent ? currentAgent.model_provider + ' / ' + currentAgent.model_name : '—'"></span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </template>
               </div>
@@ -2541,6 +2998,39 @@
             <p x-text="loadError"></p>
             <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
           </div>
+          <!-- Security approvals: manifests the Security Agent held because they
+               ask for privileged capabilities. Approve calls
+               POST /api/security/approve/{content_hash}. -->
+          <div x-show="!loading && securityPending.length > 0" class="mb-4" id="security-pending">
+            <h3 class="mb-2">Waiting for security approval</h3>
+            <p class="hint mb-2">These were held because they ask for privileged capabilities. Approving lets the exact same content through when it is submitted again.</p>
+            <div class="card-grid">
+              <template x-for="p in securityPending" :key="p.content_hash">
+                <div class="card approval-card">
+                  <div class="flex justify-between items-center mb-2">
+                    <span class="card-header" style="margin:0" x-text="(p.summary && p.summary.name) || p.subject"></span>
+                    <span class="badge badge-warn" x-text="p.subject"></span>
+                  </div>
+                  <div class="text-xs text-dim mb-2" :title="p.content_hash">Hash: <code x-text="p.content_hash.slice(0, 12) + '…'"></code></div>
+                  <template x-if="p.summary && p.summary.exec_policy_mode">
+                    <div class="text-sm mb-1">Shell policy: <strong x-text="p.summary.exec_policy_mode"></strong></div>
+                  </template>
+                  <template x-for="row in securityCaps(p)" :key="row[0]">
+                    <div class="text-sm mb-1"><span class="text-dim" x-text="row[0] + ':'"></span> <span x-text="row[1]"></span></div>
+                  </template>
+                  <ul class="text-xs text-dim mb-2" style="margin:6px 0 0 16px">
+                    <template x-for="(f, i) in p.findings" :key="i">
+                      <li x-text="f.message"></li>
+                    </template>
+                  </ul>
+                  <div class="text-xs text-dim"><span x-text="timeAgo(p.created_at)"></span></div>
+                  <div class="approval-actions" style="display:flex;gap:8px;margin-top:12px">
+                    <button class="btn btn-success btn-sm" @click="approveSecurity(p)">Approve</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
           <template x-if="!loading && !loadError">
             <div>
               <div class="filter-pills mb-4">
@@ -3424,20 +3914,21 @@
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
                 <div class="font-bold" style="font-size:13px;margin-bottom:4px">Run History</div>
                 <div class="text-sm text-dim" style="line-height:1.6">
-                  Recent executions of scheduled jobs and event trigger fires. History is aggregated from schedule run counts and trigger fire counts.
+                  Every run that started on its own &mdash; scheduled jobs, trigger fires and background ticks &mdash; newest first, failures included. The last 500 are kept.
                 </div>
               </div>
               <div class="table-wrap" x-show="history.length">
                 <table>
-                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Total Runs</th></tr></thead>
+                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Duration</th><th>Tokens</th></tr></thead>
                   <tbody>
                     <template x-for="(h, idx) in history" :key="idx">
                       <tr>
                         <td class="text-xs" style="white-space:nowrap" x-text="formatTime(h.timestamp)"></td>
                         <td class="font-bold" x-text="h.name"></td>
-                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="h.type === 'schedule' ? 'Cron Job' : 'Trigger'"></span></td>
-                        <td><span class="badge badge-success" x-text="h.status"></span></td>
-                        <td x-text="h.run_count"></td>
+                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="historyType(h.type)"></span></td>
+                        <td><span class="badge" :class="h.status === 'failed' ? 'badge-error' : 'badge-success'" :title="h.error" x-text="h.status"></span></td>
+                        <td class="text-xs" x-text="(h.duration_ms / 1000).toFixed(1) + ' s'"></td>
+                        <td class="text-xs" x-text="h.tokens"></td>
                       </tr>
                     </template>
                   </tbody>
@@ -3445,7 +3936,7 @@
               </div>
               <div class="empty-state" x-show="!history.length">
                 <h4>No run history yet</h4>
-                <p class="hint">Run history will appear here after scheduled jobs or triggers execute.</p>
+                <p class="hint">Run history will appear here after scheduled jobs, triggers or background loops run.</p>
               </div>
             </div>
           </div>
@@ -3569,6 +4060,37 @@
                 <!-- ═══ QR CODE FLOW (WhatsApp Web style) ═══ -->
                 <template x-if="isQrChannel() && !showBusinessApi">
                   <div>
+                    <!-- WhatsApp: gateway status and allowlist (GET /api/channels/whatsapp/status). All text via x-text, so it is escaped. -->
+                    <div x-show="setupModal.name === 'whatsapp'" class="wa-allowlist" style="border:1px solid var(--border,rgba(148,163,184,0.2));border-radius:8px;padding:0.75rem;margin-bottom:0.75rem">
+                      <div class="flex gap-2" style="align-items:center;justify-content:space-between;flex-wrap:wrap">
+                        <span class="text-sm" style="font-weight:600">Gateway</span>
+                        <span class="badge" :class="waStateLabel().cls" x-text="waStateLabel().text"></span>
+                      </div>
+                      <p class="text-xs text-dim mt-1" x-show="wa.data && wa.data.message" x-text="wa.data && wa.data.message"></p>
+                      <p class="text-xs text-dim mt-1" x-show="wa.data && wa.data.crashes > 0" x-text="wa.data ? ('Crashes in a row: ' + wa.data.crashes) : ''"></p>
+                      <p class="text-xs mt-1" x-show="wa.error" style="color:var(--red,#ef4444)" x-text="wa.error"></p>
+
+                      <div class="text-sm mt-3" style="font-weight:600">Allowed chats</div>
+                      <p class="text-xs text-dim mt-1" x-text="(wa.data && wa.data.allowlist && wa.data.allowlist.rule) || 'Only listed chats, in both directions. An empty list allows nobody but your own number.'"></p>
+                      <ul class="text-xs mt-1" style="padding-left:1.25rem" x-show="waList('numbers').length || waList('groups').length">
+                        <template x-for="n in waList('numbers')" :key="'n' + n">
+                          <li><span x-text="n"></span><span class="text-dim" x-show="wa.data && wa.data.allowlist && wa.data.allowlist.owner_number === n"> (you)</span></li>
+                        </template>
+                        <template x-for="g in waList('groups')" :key="'g' + g">
+                          <li><span x-text="g"></span><span class="text-dim"> (group)</span></li>
+                        </template>
+                      </ul>
+                      <p class="text-xs mt-1" style="color:var(--warning,#facc15)" x-show="waList('rejected').length" x-text="'Not understood, allows nothing: ' + waList('rejected').join(', ') + ' (use international form, e.g. +41 79 123 45 67, or a group JID ending @g.us)'"></p>
+
+                      <label class="text-xs mt-2" style="display:block;margin-bottom:0.25rem">Allowed numbers and groups (comma-separated)</label>
+                      <input class="form-input" type="text" x-model="formValues.allowed_users" placeholder="+41 79 123 45 67, 120363000000000000@g.us">
+                      <label class="text-xs mt-2" style="display:block;margin-bottom:0.25rem">Your own number (always allowed)</label>
+                      <input class="form-input" type="text" x-model="formValues.owner_number" placeholder="+41 79 123 45 67">
+                      <div class="flex gap-2 mt-2" style="justify-content:flex-end">
+                        <button class="btn btn-ghost btn-sm" @click="saveWhatsAppAllowlist()" :disabled="wa.saving" x-text="wa.saving ? 'Saving...' : 'Save allowed chats'"></button>
+                      </div>
+                    </div>
+
                     <!-- QR: Loading -->
                     <div x-show="qr.loading" style="text-align:center;padding:2rem 0">
                       <div class="spinner"></div>
@@ -5155,10 +5677,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span x-text="s.auto_connects ? 'connects automatically' : 'needs one manual step'"></span>
                       </div>
                       <div class="text-xs" x-show="s.manual_step" style="margin-top:4px;color:var(--text-secondary)" x-text="s.manual_step"></div>
-                      <!-- Key-connected services (the CRM): the key goes to the vault, checked first. -->
+                      <!-- Key-connected services (the CRM; Akaunting with a login): goes to the vault, checked first. -->
                       <div class="x-show-flex" x-show="s.connect_with_key && s.running" style="margin-top:8px;gap:6px;flex-wrap:wrap;align-items:center">
+                        <input type="email" class="form-input" autocomplete="off" style="flex:1;min-width:180px;max-width:260px"
+                               x-show="s.connect_with_login" placeholder="Akaunting login e-mail"
+                               x-model="svcEmails[s.id]">
                         <input type="password" class="form-input" autocomplete="off" style="flex:1;min-width:200px;max-width:360px"
-                               :placeholder="s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat'"
+                               :placeholder="s.connect_with_login
+                                 ? (s.connected ? 'Connected. Enter the login again to replace it' : 'Akaunting password, here, not in a chat')
+                                 : (s.connected ? 'Connected. Paste a new key to replace it' : 'Paste the API key here, not in a chat')"
                                x-model="svcKeys[s.id]" @keydown.enter="connectService(s.id)">
                         <button class="btn btn-primary btn-sm" @click="connectService(s.id)"
                                 :disabled="svcConnecting === s.id || !(svcKeys[s.id] || '').trim()"
@@ -7840,6 +8367,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
          style="margin:0 10px 8px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-elev, var(--bg))">
       <div class="text-xs text-dim" style="margin-bottom:8px">
         Where should this go?
+        <span x-show="pendingRoute && pendingRoute.reason" x-text="pendingRoute ? ' ' + pendingRoute.reason : ''"></span>
       </div>
       <div style="display:flex;flex-direction:column;gap:6px">
         <template x-for="c in (pendingRoute ? pendingRoute.candidates : [])" :key="c.agent_id">
@@ -7858,6 +8386,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
         </button>
         <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewCompany()">
           <span>🏢 New company…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewTeam()">
+          <span>👥 New team…</span>
+        </button>
+        <button class="btn btn-sm" style="text-align:left;width:100%" @click="routeNewHand()">
+          <span>✋ New hand (automation)…</span>
         </button>
         <div style="display:flex;gap:6px">
           <button class="btn btn-sm" style="flex:1" @click="routeHere()">Continue here</button>

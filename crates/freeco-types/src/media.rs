@@ -165,6 +165,110 @@ pub struct MediaConfig {
     /// Closes <https://github.com/FreecoDAO/freeco-ai/issues/1051>.
     #[serde(default)]
     pub image_gen_base_url: Option<String>,
+
+    /// Keep speech on this machine: never pick, or fall back to, a cloud
+    /// speech-to-text or text-to-speech service.
+    ///
+    /// When on, transcription goes only to `audio_base_url` (or Parakeet MLX)
+    /// and speech only to `tts_openai_base_url` / `tts_elevenlabs_base_url`,
+    /// and each of those must be a local address (loopback, a private or
+    /// link-local IP, `localhost`, a `.local`/`.lan`/`.internal`/`.home.arpa`
+    /// name, or a single-label container name such as `speaches`). Groq,
+    /// OpenAI and ElevenLabs are never auto-detected from their API keys. If
+    /// the local service fails, the caller gets an error naming the URL and
+    /// what failed, and it is logged at error level -- there is no silent
+    /// fallback to a cloud provider.
+    ///
+    /// Default (unset): decided by [`MediaConfig::local_only_effective`]. It is
+    /// on when `audio_base_url` and/or `tts_openai_base_url` is set and every
+    /// one of them that is set is a local address -- for example the bundled
+    /// Speaches service at `http://127.0.0.1:8010`. It is off when neither is
+    /// set, or when either points at a remote address. Set it explicitly to
+    /// `false` to allow cloud speech next to a local endpoint, or to `true` to
+    /// refuse cloud speech even with nothing local configured.
+    ///
+    /// ```toml
+    /// [media]
+    /// audio_base_url = "http://127.0.0.1:8010"
+    /// tts_openai_base_url = "http://127.0.0.1:8010"
+    /// local_audio_api_key_env = "SPEACHES_API_KEY"
+    /// local_only = true   # implied by the two local URLs above
+    /// ```
+    #[serde(default)]
+    pub local_only: Option<bool>,
+}
+
+impl MediaConfig {
+    /// Whether speech must stay local, applying the default rule documented
+    /// on [`MediaConfig::local_only`]: an explicit value always wins;
+    /// otherwise on exactly when at least one of `audio_base_url` and
+    /// `tts_openai_base_url` is set and all of the set ones are local.
+    pub fn local_only_effective(&self) -> bool {
+        if let Some(explicit) = self.local_only {
+            return explicit;
+        }
+        let urls: Vec<&str> = [
+            self.audio_base_url.as_deref(),
+            self.tts_openai_base_url.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect();
+        !urls.is_empty() && urls.iter().all(|u| is_local_url(u))
+    }
+}
+
+/// Whether a URL points at this machine or the local network.
+///
+/// Local means: `localhost` (and `*.localhost`), a loopback, private
+/// (RFC 1918 / IPv6 ULA) or link-local IP, a name under `.local`, `.lan`,
+/// `.internal` or `.home.arpa`, or a single-label host name (a container or
+/// compose service such as `speaches`, which public DNS cannot resolve).
+/// Anything else, a URL without a scheme, or an unparseable host is not local.
+pub fn is_local_url(url: &str) -> bool {
+    let Some((_, rest)) = url.trim().split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop any `user:pass@` prefix; the host is what follows the last `@`.
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((h, _)) => h,
+            None => return false,
+        }
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".lan")
+        || host.ends_with(".internal")
+        || host.ends_with(".home.arpa")
+    {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => {
+                let first = v6.segments()[0];
+                v6.is_loopback()
+                    || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                    || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+            }
+        };
+    }
+    // A dotted name that is not one of the local suffixes is a public name.
+    // Digits-and-dots that failed to parse as an IP are not a usable host.
+    !host.contains('.') && !host.contains(':')
 }
 
 impl Default for MediaConfig {
@@ -182,6 +286,7 @@ impl Default for MediaConfig {
             tts_openai_base_url: None,
             tts_elevenlabs_base_url: None,
             image_gen_base_url: None,
+            local_only: None,
         }
     }
 }
@@ -802,5 +907,97 @@ mod mime_parameter_tests {
             size_bytes: 10,
         };
         assert!(a.validate().is_err(), "unknown audio type must be rejected");
+    }
+
+    #[test]
+    fn local_urls_are_told_apart_from_cloud_ones() {
+        for local in [
+            "http://127.0.0.1:8010",
+            "http://localhost:8010/",
+            "http://[::1]:8010",
+            "http://10.0.0.5:8010",
+            "http://192.168.1.20:8010/v1",
+            "http://172.16.3.4",
+            "http://169.254.1.1",
+            "http://speaches:8010",
+            "http://host.containers.internal:8010",
+            "http://nas.local:8010",
+            "http://user:pw@127.0.0.1:8010",
+            "http://[fd00::1]:8010",
+        ] {
+            assert!(is_local_url(local), "{local} should be local");
+        }
+        for cloud in [
+            "https://api.openai.com",
+            "https://api.groq.com/openai",
+            "https://api.elevenlabs.io",
+            "https://8.8.8.8",
+            "https://whisper.example.com",
+            "http://127.0.0.1.evil.com",
+            "http://evil.com@",
+            "127.0.0.1:8010",
+            "",
+        ] {
+            assert!(!is_local_url(cloud), "{cloud} should not be local");
+        }
+    }
+
+    #[test]
+    fn local_only_defaults_on_for_a_local_speaches_and_off_otherwise() {
+        // Nothing configured: off (there is nothing local to stay on).
+        assert!(!MediaConfig::default().local_only_effective());
+
+        // Local Speaches for both: on.
+        let speaches = MediaConfig {
+            audio_base_url: Some("http://127.0.0.1:8010".into()),
+            tts_openai_base_url: Some("http://127.0.0.1:8010".into()),
+            ..MediaConfig::default()
+        };
+        assert!(speaches.local_only_effective());
+
+        // Only STT local: still on, TTS must not quietly go to the cloud.
+        let stt_only = MediaConfig {
+            audio_base_url: Some("http://localhost:8010".into()),
+            ..MediaConfig::default()
+        };
+        assert!(stt_only.local_only_effective());
+
+        // A remote endpoint the user chose: off.
+        let remote = MediaConfig {
+            audio_base_url: Some("http://127.0.0.1:8010".into()),
+            tts_openai_base_url: Some("https://api.novita.ai".into()),
+            ..MediaConfig::default()
+        };
+        assert!(!remote.local_only_effective());
+
+        // An explicit value always wins.
+        let explicit_off = MediaConfig {
+            local_only: Some(false),
+            ..speaches.clone()
+        };
+        assert!(!explicit_off.local_only_effective());
+        let explicit_on = MediaConfig {
+            local_only: Some(true),
+            ..MediaConfig::default()
+        };
+        assert!(explicit_on.local_only_effective());
+    }
+
+    #[test]
+    fn local_only_parses_from_toml() {
+        let unset: MediaConfig =
+            toml::from_str("audio_base_url = \"http://127.0.0.1:8010\"").unwrap();
+        assert_eq!(unset.local_only, None);
+        assert!(unset.local_only_effective());
+
+        let off: MediaConfig =
+            toml::from_str("audio_base_url = \"http://127.0.0.1:8010\"\nlocal_only = false")
+                .unwrap();
+        assert_eq!(off.local_only, Some(false));
+        assert!(!off.local_only_effective());
+
+        let on: MediaConfig = toml::from_str("local_only = true").unwrap();
+        assert_eq!(on.local_only, Some(true));
+        assert!(on.local_only_effective());
     }
 }

@@ -4,6 +4,7 @@
 //! Requires a webhook endpoint for incoming messages and the Cloud API for outgoing.
 
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
+use crate::whatsapp_allowlist::WhatsAppAllowlist;
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
@@ -33,8 +34,9 @@ pub struct WhatsAppAdapter {
     webhook_port: u16,
     /// HTTP client.
     client: reqwest::Client,
-    /// Allowed phone numbers (empty = allow all).
-    allowed_users: Vec<String>,
+    /// The chats this adapter may send to (see `whatsapp_allowlist`): empty
+    /// means none, except the owner's number when one is configured.
+    allowlist: WhatsAppAllowlist,
     /// Optional WhatsApp Web gateway URL for QR/Web mode (e.g. "http://127.0.0.1:3009").
     gateway_url: Option<String>,
     /// Shutdown signal.
@@ -58,11 +60,17 @@ impl WhatsAppAdapter {
             verify_token: Zeroizing::new(verify_token),
             webhook_port,
             client: reqwest::Client::new(),
-            allowed_users,
+            allowlist: WhatsAppAllowlist::from_config(&allowed_users, None),
             gateway_url: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+
+    /// Use the full allowlist: `allowed_users` plus the owner's own number.
+    pub fn with_allowlist(mut self, allowlist: WhatsAppAllowlist) -> Self {
+        self.allowlist = allowlist;
+        self
     }
 
     /// Create a new WhatsApp adapter with gateway URL for Web/QR mode.
@@ -167,10 +175,9 @@ impl WhatsAppAdapter {
         Ok(())
     }
 
-    /// Check if a phone number is allowed.
-    #[allow(dead_code)]
-    fn is_allowed(&self, phone: &str) -> bool {
-        self.allowed_users.is_empty() || self.allowed_users.iter().any(|u| u == phone)
+    /// Whether a chat (number, user JID or group JID) is on the allowlist.
+    fn is_allowed(&self, chat_id: &str) -> bool {
+        self.allowlist.allows(chat_id)
     }
 
     /// Returns true if this adapter is configured for Web/QR gateway mode.
@@ -197,7 +204,7 @@ impl ChannelAdapter for WhatsAppAdapter {
         let (_tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let port = self.webhook_port;
         let _verify_token = self.verify_token.clone();
-        let _allowed_users = self.allowed_users.clone();
+        let _allowlist = self.allowlist.clone();
         let _access_token = self.access_token.clone();
         let _phone_number_id = self.phone_number_id.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -224,6 +231,13 @@ impl ChannelAdapter for WhatsAppAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Allowed chats only, in this direction too: an agent's channel_send,
+        // a cron delivery or a reply to a chat that is not on the allowlist
+        // is refused here, before anything leaves the daemon.
+        if !self.is_allowed(&user.platform_id) {
+            return Err(self.allowlist.refusal(&user.platform_id).into());
+        }
+
         // Web/QR gateway mode: route all messages through the gateway
         if let Some(ref gw) = self.gateway_url {
             let text = match &content {
@@ -372,15 +386,59 @@ mod tests {
             vec!["+1234567890".to_string()],
         );
         assert!(adapter.is_allowed("+1234567890"));
+        assert!(adapter.is_allowed("1234567890@s.whatsapp.net"));
         assert!(!adapter.is_allowed("+9999999999"));
 
-        let open = WhatsAppAdapter::new(
+        // Empty allowlist: nobody, not everybody.
+        let empty = WhatsAppAdapter::new(
             "12345".to_string(),
             "token".to_string(),
             "verify".to_string(),
             8443,
             vec![],
         );
-        assert!(open.is_allowed("+anything"));
+        assert!(!empty.is_allowed("+1234567890"));
+
+        // ...except the owner, when the config names one.
+        let owner = empty.with_allowlist(WhatsAppAllowlist::from_config(&[], Some("+1234567890")));
+        assert!(owner.is_allowed("+1234567890"));
+        assert!(!owner.is_allowed("+9999999999"));
+    }
+
+    #[tokio::test]
+    async fn test_send_to_a_chat_off_the_allowlist_is_refused_before_any_request() {
+        // The gateway URL points nowhere: a refused send must fail on the
+        // allowlist, not on the network.
+        let adapter = WhatsAppAdapter::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            8443,
+            vec!["+41791234567".to_string()],
+        )
+        .with_gateway(Some("http://127.0.0.1:9".to_string()));
+        let stranger = ChannelUser {
+            platform_id: "+41790000000".to_string(),
+            display_name: "x".to_string(),
+            freeco_user: None,
+        };
+        let err = adapter
+            .send(&stranger, ChannelContent::Text("hi".to_string()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not on the allowlist"), "{err}");
+
+        let group = ChannelUser {
+            platform_id: "120363000000000000@g.us".to_string(),
+            display_name: "g".to_string(),
+            freeco_user: None,
+        };
+        let err = adapter
+            .send(&group, ChannelContent::Text("hi".to_string()))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not on the allowlist"), "{err}");
     }
 }

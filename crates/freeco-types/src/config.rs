@@ -193,6 +193,17 @@ pub struct UserConfig {
     /// login and by role resolution (they fall back to least-privileged).
     #[serde(default = "default_user_enabled")]
     pub enabled: bool,
+    /// Agents this account may see and chat with in the dashboard (the
+    /// chamber, the WebSocket chat), by agent name or id; `"*"` is every
+    /// agent. Owners and admins see every agent whatever this says. Empty:
+    /// none. See `freeco-api`'s `access` module for the whole policy.
+    #[serde(default)]
+    pub agents: Vec<String>,
+    /// External channels (`whatsapp`, `telegram`, `email`, ...) whose
+    /// conversations this account may see; `"*"` is every channel. Owners and
+    /// admins see every channel; a kid never sees one. Empty: none.
+    #[serde(default)]
+    pub channels: Vec<String>,
 }
 
 fn default_role() -> String {
@@ -244,6 +255,8 @@ impl Default for UserConfig {
             api_key_hash: None,
             password_hash: None,
             enabled: true,
+            agents: Vec::new(),
+            channels: Vec::new(),
         }
     }
 }
@@ -1169,6 +1182,33 @@ pub struct ExecPolicy {
     /// before the field existed (issue #1169).
     #[serde(default, alias = "env_passthrough", alias = "env_allowlist")]
     pub shell_env_passthrough: Vec<String>,
+    /// Limits on `podman` / `docker` commands run through `shell_exec` or
+    /// `process_start` (`[exec_policy.containers]`). When set, the kernel
+    /// parses every container command and refuses names outside
+    /// `name_prefixes`, images outside `images`, and the flags that reach
+    /// the host (`--privileged`, host mounts, host namespaces, `--cap-add`,
+    /// ports published on every interface). `None` = no container checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containers: Option<ContainerPolicy>,
+}
+
+/// Container limits inside an exec policy (`[exec_policy.containers]`).
+///
+/// An empty `name_prefixes` or `images` list leaves that dimension open; the
+/// host-escape checks (privileged, host mounts, host namespaces, capabilities,
+/// devices, publishing on 0.0.0.0) always apply once the table exists.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ContainerPolicy {
+    /// Container (and volume) names must start with one of these, e.g.
+    /// `["freeco-"]`. `run`/`create` must then pass `--name`.
+    pub name_prefixes: Vec<String>,
+    /// Image patterns; `*` matches any run of characters, e.g.
+    /// `["ghcr.io/freecodao/*", "localhost/*"]`. Unqualified names such as
+    /// `alpine` only match a pattern that names them.
+    pub images: Vec<String>,
+    /// Allow `--network host` (off by default).
+    pub allow_host_network: bool,
 }
 
 fn default_no_output_timeout() -> u64 {
@@ -1206,6 +1246,7 @@ impl Default for ExecPolicy {
             max_output_bytes: 100 * 1024,
             no_output_timeout_secs: default_no_output_timeout(),
             shell_env_passthrough: Vec::new(),
+            containers: None,
         }
     }
 }
@@ -1651,6 +1692,11 @@ pub struct AuthConfig {
     /// Argon2id password hash (PHC string format).
     /// Generate with: freeco auth hash-password
     pub password_hash: String,
+    /// Secret that signs dashboard session cookies. Optional: when empty the
+    /// signing secret is derived (the API key, else the password hash; see
+    /// `freeco_api::session_auth::session_secret`). Setting or changing it
+    /// invalidates every existing session.
+    pub session_secret: String,
     /// Session token lifetime in hours (default: 168 = 7 days).
     pub session_ttl_hours: u64,
 }
@@ -1661,6 +1707,7 @@ impl Default for AuthConfig {
             enabled: false,
             username: "admin".to_string(),
             password_hash: String::new(),
+            session_secret: String::new(),
             session_ttl_hours: 168,
         }
     }
@@ -1740,7 +1787,10 @@ pub struct McpServerConfigEntry {
     #[serde(default)]
     pub env: Vec<String>,
     /// Extra HTTP headers for SSE / Streamable-HTTP transports.
-    /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
+    /// Each entry is `"Header-Name: value"`. `${VAR}` in a value is resolved from
+    /// the process environment, then the vault / `.env`, e.g.
+    /// `"Authorization: Bearer ${OMNIROUTE_MCP_KEY}"`, so no key has to sit in
+    /// config.toml. An unresolved variable stops that server from connecting.
     #[serde(default)]
     pub headers: Vec<String>,
 }
@@ -2420,9 +2470,16 @@ pub struct WhatsAppConfig {
     /// Env var name holding the WhatsApp Web gateway URL (QR/Web mode).
     /// When set, outgoing messages are routed through the gateway instead of Cloud API.
     pub gateway_url_env: String,
-    /// Allowed phone numbers (empty = allow all).
+    /// The chats the agent may talk to, in both directions: phone numbers in
+    /// international form (`+41 79 123 45 67`, `0041…`) and group JIDs
+    /// (`…@g.us`). Every other chat is ignored on the way in and refused on
+    /// the way out. Empty = nobody except `owner_number` (if set); with
+    /// neither, every chat is refused. No wildcard.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// The owner's own WhatsApp number, always allowed (international form).
+    #[serde(default)]
+    pub owner_number: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2439,6 +2496,7 @@ impl Default for WhatsAppConfig {
             webhook_port: 8443,
             gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
             allowed_users: vec![],
+            owner_number: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -4479,6 +4537,34 @@ mod tests {
     }
 
     #[test]
+    fn user_grants_are_optional_and_read_from_toml() {
+        let without: KernelConfig = toml::from_str(
+            r#"
+[[users]]
+name = "Bob"
+role = "user"
+"#,
+        )
+        .unwrap();
+        assert!(without.users[0].agents.is_empty());
+        assert!(without.users[0].channels.is_empty());
+
+        let with: KernelConfig = toml::from_str(
+            r#"
+[[users]]
+name = "Bob"
+role = "user"
+agents = ["assistant", "coder"]
+channels = ["whatsapp", "email"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(with.users[0].agents, vec!["assistant", "coder"]);
+        assert_eq!(with.users[0].channels, vec!["whatsapp", "email"]);
+        assert!(UserConfig::default().agents.is_empty());
+    }
+
+    #[test]
     fn test_config_with_mode_and_language() {
         let config = KernelConfig {
             mode: KernelMode::Stable,
@@ -4545,6 +4631,25 @@ mod tests {
         let json = serde_json::to_string(&wa).unwrap();
         let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.phone_number_id, "12345");
+    }
+
+    #[test]
+    fn test_whatsapp_owner_number_and_allowlist_from_toml() {
+        let wa: WhatsAppConfig = toml::from_str(
+            r#"
+            allowed_users = ["+41 79 123 45 67", "120363000000000000@g.us"]
+            owner_number = "+41 79 000 00 00"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(wa.allowed_users.len(), 2);
+        assert_eq!(wa.owner_number.as_deref(), Some("+41 79 000 00 00"));
+
+        // Both optional: an old config without them still loads, and denies by default.
+        let old: WhatsAppConfig = toml::from_str("phone_number_id = \"1\"").unwrap();
+        assert!(old.allowed_users.is_empty());
+        assert_eq!(old.owner_number, None);
+        assert_eq!(WhatsAppConfig::default().owner_number, None);
     }
 
     #[test]
@@ -5047,5 +5152,50 @@ shell_env_passthrough = ["*"]
 "#;
         let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
         assert_eq!(policy.shell_env_passthrough, vec!["*"]);
+    }
+
+    #[test]
+    fn media_local_only_is_read_from_the_config_file() {
+        let toml_str = r#"
+[media]
+audio_base_url = "http://127.0.0.1:8010"
+tts_openai_base_url = "http://127.0.0.1:8010"
+local_only = true
+"#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.media.local_only, Some(true));
+        assert!(config.media.local_only_effective());
+
+        // Absent: the default rule applies (local URLs imply local-only).
+        let toml_str = "[media]\naudio_base_url = \"http://127.0.0.1:8010\"\n";
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.media.local_only, None);
+        assert!(config.media.local_only_effective());
+    }
+
+    #[test]
+    fn test_exec_policy_containers_absent_by_default() {
+        assert!(ExecPolicy::default().containers.is_none());
+        let policy: ExecPolicy = toml::from_str("mode = \"allowlist\"").unwrap();
+        assert!(policy.containers.is_none());
+    }
+
+    #[test]
+    fn test_exec_policy_containers_table_deserializes() {
+        let toml_str = r#"
+mode = "allowlist"
+safe_bins = []
+allowed_commands = ["podman"]
+
+[containers]
+name_prefixes = ["freeco-"]
+images = ["ghcr.io/freecodao/*", "localhost/*"]
+"#;
+        let policy: ExecPolicy = toml::from_str(toml_str).unwrap();
+        let c = policy.containers.expect("containers table parsed");
+        assert_eq!(c.name_prefixes, vec!["freeco-"]);
+        assert_eq!(c.images, vec!["ghcr.io/freecodao/*", "localhost/*"]);
+        assert!(!c.allow_host_network);
+        assert!(policy.safe_bins.is_empty());
     }
 }

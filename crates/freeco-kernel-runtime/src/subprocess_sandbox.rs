@@ -45,6 +45,10 @@ pub const SAFE_ENV_VARS_WINDOWS: &[&str] = &[
 /// skipped (rather than being set to empty strings).
 pub fn sandbox_command(cmd: &mut tokio::process::Command, allowed_env_vars: &[String]) {
     cmd.env_clear();
+    // Each sandboxed child leads its own process group, so
+    // `kill_process_tree` can stop it and its descendants and nothing else.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     // Re-add platform-independent safe vars.
     for var in SAFE_ENV_VARS {
@@ -431,6 +435,62 @@ pub fn validate_command_allowlist(command: &str, policy: &ExecPolicy) -> Result<
     }
 }
 
+/// Safe bins that run another program or a script of their own (`env cmd`,
+/// `find -exec`, `sed e`, `awk system()`, `xargs cmd`). They do not get the
+/// `capabilities.shell` exemption below.
+const SAFE_BINS_THAT_EXEC: &[&str] = &["env", "find", "sed", "awk", "xargs"];
+
+/// Check a shell command against the manifest's `capabilities.shell` globs
+/// (`Capability::ShellExec`), e.g. `["podman *", "cargo test *"]`.
+///
+/// - Empty `patterns`: no restriction from this field; `exec_policy` alone
+///   decides. The builtin `shell_exec` never checked the field before, and
+///   hands and agents made in the dashboard have none, so treating empty as
+///   "deny" would switch their shell off without a word.
+/// - Otherwise the whole command must match one pattern (`*` as in every
+///   capability glob). A path on the first word is ignored, so
+///   `/usr/bin/podman ps` matches `podman *`.
+/// - Read-only `safe_bins` from the exec policy (`ls`, `cat`, `grep`, ...)
+///   stay allowed, except the ones that can run another program.
+pub fn check_shell_capability(
+    command: &str,
+    patterns: &[String],
+    safe_bins: &[String],
+) -> Result<(), String> {
+    use freeco_types::capability::{capability_matches, Capability};
+
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    let command = command.trim();
+    let base = extract_base_command(command);
+    let normalized = match command.split_once(char::is_whitespace) {
+        Some((_, rest)) => format!("{base} {}", rest.trim_start()),
+        None => base.to_string(),
+    };
+    let required = [
+        Capability::ShellExec(command.to_string()),
+        Capability::ShellExec(normalized),
+    ];
+    let granted = patterns.iter().any(|p| {
+        let grant = Capability::ShellExec(p.clone());
+        required.iter().any(|r| capability_matches(&grant, r))
+    });
+    if granted {
+        return Ok(());
+    }
+    if !SAFE_BINS_THAT_EXEC.contains(&base) && safe_bins.iter().any(|b| b == base) {
+        return Ok(());
+    }
+    Err(format!(
+        "'{}' does not match this agent's capabilities.shell ({}), so nothing ran. Only \
+         commands matching one of those patterns may run; the owner can widen the list in \
+         the agent's manifest.",
+        crate::str_utils::safe_truncate_str(command, 120),
+        patterns.join(", ")
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Process tree kill — cross-platform graceful → force kill
 // ---------------------------------------------------------------------------
@@ -463,63 +523,76 @@ pub async fn kill_process_tree(pid: u32, grace_ms: u64) -> Result<bool, String> 
     }
 }
 
+/// Send `sig` to the process group `pgid` (`killpg`) or, when that is not
+/// safe, to `pid` alone (`kill`). Never shells out.
+///
+/// The old code ran `kill -TERM -<pid>` / `kill -9 -<pid>`. procps-ng 4
+/// (Debian bookworm) reads `-<pid>` without a preceding `--` as a signal
+/// option, and the call killed every process of the user, FreEco itself
+/// included. Signalling through libc has no argument parsing to get wrong,
+/// and the guards below keep a bad pid from reaching init, the caller's own
+/// group or "every process" (pid 0 / -1).
+#[cfg(unix)]
+fn signal_tree(pid: i32, sig: libc::c_int) -> std::io::Result<()> {
+    if pid <= 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to signal pid {pid}"),
+        ));
+    }
+    // SAFETY: plain libc calls on integer arguments, no memory involved.
+    let pgid = unsafe { libc::getpgid(pid) };
+    let own_pgid = unsafe { libc::getpgid(0) };
+    // Only a child that leads its own group is killed as a group: then the
+    // group is that child and its descendants, nothing else.
+    let rc = if pgid == pid && pgid > 1 && pgid != own_pgid {
+        unsafe { libc::killpg(pgid, sig) }
+    } else {
+        unsafe { libc::kill(pid, sig) }
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Whether `pid` is still running (signal 0 sends nothing).
+#[cfg(unix)]
+pub(crate) fn pid_alive(pid: i32) -> bool {
+    // SAFETY: as above; signal 0 only checks that the process exists.
+    pid > 1 && unsafe { libc::kill(pid, 0) } == 0
+}
+
 #[cfg(unix)]
 async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
-    use tokio::process::Command;
+    let pid = i32::try_from(pid).map_err(|_| format!("pid {pid} out of range"))?;
+    if pid <= 1 {
+        return Err(format!("refusing to kill pid {pid}"));
+    }
+    if !pid_alive(pid) {
+        return Ok(false);
+    }
+    // Graceful first: the child's whole group when it leads one.
+    let _ = signal_tree(pid, libc::SIGTERM);
 
-    let pid_i32 = pid as i32;
-
-    // Try to kill the process group first (negative PID).
-    // This kills the process and all its children.
-    let group_kill = Command::new("kill")
-        .args(["-TERM", &format!("-{pid_i32}")])
-        .output()
-        .await;
-
-    if group_kill.is_err() {
-        // Fallback: kill just the process.
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output()
-            .await;
+    // Wait for grace period, checking whether it already went.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(grace_ms);
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
 
-    // Wait for grace period.
-    tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
-
-    // Check if still alive.
-    let check = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .await;
-
-    match check {
-        Ok(output) if output.status.success() => {
-            // Still alive — force kill.
-            tracing::warn!(
-                pid,
-                "Process still alive after grace period, sending SIGKILL"
-            );
-
-            // Try group kill first.
-            let _ = Command::new("kill")
-                .args(["-9", &format!("-{pid_i32}")])
-                .output()
-                .await;
-
-            // Also try direct kill.
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output()
-                .await;
-
-            Ok(true)
-        }
-        _ => {
-            // Process is already dead (kill -0 failed = no such process).
-            Ok(true)
-        }
+    if pid_alive(pid) {
+        tracing::warn!(
+            pid,
+            "Process still alive after grace period, sending SIGKILL"
+        );
+        signal_tree(pid, libc::SIGKILL).map_err(|e| format!("SIGKILL {pid} failed: {e}"))?;
     }
+    Ok(true)
 }
 
 #[cfg(windows)]
@@ -1268,5 +1341,110 @@ mod tests {
         let cmds = extract_all_commands(cmd);
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0], "\u{4f60}\u{597d}");
+    }
+
+    // --- capabilities.shell (check_shell_capability) ---
+
+    fn pats(p: &[&str]) -> Vec<String> {
+        p.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn shell_capability_empty_list_does_not_restrict() {
+        assert!(check_shell_capability("rm -rf /tmp/x", &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_matching_glob_passes() {
+        let p = pats(&["podman *", "cargo test *"]);
+        assert!(check_shell_capability("podman ps -a", &p, &[]).is_ok());
+        assert!(check_shell_capability("  podman ps -a  ", &p, &[]).is_ok());
+        assert!(check_shell_capability("cargo test --workspace", &p, &[]).is_ok());
+        assert!(check_shell_capability("/usr/bin/podman ps", &p, &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_non_matching_is_refused() {
+        let p = pats(&["podman *", "cargo test *"]);
+        let err = check_shell_capability("curl https://x", &p, &[]).unwrap_err();
+        assert!(err.contains("capabilities.shell"));
+        assert!(check_shell_capability("cargo build", &p, &[]).is_err());
+        // The pattern needs the space: `podmanx` is a different binary.
+        assert!(check_shell_capability("podmanx ps", &p, &[]).is_err());
+    }
+
+    #[test]
+    fn shell_capability_star_allows_everything() {
+        assert!(check_shell_capability("anything at all", &pats(&["*"]), &[]).is_ok());
+    }
+
+    #[test]
+    fn shell_capability_keeps_read_only_safe_bins() {
+        let p = pats(&["python *"]);
+        let safe = pats(&["ls", "cat", "env", "find", "sed"]);
+        assert!(check_shell_capability("ls -la", &p, &safe).is_ok());
+        assert!(check_shell_capability("cat notes.txt", &p, &safe).is_ok());
+        // Safe bins that can run another program are not exempt.
+        assert!(check_shell_capability("env rm -rf x", &p, &safe).is_err());
+        assert!(check_shell_capability("find . -exec rm {} ;", &p, &safe).is_err());
+        assert!(check_shell_capability("sed -n 1p f", &p, &safe).is_err());
+        // Without safe bins, nothing outside the patterns.
+        assert!(check_shell_capability("ls -la", &p, &[]).is_err());
+    }
+
+    /// Regression: the old `kill -9 -<pid>` shell-out was parsed by procps-ng
+    /// 4 as a signal option and killed every process of the user. A tree
+    /// kill must reach the child's group only. The sentinel runs in another
+    /// group (and the whole test runs detached, so a regression could not
+    /// reach the session that started it).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tree_kill_spares_processes_in_other_groups() {
+        let spawn_leader = || {
+            let mut c = tokio::process::Command::new("sleep");
+            c.arg("30").process_group(0).kill_on_drop(true);
+            c.spawn().expect("spawn sleep")
+        };
+        let mut sentinel = spawn_leader();
+        let mut child = spawn_leader();
+        let sentinel_pid = sentinel.id().unwrap() as i32;
+        let child_pid = child.id().unwrap();
+
+        assert!(kill_process_tree(child_pid, 200).await.unwrap());
+        let _ = child.wait().await;
+        assert!(!pid_alive(child_pid as i32), "the child is gone");
+        assert!(
+            pid_alive(sentinel_pid),
+            "a process in another group survives"
+        );
+
+        // A child sharing our own group is signalled alone, never as a group:
+        // a group kill there would take the test runner with it.
+        let mut same_group = tokio::process::Command::new("sleep");
+        same_group.arg("30").kill_on_drop(true);
+        let mut same_group = same_group.spawn().unwrap();
+        assert!(kill_process_tree(same_group.id().unwrap(), 200)
+            .await
+            .unwrap());
+        let _ = same_group.wait().await;
+        assert!(
+            pid_alive(sentinel_pid),
+            "still alive after a same-group kill"
+        );
+        assert!(
+            pid_alive(std::process::id() as i32),
+            "and so is this process"
+        );
+
+        let _ = sentinel.kill().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tree_kill_refuses_init_and_group_wildcards() {
+        assert!(kill_process_tree(0, 10).await.is_err());
+        assert!(kill_process_tree(1, 10).await.is_err());
+        assert!(kill_process_tree(u32::MAX, 10).await.is_err());
+        assert!(!pid_alive(0) && !pid_alive(1) && !pid_alive(-1));
     }
 }

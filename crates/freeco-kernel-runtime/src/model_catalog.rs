@@ -45,7 +45,8 @@ pub struct ModelCatalog {
 impl ModelCatalog {
     /// Create a new catalog populated with builtin models and providers.
     pub fn new() -> Self {
-        let models = builtin_models();
+        let mut models = builtin_models();
+        models.extend(claude_code_versions());
         let mut aliases = builtin_aliases();
         let mut providers = builtin_providers();
 
@@ -1258,6 +1259,95 @@ fn builtin_aliases() -> HashMap<String, String> {
         .into_iter()
         .map(|(k, v)| (k.to_lowercase(), v.to_string()))
         .collect()
+}
+
+/// Claude Code models by version and effort.
+///
+/// The list offered only "Claude Opus (CLI)" and the like: no version, no
+/// effort, so nobody could tell which Opus answered or ask it to think
+/// harder. The CLI takes a full model name and `--effort` (low, medium, high,
+/// xhigh, max); an id `claude-code/<model>@<effort>` carries both, and the
+/// driver passes them on. Without `@` the CLI's own default effort applies.
+fn claude_code_versions() -> Vec<ModelCatalogEntry> {
+    // (model id, name, tier, max output, input $/M, output $/M)
+    // Prices are Anthropic's first-party list prices (checked 2026-11). The
+    // context window is kept at 200k, the CLI's default, though the API
+    // models take 1M: compaction is sized from it, and a smaller window only
+    // compacts earlier.
+    const VERSIONS: &[(&str, &str, ModelTier, u64, f64, f64)] = &[
+        (
+            "claude-opus-5-5",
+            "Claude Opus 5.5",
+            ModelTier::Frontier,
+            128_000,
+            4.0,
+            20.0,
+        ),
+        (
+            "claude-fable-5-1",
+            "Claude Fable 5.1",
+            ModelTier::Frontier,
+            128_000,
+            10.0,
+            50.0,
+        ),
+        (
+            "claude-sonnet-5-5",
+            "Claude Sonnet 5.5",
+            ModelTier::Smart,
+            128_000,
+            2.0,
+            10.0,
+        ),
+        (
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
+            ModelTier::Fast,
+            64_000,
+            1.0,
+            5.0,
+        ),
+    ];
+    const EFFORTS: &[&str] = &["", "low", "medium", "high", "xhigh", "max"];
+    let mut out = Vec::new();
+    for (model, name, tier, max_out, inp, outp) in VERSIONS {
+        // Haiku 4.5 takes no effort setting: the API refuses one.
+        let efforts: &[&str] = if model.starts_with("claude-haiku-4-5") {
+            &EFFORTS[..1]
+        } else {
+            EFFORTS
+        };
+        for effort in efforts {
+            let (id, display) = if effort.is_empty() {
+                (
+                    format!("claude-code/{model}"),
+                    format!("{name} (Claude Code)"),
+                )
+            } else {
+                (
+                    format!("claude-code/{model}@{effort}"),
+                    format!("{name} · effort {effort} (Claude Code)"),
+                )
+            };
+            out.push(ModelCatalogEntry {
+                id,
+                display_name: display,
+                provider: "claude-code".into(),
+                tier: *tier,
+                context_window: 200_000,
+                max_output_tokens: *max_out,
+                input_cost_per_m: *inp,
+                output_cost_per_m: *outp,
+                // The driver gives the model its tools in the prompt and reads
+                // the calls back, so agents on Claude Code do use tools.
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: vec![],
+            });
+        }
+    }
+    out
 }
 
 fn builtin_models() -> Vec<ModelCatalogEntry> {
@@ -4336,42 +4426,42 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
             id: "claude-code/opus".into(),
-            display_name: "Claude Opus (CLI)".into(),
+            display_name: "Claude Opus — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Frontier,
             context_window: 200_000,
             max_output_tokens: 128_000,
             input_cost_per_m: 5.0,
             output_cost_per_m: 25.0,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code-opus".into()],
         },
         ModelCatalogEntry {
             id: "claude-code/sonnet".into(),
-            display_name: "Claude Sonnet (CLI)".into(),
+            display_name: "Claude Sonnet — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Smart,
             context_window: 200_000,
             max_output_tokens: 64_000,
             input_cost_per_m: 3.0,
             output_cost_per_m: 15.0,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code".into(), "claude-code-sonnet".into()],
         },
         ModelCatalogEntry {
             id: "claude-code/haiku".into(),
-            display_name: "Claude Haiku (CLI)".into(),
+            display_name: "Claude Haiku — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Fast,
             context_window: 200_000,
             max_output_tokens: 8_192,
             input_cost_per_m: 0.25,
             output_cost_per_m: 1.25,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code-haiku".into()],
@@ -4952,10 +5042,29 @@ mod tests {
     fn test_claude_code_models() {
         let catalog = ModelCatalog::new();
         let models = catalog.models_by_provider("claude-code");
-        assert_eq!(models.len(), 3);
+        // Three "latest" aliases, three versions at the CLI's default effort
+        // and each of its five effort levels, and Haiku 4.5, which takes no
+        // effort.
+        assert_eq!(models.len(), 3 + 3 * 6 + 1);
+        assert!(models
+            .iter()
+            .any(|m| m.id == "claude-code/claude-haiku-4-5"));
+        assert!(!models
+            .iter()
+            .any(|m| m.id.starts_with("claude-code/claude-haiku-4-5@")));
         assert!(models.iter().any(|m| m.id == "claude-code/opus"));
         assert!(models.iter().any(|m| m.id == "claude-code/sonnet"));
         assert!(models.iter().any(|m| m.id == "claude-code/haiku"));
+        let opus_high = models
+            .iter()
+            .find(|m| m.id == "claude-code/claude-opus-5-5@high")
+            .expect("Opus 5.5 at high effort is offered");
+        assert_eq!(
+            opus_high.display_name,
+            "Claude Opus 5.5 · effort high (Claude Code)"
+        );
+        // The driver gives Claude Code its tools; the UI must not hide it.
+        assert!(models.iter().all(|m| m.supports_tools));
     }
 
     #[test]

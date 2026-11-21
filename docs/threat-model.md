@@ -69,8 +69,10 @@ For a business's sensitive data this is a silent leak the user didn't grasp.
 An agent with `shell = []` should be *unable* to run shell — the request must
 be denied **before** reaching the user, not offered for approval. If the
 runtime ever prompts the user for a capability the manifest forbids, that's a
-bypass. **Status: UNVERIFIED — must be tested** (open question raised by a live
-report that a `shell=[]` secretary appeared to request a shell command).
+bypass. **Status: enforced for the builtin tools** — `shell_exec` and
+`process_start` check the `capabilities.shell` globs before anyone is asked
+for approval, alongside `exec_policy`; the WASM host function already did. An
+empty `shell` list leaves `exec_policy` alone to decide (it is not "deny").
 **ATT&CK:** T1068 (Privilege Escalation). → task #18.
 
 ### 🟠 T4 — Destructive actions without a brake

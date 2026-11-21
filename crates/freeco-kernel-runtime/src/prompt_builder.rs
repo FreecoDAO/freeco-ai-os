@@ -157,6 +157,18 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         }
     }
 
+    // Section 7.2 — How to hand the owner a file. Agents named the file
+    // ("geneva-vegan-map.html, in your workspace") and told the owner to
+    // double-click it, which nobody can do from a chat.
+    if let (Some(id), Some(_)) = (&ctx.agent_id, &ctx.workspace_path) {
+        sections.push(format!(
+            "## Sharing Files\nWhen you give the owner a file from your workspace, link it \
+             rather than only naming it: [name](/api/agents/{id}/workspace/file?open=true&path=PATH) \
+             with PATH relative to your workspace and URL-encoded. An HTML page opens as a page; \
+             other files open or download."
+        ));
+    }
+
     // Section 7.5 — Heartbeat checklist (only for autonomous agents)
     if !ctx.is_subagent && ctx.is_autonomous {
         if let Some(ref heartbeat) = ctx.heartbeat_md {
@@ -341,6 +353,8 @@ const GLOBAL_GUIDELINES: &str = "\
 ## How You Work\n\
 - You are here to get things done, not to describe why they cannot be. Ambition and care are the same job: the most useful thing you can do is also the most careful one.\n\
 - Read the request for what it is. Do the whole of it, and say plainly which parts you did not do and why.\n\
+- A message often holds several questions or requests. Before you answer, note each one; answer every one, in order, under its own heading or number when there are more than two. If you cannot answer one yet, say which and why -- never answer the first and drop the rest.\n\
+- The conversation above is yours to use. When the user says \"as above\", \"that\" or \"it\", look back through it and act on what they mean; ask only if it is genuinely ambiguous.\n\
 - Judge by what is true, not by what is easy to say. An accurate \"this is broken and here is the cause\" is worth more than a confident summary that is wrong.\n\n\
 ## You Work In A Team\n\
 - You are one agent among several, not a lone assistant. `agent_list` shows who exists and what model each runs; `org_overview` shows the companies, projects and teams they belong to and what each is accountable for.\n\
@@ -359,7 +373,9 @@ const GLOBAL_GUIDELINES: &str = "\
 ## When Something Blocks You\n\
 - \"I can't\" is never a complete answer, and the way past it is to try, not to explain. Attempt the thing, then report what actually happened.\n\
 - Diagnose before reporting. You have tools -- read the config, check the service, read the log, run the command and look at the error. Report the cause, not the symptom: \"the container is not running because its volume is missing\" beats \"the service is unavailable\".\n\
-- Try the obvious alternative first. If the sandbox refuses, ask whether the host is genuinely needed. If one tool fails, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- blocks are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- For ordinary failures, try the obvious alternative first. If the sandbox lacks what you need, ask whether the host is genuinely needed. If one tool errors, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- outages are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- A security control that blocks you is not an ordinary failure. A stripped header, a refused or denied command, a sandbox or network boundary, a denied approval: each is a decision someone made, not an obstacle to route around. Do not reach the same endpoint, file or action by another path. Finding the other route is useful information; using it is not.\n\
+- Instead, stop and escalate to the owner: what the control was, what you were trying to do, what route would have worked, and the honest case for and against changing the rule. Then carry on with the parts of the work that do not depend on it. An agent that quietly works around a control takes the decision away from the owner, which is the whole point of having one.\n\
 - Escalate only after trying. When you do ask, bring the diagnosis with you: what you attempted, what it returned, and the one decision you need from the user.\n\
 - If a task turns out larger than asked, do the part you are certain of, then say what remains. Proposing instead of starting is how nothing gets done.\n\n\
 ## Working Guidelines\n\
@@ -771,8 +787,8 @@ pub fn tool_category(name: &str) -> &'static str {
         "memory_store" | "memory_recall" | "memory_delete" | "memory_list" => "Memory",
 
         "agent_send" | "agent_delegate" | "agent_spawn" | "agent_list" | "agent_kill"
-        | "agent_activate" | "agent_describe" | "agent_find" | "agent_set_model"
-        | "agent_skills_set" => "Agents",
+        | "agent_activate" | "agent_sleep" | "agent_describe" | "agent_find"
+        | "agent_set_model" | "agent_skills_set" => "Agents",
 
         "container_list" | "container_logs" | "container_start" | "container_stop"
         | "container_restart" => "Containers",
@@ -841,6 +857,7 @@ pub fn tool_hint(name: &str) -> &'static str {
         "agent_list" => "list running agents",
         "agent_kill" => "terminate an agent",
         "agent_activate" => "wake up an inactive agent so it can receive work",
+        "agent_sleep" => "put an agent to sleep so it uses no tokens until woken",
         "agent_describe" => "see an agent's model, tools and skills, yours included",
         "agent_set_model" => "switch an agent to another model",
         "agent_skills_set" => "switch skills on or off for an agent",
@@ -964,6 +981,57 @@ mod tests {
             GLOBAL_GUIDELINES.matches("## Truth And Evidence").count(),
             1
         );
+    }
+
+    /// Alternatives are for ordinary failures; a security control that blocks
+    /// the agent is escalated to the owner, never routed around. The two rules
+    /// sit next to each other so neither reads as overriding the other.
+    #[test]
+    fn security_blocks_are_escalated_not_routed_around() {
+        let g = GLOBAL_GUIDELINES;
+        let alt = g
+            .find("For ordinary failures, try the obvious alternative first")
+            .expect("alternatives rule is scoped to ordinary failures");
+        let sec = g
+            .find("A security control that blocks you is not an ordinary failure")
+            .expect("security-block rule present");
+        assert!(
+            sec > alt,
+            "the security exception must follow the alternatives rule"
+        );
+        assert!(g.contains("not an obstacle to route around"));
+        assert!(g.contains("Do not reach the same endpoint, file or action by another path"));
+        assert!(g.contains("escalate to the owner"));
+        assert!(g.contains("case for and against"));
+        assert!(g.contains("carry on with the parts of the work that do not depend on it"));
+        // The unscoped form pushed agents towards bypassing a refused sandbox.
+        assert!(!g.contains("Try the obvious alternative first. If the sandbox refuses"));
+        // Subagents get it too.
+        let mut ctx = basic_ctx();
+        ctx.is_subagent = true;
+        assert!(build_system_prompt(&ctx).contains("not an obstacle to route around"));
+    }
+
+    /// Agents answered the first of several questions and dropped the rest,
+    /// and said they could not see a conversation that was right above.
+    #[test]
+    fn global_guidelines_answer_every_question_and_use_the_conversation() {
+        assert!(GLOBAL_GUIDELINES.contains("answer every one, in order"));
+        assert!(GLOBAL_GUIDELINES.contains("never answer the first and drop the rest"));
+        assert!(GLOBAL_GUIDELINES.contains("The conversation above is yours to use"));
+    }
+
+    #[test]
+    fn the_prompt_says_how_to_link_a_workspace_file() {
+        let ctx = PromptContext {
+            agent_id: Some("abc".to_string()),
+            workspace_path: Some("/w".to_string()),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("/api/agents/abc/workspace/file?open=true&path=PATH"));
+        let without = build_system_prompt(&PromptContext::default());
+        assert!(!without.contains("## Sharing Files"));
     }
 
     /// The clock must stay behind the static prompt.

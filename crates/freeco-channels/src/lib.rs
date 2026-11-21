@@ -20,6 +20,7 @@ pub mod telegram;
 pub mod twitch;
 pub mod types;
 pub mod whatsapp;
+pub mod whatsapp_allowlist;
 pub mod xmpp;
 pub mod zulip;
 // Wave 3 — High-value channels

@@ -6,6 +6,11 @@
 //!
 //! # Security
 //! - SSRF check runs in Rust before navigate commands
+//! - Every request the page makes is paused over CDP (`Fetch.requestPaused`)
+//!   and failed if it targets a private, loopback, link-local or metadata
+//!   address (same `check_ssrf` as web_fetch)
+//! - `browser_run_js` expressions are screened by `js_guard`: network APIs,
+//!   dynamic code and obfuscation are refused
 //! - All page content wrapped with `wrap_external_content()` markers
 //! - Session limits: max concurrent, idle timeout, 1 per agent
 //! - No subprocess bridge, no env leakage, no Python code execution
@@ -35,6 +40,8 @@ const PAGE_LOAD_POLL_INTERVAL_MS: u64 = 200;
 const PAGE_LOAD_MAX_POLLS: u32 = 150; // 30 seconds
 #[allow(dead_code)]
 const MAX_CONTENT_CHARS: usize = 50_000;
+/// First CDP message id used by the request guard's own replies.
+const FETCH_GUARD_ID_BASE: u64 = 1 << 48;
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -106,7 +113,8 @@ impl CdpConnection {
             Arc::new(DashMap::new());
 
         let reader_pending = Arc::clone(&pending);
-        let reader_handle = tokio::spawn(Self::reader_loop(read, reader_pending));
+        let reader_write = Arc::clone(&write);
+        let reader_handle = tokio::spawn(Self::reader_loop(read, reader_pending, reader_write));
 
         Ok(Self {
             write,
@@ -120,7 +128,12 @@ impl CdpConnection {
     async fn reader_loop(
         mut read: SplitStream<WsStream>,
         pending: Arc<DashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>,
+        write: Arc<Mutex<SplitSink<WsStream, WsMessage>>>,
     ) {
+        // Ids for the guard's own Fetch.continueRequest/failRequest replies.
+        // Kept far above the ids `send` hands out; their responses match no
+        // pending entry and are dropped below.
+        let mut guard_id: u64 = FETCH_GUARD_ID_BASE;
         while let Some(msg) = read.next().await {
             let text = match msg {
                 Ok(WsMessage::Text(t)) => t.to_string(),
@@ -152,8 +165,23 @@ impl CdpConnection {
                     }
                 }
             }
-            // Events (method field, no id) are ignored for now.
-            // Future: handle Fetch.requestPaused for CDP-level SSRF.
+            // Events (method field, no id). Only Fetch.requestPaused is
+            // handled: every request the page makes is checked against the
+            // same SSRF rules as web_fetch before it leaves the browser.
+            if json.get("method").and_then(|m| m.as_str()) == Some("Fetch.requestPaused") {
+                let params = json.get("params").cloned().unwrap_or_default();
+                let id = guard_id;
+                guard_id += 1;
+                let write = Arc::clone(&write);
+                tokio::spawn(async move {
+                    let reply = fetch_guard_reply(id, &params).await;
+                    let _ = write
+                        .lock()
+                        .await
+                        .send(WsMessage::Text(reply.to_string()))
+                        .await;
+                });
+            }
         }
     }
 
@@ -213,6 +241,53 @@ impl CdpConnection {
             .cloned()
             .unwrap_or(serde_json::Value::Null))
     }
+}
+
+/// Decide what to do with a `Fetch.requestPaused` event and build the CDP
+/// command that resumes or fails the request.
+///
+/// http(s) requests to loopback, private, link-local or cloud-metadata
+/// addresses are failed with `BlockedByClient`, using `check_ssrf` (the same
+/// check `web_fetch` and `browser_navigate` use). Other schemes (data:, blob:,
+/// about:) never leave the browser and are continued.
+///
+/// Authorization headers are not stripped here: a page the agent logged into
+/// may legitimately send its own bearer token to its own origin. Agent-written
+/// requests with credentials are refused earlier, in `js_guard`.
+async fn fetch_guard_reply(cdp_id: u64, params: &serde_json::Value) -> serde_json::Value {
+    let request_id = params["requestId"].as_str().unwrap_or_default().to_string();
+    let url = params["request"]["url"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let verdict = fetch_guard_verdict(url.clone()).await;
+    match verdict {
+        Ok(()) => serde_json::json!({
+            "id": cdp_id,
+            "method": "Fetch.continueRequest",
+            "params": { "requestId": request_id },
+        }),
+        Err(reason) => {
+            warn!(url = %url, "Browser request blocked: {reason}");
+            serde_json::json!({
+                "id": cdp_id,
+                "method": "Fetch.failRequest",
+                "params": { "requestId": request_id, "errorReason": "BlockedByClient" },
+            })
+        }
+    }
+}
+
+/// `Ok` if a request to `url` may leave the browser.
+async fn fetch_guard_verdict(url: String) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Ok(());
+    }
+    // check_ssrf resolves DNS synchronously.
+    tokio::task::spawn_blocking(move || crate::web_fetch::check_ssrf(&url, &[]))
+        .await
+        .unwrap_or_else(|e| Err(format!("SSRF check failed: {e}")))
 }
 
 impl Drop for CdpConnection {
@@ -322,6 +397,20 @@ impl BrowserSession {
         // Enable required domains
         let _ = cdp.send("Page.enable", serde_json::json!({})).await;
         let _ = cdp.send("Runtime.enable", serde_json::json!({})).await;
+        // Pause every request at the request stage so the reader loop can
+        // apply the SSRF check (see `fetch_guard_reply`). WebSockets are not
+        // covered by the Fetch domain; browser_run_js refuses them instead.
+        if let Err(e) = cdp
+            .send(
+                "Fetch.enable",
+                serde_json::json!({
+                    "patterns": [{ "urlPattern": "*", "requestStage": "Request" }]
+                }),
+            )
+            .await
+        {
+            warn!("CDP Fetch.enable failed, page requests are not SSRF-checked: {e}");
+        }
 
         Ok(Self {
             process: child,
@@ -1123,6 +1212,7 @@ pub async fn tool_browser_run_js(
     let expression = input["expression"]
         .as_str()
         .ok_or("Missing 'expression' parameter")?;
+    crate::js_guard::check_run_js_expression(expression)?;
 
     let resp = mgr
         .send_command(
@@ -1397,5 +1487,76 @@ mod tests {
         let err = BrowserResponse::err("bad");
         assert!(!err.success);
         assert_eq!(err.error.unwrap(), "bad");
+    }
+
+    // ── CDP request guard ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_guard_blocks_private_and_metadata() {
+        for url in [
+            "http://127.0.0.1:4200/api/agents",
+            "http://localhost/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/admin",
+            "http://user@169.254.169.254/",
+            "HTTP://127.0.0.1/",
+        ] {
+            assert!(
+                fetch_guard_verdict(url.to_string()).await.is_err(),
+                "should block {url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_guard_passes_non_network_schemes() {
+        for url in [
+            "data:text/plain,hi",
+            "blob:https://example.com/x",
+            "about:blank",
+        ] {
+            assert!(fetch_guard_verdict(url.to_string()).await.is_ok(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_guard_reply_fails_blocked_request() {
+        let params = serde_json::json!({
+            "requestId": "interception-1",
+            "request": { "url": "http://169.254.169.254/", "headers": {} }
+        });
+        let reply = fetch_guard_reply(FETCH_GUARD_ID_BASE, &params).await;
+        assert_eq!(reply["method"], "Fetch.failRequest");
+        assert_eq!(reply["params"]["requestId"], "interception-1");
+        assert_eq!(reply["params"]["errorReason"], "BlockedByClient");
+        assert_eq!(reply["id"], FETCH_GUARD_ID_BASE);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_guard_reply_continues_data_url() {
+        let params = serde_json::json!({
+            "requestId": "interception-2",
+            "request": { "url": "data:image/png;base64,AAAA" }
+        });
+        let reply = fetch_guard_reply(7, &params).await;
+        assert_eq!(reply["method"], "Fetch.continueRequest");
+        assert_eq!(reply["params"]["requestId"], "interception-2");
+    }
+
+    // ── browser_run_js guard is applied before the browser is touched ───
+
+    #[tokio::test]
+    async fn test_run_js_refuses_fetch_before_launching_browser() {
+        let mgr = BrowserManager::new(BrowserConfig::default());
+        let input = serde_json::json!({
+            "expression": "fetch('http://127.0.0.1:4200/api/agents', {headers: {Authorization: 'Bearer x'}})"
+        });
+        let err = tool_browser_run_js(&input, &mgr, "agent-1")
+            .await
+            .unwrap_err();
+        assert!(err.contains("browser_run_js refused"), "{err}");
+        assert!(err.contains("web_fetch"), "{err}");
+        assert!(mgr.sessions.is_empty(), "no browser session may be started");
     }
 }

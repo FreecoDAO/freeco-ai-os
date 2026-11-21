@@ -223,6 +223,11 @@ const TIMEOUT_PATTERNS: &[&str] = &[
     "connection refused",
     "network error",
     "fetch failed",
+    // reqwest's wording when the connection itself fails (network down for a
+    // moment, DNS gone): it was unclassified, so neither retried nor handed
+    // to a fallback model.
+    "error sending request",
+    "dns error",
 ];
 
 // ---------------------------------------------------------------------------
@@ -643,6 +648,22 @@ mod tests {
     // -----------------------------------------------------------------------
     // Classification tests
     // -----------------------------------------------------------------------
+
+    /// reqwest's words for a connection that never happened are a timeout:
+    /// retried, and handed to a fallback model.
+    #[test]
+    fn connect_failures_classify_as_timeouts() {
+        for raw in [
+            "error sending request for url (https://api.groq.com/openai/v1/chat/completions)",
+            "dns error: failed to lookup address information",
+        ] {
+            assert_eq!(
+                classify_error(raw, None).category,
+                LlmErrorCategory::Timeout,
+                "{raw}"
+            );
+        }
+    }
 
     #[test]
     fn test_classify_rate_limit() {

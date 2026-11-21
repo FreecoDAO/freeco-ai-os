@@ -263,6 +263,69 @@ mod tests {
         assert!(!def.dashboard.metrics.is_empty());
         assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(def.agent.max_iterations, Some(80));
+        for key in [
+            "day_toolkit",
+            "max_loss_per_trade_usd",
+            "max_trades_per_day",
+            "flat_by",
+            "pdt_guard",
+            "sec_user_agent",
+        ] {
+            assert!(
+                def.settings.iter().any(|s| s.key == key),
+                "trader hand is missing the day-trader toolkit setting '{key}'"
+            );
+        }
+    }
+
+    /// The trader hand installs FreecoDAO/day-trader-skill at a pinned commit,
+    /// and that commit is written in SKILL.md's install commands. Bumping the
+    /// pin means re-reviewing the toolkit's code, so the pin must appear in
+    /// SKILL.md and the toolkit must never be installed unpinned.
+    #[test]
+    fn trader_toolkit_is_pinned() {
+        const PIN: &str = "3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd";
+        let (_, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "trader")
+            .unwrap();
+        assert!(toml_content.contains("pinned commit"));
+        assert!(
+            skill_content.contains(&format!("checkout {PIN}")),
+            "SKILL.md must check out the pinned toolkit commit"
+        );
+        assert!(skill_content.contains(&format!("tar.gz/{PIN}")));
+    }
+
+    /// The OmniRoute caretaker works through OmniRoute's MCP tools, not a shell,
+    /// and the gateway stays on loopback.
+    #[test]
+    fn omniroute_hand_uses_mcp_not_shell() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "omniroute")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.mcp_servers, vec!["omniroute".to_string()]);
+        assert!(!def.tools.iter().any(|t| t == "shell_exec"));
+        assert!(def.tools.iter().any(|t| t == "agent_send"));
+        assert!(def
+            .tools
+            .iter()
+            .any(|t| t == "mcp_omniroute_omniroute_get_health"));
+        assert!(def
+            .tools
+            .iter()
+            .filter(|t| t.starts_with("mcp_"))
+            .all(|t| t.starts_with("mcp_omniroute_omniroute_")));
+        let container = def.container.as_ref().expect("omniroute is a service hand");
+        assert_eq!(
+            container.env.get("OMNIROUTE_HOSTNAME").map(String::as_str),
+            Some("127.0.0.1")
+        );
+        // Owner-specific combo names stay out of the bundled prompt.
+        assert!(!def.agent.system_prompt.contains("freeco-cc-"));
+        assert!(!def.agent.system_prompt.contains("freeco-agent-"));
     }
 
     #[test]
@@ -520,5 +583,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The accounting hand reads the books through `accounting_api` (the
+    /// prompt says so), and its app container gets the database settings the
+    /// image's setup script and the web wizard actually read.
+    #[test]
+    fn accounting_hand_is_wired_to_its_tool_and_database() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "accounting")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert!(def.tools.iter().any(|t| t == "accounting_api"));
+        assert!(def.agent.system_prompt.contains("accounting_api"));
+        assert!(!def.tools.iter().any(|t| t == "shell_exec"));
+        let c = def
+            .container
+            .as_ref()
+            .expect("accounting is a service hand");
+        let app = c.services.iter().find(|s| s.name == "app").unwrap();
+        assert_eq!(app.env.get("DB_HOST").map(String::as_str), Some("db"));
+        assert_eq!(
+            app.env.get("DB_NAME").map(String::as_str),
+            Some("akaunting")
+        );
+        assert_eq!(
+            app.env.get("DB_DATABASE").map(String::as_str),
+            Some("akaunting")
+        );
+        assert_eq!(app.ports, vec!["8080:80".to_string()]);
+    }
+
+    /// Board task 6: the voice api's DATABASE_URL names the asyncpg dialect,
+    /// and the voice prompt points dograh's speech at the local Speaches.
+    #[test]
+    fn voice_hand_uses_asyncpg_and_local_speaches() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "voice")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        let c = def.container.as_ref().unwrap();
+        let api = c.services.iter().find(|s| s.name == "api").unwrap();
+        assert!(api
+            .env
+            .get("DATABASE_URL")
+            .is_some_and(|u| u.starts_with("postgresql+asyncpg://")));
+        assert!(def
+            .agent
+            .system_prompt
+            .contains("host.containers.internal:8010/v1"));
+        assert!(def
+            .skill_content
+            .as_deref()
+            .is_some_and(|s| s.contains("host.containers.internal:8010/v1")));
     }
 }

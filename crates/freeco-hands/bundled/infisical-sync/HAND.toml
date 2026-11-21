@@ -410,3 +410,13 @@ format = "number"
 label = "Secrets Pulled"
 memory_key = "infisical_sync_pull_count"
 format = "number"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This one needs "full": its curl calls read
+# $INFISICAL_URL and the machine identity from the environment.
+# Full runs the command through sh, so $VAR is expanded from the hand's
+# allowed env vars; shell metacharacters (; | > & $() {}) are still refused.
+[exec_policy]
+mode = "full"
+timeout_secs = 300
+no_output_timeout_secs = 120

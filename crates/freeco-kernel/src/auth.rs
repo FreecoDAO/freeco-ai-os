@@ -7,49 +7,11 @@ use dashmap::DashMap;
 use freeco_types::agent::UserId;
 use freeco_types::config::UserConfig;
 use freeco_types::error::{FreecoError, FreecoResult};
-use std::fmt;
 use tracing::info;
 
-/// User roles with hierarchical permissions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UserRole {
-    /// Read-only access — can view agent output but cannot interact.
-    Viewer = 0,
-    /// Child account — can chat with a kid-safe agent, but no config, no
-    /// spawn/kill, no billing. The basis for the Kids edition.
-    Kid = 1,
-    /// Standard user — can chat with agents.
-    User = 2,
-    /// Admin — can spawn/kill agents, install skills, view usage.
-    Admin = 3,
-    /// Owner — full access including user management and config changes.
-    Owner = 4,
-}
-
-impl fmt::Display for UserRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            UserRole::Viewer => write!(f, "viewer"),
-            UserRole::Kid => write!(f, "kid"),
-            UserRole::User => write!(f, "user"),
-            UserRole::Admin => write!(f, "admin"),
-            UserRole::Owner => write!(f, "owner"),
-        }
-    }
-}
-
-impl UserRole {
-    /// Parse a role from a string.
-    pub fn from_str_role(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "owner" => UserRole::Owner,
-            "admin" => UserRole::Admin,
-            "kid" => UserRole::Kid,
-            "viewer" => UserRole::Viewer,
-            _ => UserRole::User,
-        }
-    }
-}
+/// The role model is shared with the API's session auth; see
+/// [`freeco_types::auth::UserRole`].
+pub use freeco_types::auth::UserRole;
 
 /// Actions that can be authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,11 +32,14 @@ pub enum Action {
     ViewUsage,
     /// Manage users (create, delete, change roles).
     ManageUsers,
+    /// Any other change made through the API: agents, skills, channels,
+    /// workflows, budgets, approvals and the rest.
+    ChangeSystem,
 }
 
 impl Action {
     /// Minimum role required for this action.
-    fn required_role(&self) -> UserRole {
+    pub fn required_role(&self) -> UserRole {
         match self {
             Action::ChatWithAgent => UserRole::Kid,
             Action::ViewConfig => UserRole::User,
@@ -84,6 +49,7 @@ impl Action {
             Action::InstallSkill => UserRole::Admin,
             Action::ModifyConfig => UserRole::Owner,
             Action::ManageUsers => UserRole::Owner,
+            Action::ChangeSystem => UserRole::Admin,
         }
     }
 }
@@ -231,6 +197,7 @@ mod tests {
             api_key_hash: None,
             password_hash: None,
             enabled: false,
+            ..Default::default()
         };
         let manager = AuthManager::new(&[owner]);
         assert!(manager.identify("whatsapp", "+41790000000").is_none());
@@ -249,6 +216,7 @@ mod tests {
             api_key_hash: None,
             password_hash: None,
             enabled: true,
+            ..Default::default()
         };
         let manager = AuthManager::new(&[owner]);
         let id = manager.identify_any("+41790000000").expect("bound");

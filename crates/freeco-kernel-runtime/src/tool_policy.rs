@@ -307,6 +307,7 @@ pub const CEO_MANAGEMENT_TOOLS: &[&str] = &[
     "agent_send",
     "agent_spawn",
     "agent_activate",
+    "agent_sleep",
     "agent_set_model",
     "agent_skills_set",
     // Models and providers
@@ -331,6 +332,12 @@ pub const CEO_MANAGEMENT_TOOLS: &[&str] = &[
     "org_overview",
     "system_audit",
 ];
+
+/// Read-only tools every agent gets, whatever its manifest or tool profile
+/// lists. They report facts about the installation and change nothing, so no
+/// agent needs to be trusted with them. The owner can still take one away
+/// with the agent's tool blocklist.
+pub const ALWAYS_GRANTED_TOOLS: &[&str] = &["system_info"];
 
 /// Whether an agent with these tags holds the CEO role.
 pub fn holds_ceo_role(tags: &[String]) -> bool {

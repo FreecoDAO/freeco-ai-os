@@ -131,6 +131,7 @@ mod tests {
             api_key_hash: None,
             password_hash: None,
             enabled: true,
+            ..Default::default()
         }])
     }
 

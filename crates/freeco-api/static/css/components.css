@@ -574,7 +574,11 @@ tr:hover td { background: var(--surface2); }
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  overflow: hidden;
+  /* A long list ran off the bottom of the screen with no way to reach its
+     end: the box had no height limit and hid its overflow. */
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .session-dropdown-header {
   display: flex;
@@ -582,6 +586,11 @@ tr:hover td { background: var(--surface2); }
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
+  /* Stays in view, with "+ New", while the list scrolls. */
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
 }
 .session-item {
   display: flex;
@@ -3722,8 +3731,8 @@ html.widget-mode .freeco-x { display: none !important; }
   background: #c1121f; color: #fff; border: 3px solid #fff;
   font-weight: 800; font-size: 12px; letter-spacing: .5px;
   display: flex; align-items: center; justify-content: center;
-  /* Octagon, like a real STOP sign — recognisable at a glance. */
-  clip-path: polygon(30% 0,70% 0,100% 30%,100% 70%,70% 100%,30% 100%,0 70%,0 30%);
+  /* Round, as the owner chose; the red and the word keep it recognisable. */
+  border-radius: 50%;
   box-shadow: 0 8px 24px rgba(0,0,0,.3);
   transition: transform .15s, background .15s;
 }
@@ -3798,7 +3807,9 @@ html.widget-mode .freeco-x { display: none !important; }
   padding: 8px; border-bottom: 1px solid var(--border);
 }
 .freeco-history-foot { border-bottom: none; border-top: 1px solid var(--border); }
-.freeco-history-list { overflow-y: auto; flex: 1; }
+/* min-height: 0 lets the list shrink inside the panel and scroll; without it
+   a flex child keeps its full height and the end of the list is cut off. */
+.freeco-history-list { overflow-y: auto; flex: 1; min-height: 0; }
 .freeco-history-item {
   display: flex; align-items: center; gap: 4px;
   padding: 2px 6px; border-bottom: 1px solid var(--border-subtle, transparent);
@@ -3991,6 +4002,31 @@ html.widget-mode .freeco-x { display: none !important; }
 .teams-task-wait { font-size: 11px; color: var(--warning); margin-top: 4px; }
 .teams-task-result { font-size: 12px; color: var(--text-secondary); margin-top: 6px; white-space: pre-wrap; max-height: 6em; overflow: hidden; }
 
+/* Companies, tabs, the four board columns. Theme variables only, so the
+   day and night designs both hold. */
+.teams-companies { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.teams-company-select { width: auto; min-width: 180px; max-width: 280px; font-size: 13px; }
+.teams-room-people { font-size: 12px; color: var(--text-dim); }
+.teams-detail-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.teams-detail-head .teams-detail-title { margin: 0; }
+.teams-access { font-size: 11px; color: var(--text-dim); padding: 2px 8px; border-radius: 999px; background: var(--fill); }
+.teams-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--radius-md); background: var(--fill); margin-bottom: 14px; }
+.teams-tab { border: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px; padding: 5px 14px; border-radius: var(--radius-sm); cursor: pointer; }
+.teams-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.teams-tab-on { background: var(--seg-on); color: var(--text); box-shadow: var(--shadow-sm); }
+.teams-role-badge { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--surface2); color: var(--text-secondary); }
+.teams-role-lead { background: var(--accent-soft); color: var(--accent-ink); }
+.teams-role-viewer { background: var(--fill); color: var(--text-dim); }
+.teams-new-task { margin-bottom: 14px; max-width: 560px; }
+.teams-col-todo .teams-col-title { color: var(--accent-ink); }
+.teams-col-review .teams-col-title { color: var(--info); }
+.teams-col-done .teams-col-title { color: var(--success); }
+.teams-col-drop { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.teams-task[draggable="true"] { cursor: grab; }
+.teams-task-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; white-space: pre-wrap; max-height: 4.5em; overflow: hidden; }
+.teams-task-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.teams-task-actions .form-input { flex: 1; min-width: 90px; font-size: 12px; padding: 3px 6px; }
+
 .teams-handoffs ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .teams-handoff { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--border-subtle); }
 .teams-handoff-status { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
@@ -4086,3 +4122,162 @@ html.widget-mode .freeco-x { display: none !important; }
 .live-feed-rows { max-height: 360px; overflow: auto; font-family: var(--font-mono); font-size: 12px; }
 .live-feed-row { display: grid; grid-template-columns: 72px 130px 1fr; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); }
 .live-feed-failed { color: var(--error); }
+
+/* ---- Starnet ----------------------------------------------------------
+   The pixel-art station (js/pages/starnet.js). The canvas reads these
+   variables, so day and night follow the rest of the dashboard; state
+   colours are the Live page's --live-* set, and the legend and the line
+   under every agent's name say each state in words as well. */
+:root, [data-theme="light"] {
+  --sn-space: #DCE7E2;
+  --sn-star: transparent;
+  --sn-floor: #F7FAF8;
+  --sn-grid: rgba(16, 40, 28, 0.06);
+  --sn-wall: #E3EBE7;
+  --sn-trim: var(--accent);
+  --sn-edge: var(--border-strong);
+  --sn-bubble: #FFFFFF;
+  --sn-bubble-ink: var(--text);
+}
+[data-theme="dark"] {
+  --sn-space: #070B10;
+  --sn-star: rgba(220, 235, 255, 0.7);
+  --sn-floor: #141C19;
+  --sn-grid: rgba(255, 255, 255, 0.04);
+  --sn-wall: #1C2622;
+  --sn-trim: var(--accent);
+  --sn-edge: #2C3A34;
+  --sn-bubble: #0F1513;
+  --sn-bubble-ink: var(--text);
+}
+.starnet-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 12px; font-size: 12px; color: var(--text-dim); }
+.starnet-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.starnet-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.starnet-wrap {
+  width: 100%; overflow-x: auto; border-radius: var(--radius-lg);
+  background: var(--sn-space); box-shadow: var(--card-shadow);
+}
+.starnet-canvas { display: block; image-rendering: pixelated; }
+.starnet-credit { margin-top: 10px; }
+/* The agent list is for screen readers, and shows itself when a keyboard
+   user tabs into it, so a focused button is never invisible. */
+.starnet-list:not(:focus-within) {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.starnet-list:focus-within { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.starnet-list button {
+  padding: 4px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+
+/* ── Chamber: every conversation in one window ──────────────────────────── */
+/* Two panes inside the page's scroll area, so the message thread scrolls on
+   its own and the reply box stays put. Colours are theme variables only. */
+.chamber-page { overflow: hidden; display: flex; flex-direction: column; }
+.chamber {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 16px;
+}
+.chamber-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.chamber-filters { display: flex; flex-direction: column; gap: 8px; }
+.chamber-unread-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-dim);
+}
+.chamber-items {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  overflow-y: auto; flex: 1; min-height: 0;
+}
+.chamber-item {
+  width: 100%;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+}
+.chamber-item:hover { background: var(--bg-hover); }
+.chamber-item-selected { background: var(--accent-subtle); border-color: var(--border); }
+.chamber-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.chamber-item-top { display: flex; justify-content: space-between; gap: 8px; }
+.chamber-item-title {
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chamber-item-when { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+.chamber-item-agent { font-size: 11px; color: var(--text-dim); }
+.chamber-item-preview {
+  font-size: 12px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  white-space: normal; word-break: break-word;
+}
+.chamber-item-unread .chamber-item-title { font-weight: 700; }
+.chamber-tag { text-transform: uppercase; letter-spacing: 0.02em; }
+.chamber-tag-agent { background: var(--accent-subtle); color: var(--accent-light); }
+.chamber-tag-whatsapp { background: var(--success-subtle); color: var(--success); }
+.chamber-tag-telegram { background: var(--info-subtle); color: var(--info); }
+.chamber-tag-email { background: var(--warning-subtle); color: var(--warning); }
+
+.chamber-thread {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.chamber-thread-inner { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.chamber-thread-empty { margin: auto; }
+.chamber-thread-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.chamber-thread-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.chamber-thread-sub { display: flex; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.chamber-messages {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 18px;
+}
+.chamber-msg { max-width: 78%; }
+.chamber-msg-in { align-self: flex-start; }
+.chamber-msg-out { align-self: flex-end; text-align: left; }
+.chamber-msg-who { font-size: 11px; color: var(--text-dim); margin-bottom: 3px; }
+.chamber-msg-text {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--agent-bg);
+  color: var(--text);
+  font-size: 14px; line-height: 1.5;
+  /* Message text is plain text: keep newlines, wrap anything long. */
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chamber-msg-out .chamber-msg-text { background: var(--user-bg); }
+.chamber-reply {
+  display: flex; align-items: flex-end; gap: 10px;
+  padding: 12px 18px; border-top: 1px solid var(--border);
+}
+.chamber-reply textarea { flex: 1; resize: vertical; min-height: 44px; max-height: 200px; }
+.chamber-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 13px; }
+
+@media (max-width: 900px) {
+  .chamber { grid-template-columns: 1fr; overflow-y: auto; }
+  .chamber-list { max-height: 45vh; }
+  .chamber-thread { min-height: 50vh; }
+}

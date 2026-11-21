@@ -126,6 +126,7 @@ FreEco tool, write "cannot check from inside" and move on.
 | Feature | Status | Who | How to check |
 |---|---|---|---|
 | Company, project and team records (`/api/org/*`, dashboard tab) | ✅ v0.9.2 | Owner | — |
+| Starnet page: teams as rooms, agents at desks, animated by state, task in a speech bubble, click opens the chat (`GET /api/starnet/state`) | 🟨 | Owner | Open Starnet, send an agent a task: its desk glows and it gestures while a tool runs; approve-required tools show a red "!"; switch day/night and the station follows. |
 | Task board tools: `task_post`, `task_claim`, `task_complete`, `task_list` | ✅ `task_list` 2026-09-30 (CEO) | CEO | `task_list`. |
 | Schedules: `schedule_create`, `schedule_list`, `schedule_delete` | ✅ `schedule_list` 2026-09-30 (CEO) | CEO | `schedule_list`. |
 | Management rhythm, team fields, authority ladder (Yanovsky) | 📋 | — | See ROADMAP. |

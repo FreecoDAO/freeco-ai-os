@@ -1,9 +1,9 @@
 ---
 name: trader-hand-skill
-version: "1.0.0"
-description: "Expert knowledge for autonomous market intelligence and trading — technical analysis, risk management, Alpaca API, financial data sources"
+version: "1.1.0"
+description: "Expert knowledge for autonomous market intelligence and trading — technical analysis, risk management, Alpaca API, financial data sources, and the day-trader toolkit (scanner, entry, exit, time machine, sizing, risk, tickets, alerts, earnings, Congress trades)"
 author: Freeco
-tags: [trading, finance, stocks, crypto, technical-analysis, risk-management]
+tags: [trading, finance, stocks, crypto, technical-analysis, risk-management, day-trading]
 tools: [shell_exec, file_read, file_write, web_fetch, web_search, memory_store]
 runtime: prompt_only
 ---
@@ -935,3 +935,98 @@ PRE-TRADE CHECKLIST
 ```
 
 Store trade journals using `memory_store` for tracking and calibration review.
+
+---
+
+## 12. Day-Trader Toolkit Reference (FreecoDAO/day-trader-skill)
+
+Eleven stdlib-only Python 3.8+ tools for US-stock day trading, vendored from
+FreecoDAO/day-trader-skill (MIT, upstream Jakeschincariol/day-trader-skill).
+Pinned commit: `3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd`. Nothing to pip
+install. Every tool reads public data only (Yahoo chart JSON, Stooq, Nasdaq
+Trader symbol lists, SEC EDGAR, House Clerk disclosures) and writes JSON into a
+`trader/` folder in the current directory. **No tool here places an order.**
+
+### Install (once per workspace)
+
+```bash
+git clone https://github.com/FreecoDAO/day-trader-skill day-trader-skill
+git -C day-trader-skill checkout 3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd
+# No git? Download the same commit as a tarball:
+# curl -sL https://codeload.github.com/FreecoDAO/day-trader-skill/tar.gz/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd | tar xz
+# mv day-trader-skill-3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd day-trader-skill
+mkdir -p trader
+```
+
+Below, `DT=day-trader-skill` and `PY` is `python3` (or `python` on Windows).
+Run every command from the folder that holds `trader/`.
+
+### The rules file: `trader/config.json`
+
+Every tool reads its limits from here. Build it from the User Configuration
+section and rewrite it whenever a setting changes:
+
+| config.json key | Source |
+|---|---|
+| `budget` | Initial Capital |
+| `max_loss_per_trade_usd` | Max Loss Per Trade (USD) |
+| `max_daily_loss_usd` | Max Daily Loss % x Initial Capital |
+| `max_trades_per_day` | Max Day Trades Per Day |
+| `flat_by` | Flat-By Time |
+| `pdt_guard` | PDT Guard |
+| `sec_user_agent` | SEC User-Agent |
+| `paper` | `false` only when Trading Mode is `live`, otherwise `true` |
+| `max_position_pct` | `10` (the hand's single-position cap) |
+| `cash_buffer_pct` | `20` (the hand's cash reserve) |
+| `min_reward_risk` | `1.5` (the hand's minimum R:R) |
+
+Keep the other keys at the example defaults (`$DT/trader-budget/config.example.json`):
+`no_entries_before` 09:45, `no_entries_after` 15:30, `require_stop` true,
+`allow_options`/`allow_margin`/`allow_short` false, `broker` "alpaca".
+
+### The pipeline: each tool reads what the previous one wrote
+
+```
+scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker
+  watchlist.json -> entry.json -> plan.json -> timemachine.json -> orders.json -> state/risk.json -> state/broker.json
+alerts (stop / target / flat-by) and analyst / pelosi run alongside
+```
+
+| # | Tool | Command | Writes |
+|---|------|---------|--------|
+| 1 | Symbol universe (weekly) | `$PY $DT/trader-scanner/scan.py universe` | `trader/universe.txt` |
+| 2 | Pre-market scan | `$PY $DT/trader-scanner/scan.py daily` (or `--symbols SPY,AAPL` for the watchlist only) | `trader/watchlist.json` |
+| 3 | Opening-range breakouts | `$PY $DT/trader-scanner/scan.py orb --watchlist trader/watchlist.json` | `trader/watchlist.json` |
+| 4 | News + 8-Ks | `$PY $DT/trader-news/news.py --user-agent "<SEC User-Agent>"` | `trader/state/news.json` |
+| 5 | Entry signal | `$PY $DT/trader-entry/entry.py check TSLA --write` (or `watchlist`) | `trader/entry.json` |
+| 6 | Stop + target | `$PY $DT/trader-exit/exit.py plan --write` (default stop: opening-range midpoint, target 2R) | `trader/plan.json` |
+| 7 | 10,000 replays | `$PY $DT/trader-timemachine/timemachine.py run --write` | `trader/timemachine.json` |
+| 8 | Size the order | `$PY $DT/trader-budget/size.py --limit --write` | `trader/orders.json` |
+| 9 | Risk check | `$PY $DT/trader-risk/check.py` | PASS / BLOCK per order, recorded in `trader/state/risk.json` |
+| 10 | Ticket | `$PY $DT/trader-broker/ticket.py show` | plain ticket + Alpaca order JSON |
+| 11 | Record the user's yes | `$PY $DT/trader-broker/ticket.py approve --index 0 --reply "<reply, word for word>"` | `trader/state/broker.json` |
+| 12 | Record a fill | `$PY $DT/trader-broker/ticket.py fill --symbol TSLA --side buy --qty 10 --price 251.20` | `trader/portfolio.json` |
+| 13 | Exit by close | `$PY $DT/trader-broker/ticket.py flatten --symbol TSLA` | sell ticket in `trader/orders.json` |
+| 14 | Alerts from the plan | `$PY $DT/trader-alerts/alerts.py add --from-plan` then `alerts.py check` | `trader/prices.json` |
+| 15 | Is NYSE open? | `$PY $DT/trader-alerts/alerts.py clock` (knows 2026-2027 holidays and early closes) | — |
+| 16 | Earnings (SEC XBRL) | `$PY $DT/trader-analyst/facts.py TSLA --user-agent "<SEC User-Agent>"` | report |
+| 17 | Congress trades | `$PY $DT/trader-pelosi/ptr.py new --tickers TSLA NVDA` | new PTR filings |
+
+Add `--json` to any command for machine-readable output. Add `--now "2026-10-19 10:15"`
+to replay a past moment. Run `--help` on any tool or subcommand for every flag.
+
+### How to read the results
+
+- **Entry**: `waiting` (with the distance to the trigger), `triggered` (time and price), `expired`, or `not open yet`. Only `triggered` moves on to the exit planner.
+- **Exit**: refuses a stop at or above the entry, a target at or below it, or a stop too tight to survive the spread. A refusal means no trade.
+- **Time Machine**: target-first %, stop-first %, neither-by-close %, average R, and a verdict. If stop-first ≥ target-first, or the average R ≤ 0, treat it as no edge and HOLD.
+- **Budget**: whole shares only. It names the limit that set the size. A stop too far away for the max loss is a refusal, not a smaller order.
+- **Risk**: `BLOCK` is final. Never edit `orders.json` or `config.json` to turn a BLOCK into a PASS. Exits are never blocked by daily limits.
+- **Broker**: `ticket.py show` only shows orders that passed risk. The `order` JSON matches Alpaca's bracket order shape (see Section 4), so live execution posts that body unchanged.
+
+### Limits
+
+- Long side only. US-listed stocks and ETFs. No options, short sales, margin or crypto.
+- The data is free and delayed. Check prices against the broker before acting.
+- FINRA dropped the $25,000 pattern-day-trader minimum on June 4, 2026 (Regulatory Notice 26-10), but brokers can phase it in until October 20, 2027. If the broker still applies the old rule, turn on PDT Guard.
+- Day-trading gains are short-term gains, and frequent trading makes wash sales likely. Nothing here is tax advice.
