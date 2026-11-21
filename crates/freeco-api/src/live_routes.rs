@@ -7,6 +7,7 @@
 //!   agents' own tools and MCP, so a task made with "New task" could be
 //!   created from the dashboard but never seen there again.
 
+use crate::middleware::Caller;
 use crate::routes::AppState;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -53,7 +54,10 @@ fn activity_row(
 }
 
 /// GET /api/activity — every agent's live state.
-pub async fn activity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn activity(State(state): State<Arc<AppState>>, caller: Caller) -> impl IntoResponse {
+    // Agents the caller may not see are dropped from the feed (owner/admin
+    // see everyone), matching the Chamber's rule.
+    let access = crate::access::Access::resolve(&state.kernel, &caller);
     let now_ms = chrono::Utc::now().timestamp_millis();
     let seen: HashMap<String, AgentActivity> = state
         .kernel
@@ -87,6 +91,18 @@ pub async fn activity(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             .unwrap_or("")
             .cmp(b["name"].as_str().unwrap_or(""))
     });
+    // Hidden agents are dropped, not blanked (Chamber's rule).
+    let visible = access.is_admin();
+    let agents: Vec<serde_json::Value> = agents
+        .into_iter()
+        .filter(|row| {
+            visible
+                || access.can_see_agent(
+                    row["agent_id"].as_str().unwrap_or_default(),
+                    row["agent_name"].as_str().unwrap_or_default(),
+                )
+        })
+        .collect();
     Json(serde_json::json!({ "now_ms": now_ms, "agents": agents }))
 }
 
@@ -244,7 +260,14 @@ pub(crate) fn starnet_snapshot(
 ///
 /// Teams and tasks fail soft: the desks still show, and `degraded` says
 /// which part is missing, so a broken task table does not blank the view.
-pub async fn starnet_state(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn starnet_state(
+    State(state): State<Arc<AppState>>,
+    caller: Caller,
+) -> impl IntoResponse {
+    // The pixel-art stage shows every agent: restrict it to those who may
+    // see them all, exactly like the activity page (kid/user with grants
+    // see the scoped activity feed instead).
+    let access = crate::access::Access::resolve(&state.kernel, &caller);
     let now_ms = chrono::Utc::now().timestamp_millis();
     let seen: HashMap<String, AgentActivity> = state
         .kernel
@@ -287,7 +310,19 @@ pub async fn starnet_state(State(state): State<Arc<AppState>>) -> impl IntoRespo
             Vec::new()
         }
     };
-    let mut body = starnet_snapshot(&agents, &seen, &waiting, &teams, &tasks, now_ms);
+    // Owner/admin see every desk; anyone else only their own agents'
+    // desks. Teams whose every member is hidden are dropped too.
+    let visible = access.is_admin() || {
+        let any = agents.is_empty();
+        any
+    };
+    let filtered_agents: Vec<StarnetAgent> = agents
+        .into_iter()
+        .filter(|a| visible || access.can_see_agent(&a.agent_id, &a.name))
+        .collect();
+    let hidden = agents.len() - filtered_agents.len();
+    let mut body = starnet_snapshot(&filtered_agents, &seen, &waiting, &teams, &tasks, now_ms);
+    body["hidden_agents"] = serde_json::json!(hidden);
     body["degraded"] = serde_json::json!(degraded);
     Json(body)
 }
@@ -301,9 +336,15 @@ pub struct ChatsQuery {
 /// GET /api/org/chats?limit=60 — newest conversations of every agent.
 pub async fn recent_chats(
     State(state): State<Arc<AppState>>,
+    caller: Caller,
     Query(q): Query<ChatsQuery>,
 ) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(60).clamp(1, 500);
+    // Owner/admin see every conversation; anyone else only the agents their
+    // grants and teams allow (same rule as the Chamber: hidden = gone, to
+    // avoid leaking existence).
+    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    let mut hidden = 0usize;
     match state.kernel.memory.org().recent_sessions(limit) {
         Ok(mut rows) => {
             for row in &mut rows {
@@ -323,7 +364,21 @@ pub async fn recent_chats(
                 row["busy"] = serde_json::Value::Bool(busy);
                 row["agent_name"] = serde_json::json!(agent_name);
             }
-            (StatusCode::OK, Json(serde_json::json!({ "chats": rows })))
+            // Filter after enrichment: keep only rows whose agent the caller
+            // may see (owner/admin see all).
+            rows.retain(|row| {
+                let id = row["agent_id"].as_str().unwrap_or_default();
+                let name = row["agent_name"].as_str().unwrap_or_default();
+                let allowed = access.can_see_agent(id, name);
+                if !allowed {
+                    hidden += 1;
+                }
+                allowed
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "chats": rows, "hidden": hidden })),
+            )
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -341,8 +396,12 @@ pub struct TasksQuery {
 /// GET /api/tasks?status=pending|in_progress|completed — the task board.
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
+    caller: Caller,
     Query(q): Query<TasksQuery>,
 ) -> impl IntoResponse {
+    // Same access rule as recent_chats: tasks of agents the caller cannot
+    // see are dropped, not shown.
+    let access = crate::access::Access::resolve(&state.kernel, &caller);
     let status = q.status.as_deref().filter(|s| !s.is_empty());
     if let Some(s) = status {
         if !["pending", "in_progress", "completed"].contains(&s) {
@@ -365,6 +424,12 @@ pub async fn list_tasks(
                     .map(|e| e.name);
                 t["assigned_name"] = serde_json::json!(name);
             }
+            // Tasks of hidden agents are dropped, not shown.
+            tasks.retain(|t| {
+                let id = t["assigned_to"].as_str().unwrap_or_default();
+                let name = t["assigned_name"].as_str().unwrap_or("");
+                access.can_see_agent(id, name)
+            });
             (StatusCode::OK, Json(serde_json::json!({ "tasks": tasks })))
         }
         Err(e) => (
