@@ -1,10 +1,10 @@
 // On-demand KaTeX loader and renderer for chat messages.
 
 var KATEX_VERSION = '0.16.21';
-var KATEX_CSS_URL = 'https://cdn.jsdelivr.net/npm/katex@' + KATEX_VERSION + '/dist/katex.min.css';
-var KATEX_JS_URL = 'https://cdn.jsdelivr.net/npm/katex@' + KATEX_VERSION + '/dist/katex.min.js';
+var KATEX_CSS_URL = '/vendor-katex.min.css';
+var KATEX_JS_URL = '/vendor-katex.min.js';
 var KATEX_AUTORENDER_URL =
-  'https://cdn.jsdelivr.net/npm/katex@' + KATEX_VERSION + '/dist/contrib/auto-render.min.js';
+  '/vendor-auto-render.min.js';
 var katexLoadPromise = null;
 
 function hasLatexDelimiters(text) {

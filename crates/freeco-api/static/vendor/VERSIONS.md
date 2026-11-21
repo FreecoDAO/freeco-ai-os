@@ -21,3 +21,5 @@ sha256sum alpine.min.js chart.umd.min.js highlight.min.js marked.min.js github-d
 
 Check each new version against the library's security advisories before
 replacing it: nothing does that automatically for these files.
+- [DOMPurify 3.2.7](https://github.com/cure53/DOMPurify) — Apache-2.0/MPL-2.0, sanitized HTML for markdown rendering. File: dompurify.min.js (sha256 40cff492b54353a55cdf9ffb369786539ffb7d54d25f97dd4a1e8975b309c35d).
+- [KaTeX 0.16.21](https://github.com/KaTeX/KaTeX) — MIT, LaTeX math rendering. Files: katex.min.js, auto-render.min.js (sha256s in SHA256SUMS). Now bundled locally instead of loading from the CDN at runtime.

@@ -1839,6 +1839,11 @@ function freecoAssistant() {
       try {
         if (window.marked) {
           var html = window.marked.parse(String(s));
+          if (window.DOMPurify) {
+            html = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+          } else {
+            html = '<p>[markdown rendering unavailable: sanitizer not loaded]</p>';
+          }
           return html;
         }
       } catch (e) { /* fall through */ }

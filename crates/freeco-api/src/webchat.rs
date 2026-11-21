@@ -116,6 +116,41 @@ const FONT_FILES: &[(&str, &[u8])] = &[
 const FONTS_CSS: &str = include_str!("../static/fonts/fonts.css");
 
 /// GET /fonts/{name} — serve one of the compiled-in font files.
+/// The three KaTeX files, compiled in and served same-origin: the old
+/// loader pulled them from cdn.jsdelivr.net at runtime, which needed a
+/// blanket script host in the CSP. Served read-only, exact-name matches.
+pub async fn vendor_file(axum::extract::Path(name): axum::extract::Path<String>) -> axum::response::Response {
+    let (ctype, body): (&str, &'static [u8]) = match name.as_str() {
+        "katex.min.js" => (
+            "application/javascript; charset=utf-8",
+            include_bytes!("../static/vendor/katex.min.js"),
+        ),
+        "auto-render.min.js" => (
+            "application/javascript; charset=utf-8",
+            include_bytes!("../static/vendor/auto-render.min.js"),
+        ),
+        "katex.min.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../static/vendor/katex.min.css"),
+        ),
+        _ => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                "not found",
+            )
+                .into_response()
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 pub async fn font_file(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> axum::response::Response {
@@ -366,7 +401,7 @@ pub async fn webchat_page() -> impl IntoResponse {
     let html = WEBCHAT_HTML.replace(NONCE_PLACEHOLDER, &nonce);
     let csp = format!(
         "default-src 'self'; \
-         script-src 'self' 'nonce-{nonce}' 'unsafe-eval' https://cdn.jsdelivr.net; \
+         script-src 'self' 'nonce-{nonce}'; \
          style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
          img-src 'self' data: blob:; \
          connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:* https://cdn.jsdelivr.net https://api.github.com; \
@@ -412,7 +447,9 @@ const WEBCHAT_HTML: &str = concat!(
     // Vendor libs: marked + highlight first (used by app.js), then Chart.js
     "<script nonce=\"__NONCE__\">\n",
     include_str!("../static/vendor/marked.min.js"),
-    "\n</script>\n",
+        "\n",
+    include_str!("../static/vendor/dompurify.min.js"),
+"\n</script>\n",
     "<script nonce=\"__NONCE__\">\n",
     include_str!("../static/vendor/highlight.min.js"),
     "\n</script>\n",

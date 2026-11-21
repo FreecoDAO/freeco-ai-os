@@ -75,6 +75,14 @@ function renderMarkdown(text) {
     });
 
     var html = marked.parse(protected_);
+    // Sanitize before any x-html/innerHTML sink: agent output is untrusted
+    // and a prompt-injected reply must not become script in the dashboard.
+    if (window.DOMPurify) {
+      html = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    } else {
+      // Never ship raw HTML downstream if the sanitizer did not load.
+      html = '<p>[markdown rendering unavailable: sanitizer not loaded]</p>';
+    }
     // Restore LaTeX blocks
     for (var i = 0; i < latexBlocks.length; i++) {
       html = html.replace('\x00LATEX' + i + '\x00', latexBlocks[i]);
