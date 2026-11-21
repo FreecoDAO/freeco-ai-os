@@ -345,11 +345,20 @@ pub async fn list_tasks(
 ) -> impl IntoResponse {
     let status = q.status.as_deref().filter(|s| !s.is_empty());
     if let Some(s) = status {
-        if !["pending", "in_progress", "completed"].contains(&s) {
+        if ![
+            "pending",
+            "in_progress",
+            "review",
+            "completed",
+            "failed",
+            "interrupted",
+        ]
+        .contains(&s)
+        {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": "status must be pending, in_progress or completed"
+                    "error": "status must be pending, in_progress, review, completed, failed or interrupted"
                 })),
             );
         }
