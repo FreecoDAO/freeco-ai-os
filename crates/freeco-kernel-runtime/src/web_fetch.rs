@@ -303,17 +303,22 @@ pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<(), Stri
 
 /// Returns true if an IP is a cloud metadata endpoint address.
 fn is_metadata_ip(ip: &IpAddr) -> bool {
+    // `::ffff:a.b.c.d` (IPv4 written as IPv6) must hit the same rule, and
+    // AWS's IPv6 metadata endpoint (fd00:ec2::25) is in unique-local space,
+    // which the private-IP rule would allow through on its own.
+    let mapped = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped(),
+        IpAddr::V4(_) => None,
+    };
+    if let Some(v4) = mapped {
+        return is_metadata_ip(&IpAddr::V4(v4));
+    }
     match ip {
         IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 169.254.169.254 (AWS/GCP/Azure IMDS)
-            octets == [169, 254, 169, 254]
-            // 100.100.100.200 (Alibaba Cloud IMDS)
-            || octets == [100, 100, 100, 200]
-            // 192.0.0.192 (Azure IMDS alternative)
-            || octets == [192, 0, 0, 192]
+            let o = v4.octets();
+            o == [169, 254, 169, 254] || o == [100, 100, 100, 200] || o == [192, 0, 0, 192]
         }
-        _ => false,
+        IpAddr::V6(v6) => v6.segments() == [0xfd00, 0x00ec, 0, 0, 0, 0, 0, 0x25],
     }
 }
 
@@ -397,8 +402,10 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     // `::ffff:a.b.c.d` is IPv4 in IPv6 syntax; both checkers must see the
     // same address, or `http://[::ffff:127.0.0.1]:4200/` walks past the
     // loopback rule.
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return is_private_ip(&IpAddr::V4(v4));
+    if let IpAddr::V6(v6) = ip {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return is_private_ip(&IpAddr::V4(v4));
+        }
     }
     match ip {
         IpAddr::V4(v4) => {

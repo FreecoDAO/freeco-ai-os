@@ -2636,19 +2636,21 @@ async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, Stri
             return Err(format!("Response too large: {len} bytes (max 10MB)"));
         }
     }
-    // `take(n)` caps the body stream itself: a chunked response has no
-    // Content-Length, so the header check above never fires for it. One
-    // extra byte is allowed so we can tell "exactly 10MB" from "over".
-    let mut resp = resp.take(10 * 1024 * 1024 + 1);
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
-    if body.len() > 10 * 1024 * 1024 {
-        return Err(
-            "Response too large: over 10MB streamed (chunked, no Content-Length)".to_string(),
-        );
+    // A chunked response sends no Content-Length, so the header check above
+    // never fires for it. `chunk()` is capped with a running total instead
+    // of trusting headers: one extra chunk past 10MB fails the request.
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut resp = resp;
+    while let Some(chunk) = resp.chunk().await.transpose() {
+        let chunk = chunk.map_err(|e| format!("Failed to read response body: {e}"))?;
+        if bytes.len() + chunk.len() > 10 * 1024 * 1024 {
+            return Err(
+                "Response too large: over 10MB streamed (chunked, no Content-Length)".to_string(),
+            );
+        }
+        bytes.extend_from_slice(&chunk);
     }
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     let max_len = 50_000;
     let truncated = if body.len() > max_len {
         format!(

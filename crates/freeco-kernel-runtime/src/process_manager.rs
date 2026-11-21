@@ -240,10 +240,12 @@ impl ProcessManager {
     /// List all processes for an agent.
     /// Refuse when `process_id` was not started by `agent_id`.
     async fn require_owner(&self, agent_id: &str, process_id: &str) -> Result<(), String> {
+        // DashMap key IS the ProcessId (a String); the agent that owns it
+        // lives in the entry value.
         let owner_ok = self
             .processes
             .iter()
-            .any(|e| e.key().id == process_id && e.value().agent_id == agent_id);
+            .any(|e| e.key() == process_id && e.value().agent_id == agent_id);
         if owner_ok {
             Ok(())
         } else {
@@ -280,8 +282,13 @@ impl ProcessManager {
             .collect();
 
         for id in to_remove {
-            warn!(process_id = %id, "Cleaning up stale process");
-            let _ = self.kill(&id).await;
+            // Take the owner from the entry before removal, so the ownership
+            // check still applies on the cleanup path.
+            let owner = self.processes.get(&id).map(|e| e.agent_id.clone());
+            warn!(process_id = %id, owner = owner.as_deref().unwrap_or("?"), "Cleaning up stale process");
+            if let Some(owner) = owner {
+                let _ = self.kill(&owner, &id).await;
+            }
         }
     }
 

@@ -2304,6 +2304,7 @@ dependencies = [
  "freeco-migrate",
  "freeco-skills",
  "freeco-types",
+ "libc",
  "ratatui",
  "reqwest 0.12.28",
  "serde",
