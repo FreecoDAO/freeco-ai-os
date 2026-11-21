@@ -6416,6 +6416,18 @@ impl FreecoKernel {
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     pub fn start_background_agents(self: &Arc<Self>) {
+        // Hand-offs run inside the daemon, so any still marked in progress
+        // lost their run when it last stopped. Here and not at boot: a CLI
+        // that boots a kernel beside a running daemon must not touch the
+        // daemon's live hand-offs.
+        match self.memory.task_interrupt_handoffs() {
+            Ok(0) => {}
+            Ok(n) => warn!(
+                "{n} hand-off(s) were still running when the daemon stopped; marked interrupted"
+            ),
+            Err(e) => warn!("Could not check for interrupted hand-offs: {e}"),
+        }
+
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
         let saved_hands = freeco_hands::registry::HandRegistry::load_state_with_pause(&state_path);
@@ -10134,6 +10146,7 @@ impl KernelHandle for FreecoKernel {
 
         // Filed where the asking conversation is filed, so the project page
         // shows the lead's chat and every task it handed out together.
+        let mut team_for_card: Option<String> = None;
         if let Some(parent) = current_conversation() {
             let org = self.memory.org();
             if let Ok(Some((project_id, team_id))) = org.session_scope(&parent.0.to_string()) {
@@ -10144,8 +10157,34 @@ impl KernelHandle for FreecoKernel {
                         team_id.as_deref(),
                     );
                 }
+                team_for_card = team_id;
             }
         }
+
+        // A card on the task queue for as long as the task runs, so it shows
+        // on the board and a restart mid-run leaves a record of it. The
+        // hand-off goes ahead without one if it cannot be written.
+        let card = match self
+            .memory
+            .task_start_handoff(
+                title,
+                task,
+                &target_id.to_string(),
+                &caller
+                    .as_ref()
+                    .map(|c| c.id.to_string())
+                    .unwrap_or_default(),
+                team_for_card.as_deref(),
+                &session.id.0.to_string(),
+            )
+            .await
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
+                warn!(agent = %target_id, "Could not record the hand-off on the task queue: {e}");
+                None
+            }
+        };
 
         let prompt = format!(
             "{caller_name} handed you this task. It has a conversation of its own, and \
@@ -10179,6 +10218,22 @@ impl KernelHandle for FreecoKernel {
             })
             .await;
         self.finish_handoff(&handoff_id, result.is_ok(), None);
+        if let Some(card) = &card {
+            // The reason is stored as its kind only, as in the audit trail:
+            // the full text can quote a provider's response or a key.
+            let failure = result
+                .as_ref()
+                .err()
+                .map(|e| crate::audit_trail::failure_kind(&e.to_string()))
+                .unwrap_or_default();
+            let outcome = match &result {
+                Ok(r) => Ok(r.response.as_str()),
+                Err(_) => Err(failure.as_str()),
+            };
+            if let Err(e) = self.memory.task_finish_handoff(card, outcome).await {
+                warn!(card = %card, "Could not close the hand-off's card: {e}");
+            }
+        }
         // A worker sleeps once its task is done; the next task, or a message
         // to it, wakes it with its conversations intact.
         if is_worker(&target.manifest) && !self.is_busy(target_id) {
@@ -11565,29 +11620,62 @@ impl freeco_wire::peer::PeerHandle for FreecoKernel {
             .collect()
     }
 
+    /// A message from another node runs as that node, `peer:<node id>`: a
+    /// guest unless the owner bound that id to an owner or admin account in
+    /// `[[users]]` (channel `peer`). It used to run with no sender, which is
+    /// the owner, so any node holding the shared secret had the owner's tools.
+    ///
+    /// The sender the peer names is not used: only the node id is proven by
+    /// the handshake. While every node shares one secret, any of them can
+    /// name any node id, so binding a node to the owner is only as safe as
+    /// that secret until nodes get their own credentials (identity protocol,
+    /// phase B).
     async fn handle_agent_message(
         &self,
+        from_node: &str,
         agent: &str,
         message: &str,
         _sender: Option<&str>,
     ) -> Result<String, String> {
         // Resolve agent by name or ID
-        let agent_id = if let Ok(uuid) = uuid::Uuid::parse_str(agent) {
-            AgentId(uuid)
-        } else {
-            // Find by name
-            self.registry
+        let agent_id = match uuid::Uuid::parse_str(agent) {
+            Ok(uuid) => Some(AgentId(uuid)),
+            Err(_) => self
+                .registry
                 .list()
                 .iter()
                 .find(|e| e.name == agent)
-                .map(|e| e.id)
-                .ok_or_else(|| format!("Agent not found: {agent}"))?
+                .map(|e| e.id),
+        };
+        let Some(agent_id) = agent_id else {
+            let e = format!("Agent not found: {agent}");
+            crate::audit_trail::record_wire_message(&self.audit_log, agent, from_node, Err(&e));
+            return Err(e);
         };
 
-        match self.send_message(agent_id, message).await {
-            Ok(result) => Ok(result.response),
-            Err(e) => Err(format!("{e}")),
-        }
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        let result = self
+            .send_message_with_handle(
+                agent_id,
+                message,
+                handle,
+                Some(format!("peer:{from_node}")),
+                Some(format!("node {from_node}")),
+            )
+            .await
+            .map(|r| r.response)
+            .map_err(|e| format!("{e}"));
+        crate::audit_trail::record_wire_message(
+            &self.audit_log,
+            &agent_id.to_string(),
+            from_node,
+            result.as_ref().map(|_| ()).map_err(String::as_str),
+        );
+        result
     }
 
     fn discover_agents(&self, query: &str) -> Vec<freeco_wire::message::RemoteAgentInfo> {

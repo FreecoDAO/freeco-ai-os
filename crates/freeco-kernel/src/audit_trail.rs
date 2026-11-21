@@ -105,6 +105,25 @@ pub fn record_message(
     }
 }
 
+/// Record one message that arrived from another node over OFP: which node
+/// sent it, to which agent, and whether the agent answered.
+///
+/// `agent` is the agent's id, or the name the peer asked for when no agent
+/// has it.
+pub fn record_wire_message(
+    audit_log: &AuditLog,
+    agent: &str,
+    from_node: &str,
+    outcome: Result<(), &str>,
+) {
+    let detail = format!("from_node={}", detail_value(from_node));
+    let outcome = match outcome {
+        Ok(()) => "ok".to_string(),
+        Err(e) => format!("error: {}", failure_kind(e)),
+    };
+    audit_log.record(agent, AuditAction::WireConnect, detail, outcome);
+}
+
 /// An agent-to-agent message as an event-bus record, for the Comms page and
 /// its topology. Carries a short preview, never the whole text.
 pub fn agent_message_event(from: AgentId, to: AgentId, content: &str, via: &str) -> Event {

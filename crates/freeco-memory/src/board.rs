@@ -14,6 +14,10 @@
 //! `review` is the only status the queue did not have before. Nothing claims
 //! a task in review, so work handed in for review waits for a person or a
 //! lead instead of being picked up again.
+//!
+//! A hand-off (`agent_delegate`) can also end `failed`, or `interrupted` when
+//! the daemon stopped while it ran. Neither has a column of its own: both
+//! show in `todo`, where someone will see them, and nothing claims them.
 
 /// The board's columns in order, each with the status it holds.
 pub const BOARD_COLUMNS: [(&str, &str); 4] = [

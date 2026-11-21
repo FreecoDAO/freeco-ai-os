@@ -102,6 +102,32 @@ pub enum WireError {
     MessageTooLarge { size: u32, max: u32 },
     #[error("Protocol version mismatch: local={local}, remote={remote}")]
     VersionMismatch { local: u32, remote: u32 },
+    #[error("Timed out {0}")]
+    Timeout(&'static str),
+}
+
+/// How long to wait for a peer to accept a connection.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for a peer's handshake reply.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for a remote agent to finish and reply.
+///
+/// The reply comes only after the remote agent's whole turn, tool calls
+/// included, so this is generous. Without any limit a peer that stopped
+/// answering held the caller forever.
+pub const REPLY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// `fut`, or [`WireError::Timeout`] naming `what` once `limit` passes.
+async fn within<T>(
+    limit: Duration,
+    what: &'static str,
+    fut: impl std::future::Future<Output = Result<T, WireError>>,
+) -> Result<T, WireError> {
+    tokio::time::timeout(limit, fut)
+        .await
+        .map_err(|_| WireError::Timeout(what))?
 }
 
 /// Maximum single message size (16 MB).
@@ -143,8 +169,13 @@ pub trait PeerHandle: Send + Sync + 'static {
     fn local_agents(&self) -> Vec<RemoteAgentInfo>;
 
     /// Send a message to a local agent and get the response.
+    ///
+    /// `from_node` is the peer's node id as proven by the HMAC handshake.
+    /// `sender` is only what the peer says about who wrote the message, so it
+    /// must not be trusted on its own.
     async fn handle_agent_message(
         &self,
+        from_node: &str,
         agent: &str,
         message: &str,
         sender: Option<&str>,
@@ -355,6 +386,8 @@ impl PeerNode {
     ///
     /// SECURITY: Opens a new connection to the peer, performs a full HMAC
     /// handshake, sends the agent message, and reads the response.
+    ///
+    /// Gives up after [`REPLY_TIMEOUT`] without a reply.
     pub async fn send_to_peer(
         &self,
         node_id: &str,
@@ -363,12 +396,31 @@ impl PeerNode {
         sender: Option<&str>,
         handle: Arc<dyn PeerHandle>,
     ) -> Result<String, WireError> {
+        self.send_to_peer_within(node_id, agent, message, sender, handle, REPLY_TIMEOUT)
+            .await
+    }
+
+    /// [`send_to_peer`](Self::send_to_peer) with its own limit on the wait
+    /// for the remote agent's reply. Connecting and the handshake keep their
+    /// own limits ([`CONNECT_TIMEOUT`], [`HANDSHAKE_TIMEOUT`]).
+    pub async fn send_to_peer_within(
+        &self,
+        node_id: &str,
+        agent: &str,
+        message: &str,
+        sender: Option<&str>,
+        handle: Arc<dyn PeerHandle>,
+        reply_timeout: Duration,
+    ) -> Result<String, WireError> {
         let peer = self
             .registry
             .get_peer(node_id)
             .ok_or_else(|| WireError::HandshakeFailed(format!("Unknown peer: {node_id}")))?;
 
-        let stream = TcpStream::connect(peer.address).await?;
+        let stream = within(CONNECT_TIMEOUT, "connecting to the peer", async {
+            Ok(TcpStream::connect(peer.address).await?)
+        })
+        .await?;
         let (mut reader, mut writer) = stream.into_split();
 
         // SECURITY: Perform HMAC handshake before sending any data
@@ -390,7 +442,12 @@ impl PeerNode {
         write_message(&mut writer, &handshake).await?;
 
         // Verify handshake ack and derive session key
-        let ack = read_message(&mut reader).await?;
+        let ack = within(
+            HANDSHAKE_TIMEOUT,
+            "waiting for the handshake",
+            read_message(&mut reader),
+        )
+        .await?;
         let session_key = match &ack.kind {
             WireMessageKind::Response(WireResponse::HandshakeAck {
                 node_id: ack_node_id,
@@ -445,7 +502,12 @@ impl PeerNode {
         };
         write_message_authenticated(&mut writer, &msg, &session_key).await?;
 
-        let response = read_message_authenticated(&mut reader, &session_key).await?;
+        let response = within(
+            reply_timeout,
+            "waiting for the remote agent's reply",
+            read_message_authenticated(&mut reader, &session_key),
+        )
+        .await?;
         match response.kind {
             WireMessageKind::Response(WireResponse::AgentResponse { text }) => Ok(text),
             WireMessageKind::Response(WireResponse::Error { code, message }) => Err(
@@ -653,6 +715,7 @@ async fn handle_request(
     msg: &WireMessage,
     handle: &dyn PeerHandle,
     node: &PeerNode,
+    from_node: &str,
 ) -> WireMessage {
     let kind = match &msg.kind {
         WireMessageKind::Request(WireRequest::Ping) => {
@@ -669,7 +732,7 @@ async fn handle_request(
             message,
             sender,
         }) => match handle
-            .handle_agent_message(agent, message, sender.as_deref())
+            .handle_agent_message(from_node, agent, message, sender.as_deref())
             .await
         {
             Ok(text) => WireMessageKind::Response(WireResponse::AgentResponse { text }),
@@ -726,7 +789,7 @@ async fn connection_loop(
             }
             // Handle requests (produce response)
             WireMessageKind::Request(_) => {
-                let response = handle_request_in_loop(&msg, handle).await;
+                let response = handle_request_in_loop(&msg, handle, peer_node_id).await;
                 if let Some(key) = session_key {
                     write_message_authenticated(writer, &response, key).await?;
                 } else {
@@ -745,7 +808,11 @@ async fn connection_loop(
 }
 
 /// Handle request inside the connection loop (no PeerNode reference needed for most ops).
-async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> WireMessage {
+async fn handle_request_in_loop(
+    msg: &WireMessage,
+    handle: &dyn PeerHandle,
+    from_node: &str,
+) -> WireMessage {
     let kind = match &msg.kind {
         WireMessageKind::Request(WireRequest::Ping) => {
             WireMessageKind::Response(WireResponse::Pong {
@@ -761,7 +828,7 @@ async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> W
             message,
             sender,
         }) => match handle
-            .handle_agent_message(agent, message, sender.as_deref())
+            .handle_agent_message(from_node, agent, message, sender.as_deref())
             .await
         {
             Ok(text) => WireMessageKind::Response(WireResponse::AgentResponse { text }),
@@ -1002,11 +1069,15 @@ mod tests {
 
         async fn handle_agent_message(
             &self,
+            from_node: &str,
             agent: &str,
             message: &str,
             _sender: Option<&str>,
         ) -> Result<String, String> {
-            Ok(format!("Echo from {agent}: {message}"))
+            if message == "STALL" {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            Ok(format!("Echo from {agent} for {from_node}: {message}"))
         }
 
         fn discover_agents(&self, query: &str) -> Vec<RemoteAgentInfo> {
@@ -1222,6 +1293,60 @@ mod tests {
         let remote_agents = registry2.find_agents("echo");
         assert_eq!(remote_agents.len(), 1);
         assert_eq!(remote_agents[0].peer_node_id, "node-a");
+    }
+
+    /// Node "node-b" connected to node "node-a"; returns node-b and its handle.
+    async fn connected_pair() -> (Arc<PeerNode>, Arc<TestHandle>, Arc<PeerNode>) {
+        let node = |id: &str| PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: id.to_string(),
+            node_name: format!("kernel-{id}"),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+        };
+        let (a, _) = PeerNode::start(
+            node("node-a"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+        )
+        .await
+        .unwrap();
+        let b_handle = Arc::new(TestHandle::new());
+        let (b, _) = PeerNode::start(node("node-b"), PeerRegistry::new(), b_handle.clone())
+            .await
+            .unwrap();
+        b.connect_to_peer(a.local_addr(), b_handle.clone())
+            .await
+            .unwrap();
+        (b, b_handle, a)
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_tells_the_agent_which_node_asked() {
+        let (b, b_handle, _a) = connected_pair().await;
+        let reply = b
+            .send_to_peer("node-a", "echo", "hello", Some("anyone"), b_handle)
+            .await
+            .unwrap();
+        // The node id comes from the handshake, not from the claimed sender.
+        assert_eq!(reply, "Echo from echo for node-b: hello");
+    }
+
+    #[tokio::test]
+    async fn send_to_peer_gives_up_on_a_reply_that_never_comes() {
+        let (b, b_handle, _a) = connected_pair().await;
+        let started = Instant::now();
+        let result = b
+            .send_to_peer_within(
+                "node-a",
+                "echo",
+                "STALL",
+                None,
+                b_handle,
+                Duration::from_millis(200),
+            )
+            .await;
+        assert!(matches!(result, Err(WireError::Timeout(_))), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

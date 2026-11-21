@@ -1065,11 +1065,116 @@ impl MemorySubstrate {
         .await
         .map_err(|e| FreecoError::Internal(e.to_string()))?
     }
+
+    // -----------------------------------------------------------------
+    // Hand-offs (`agent_delegate`)
+    // -----------------------------------------------------------------
+
+    /// Record a task one agent hands another as a card in progress, assigned
+    /// to the agent doing it and linked to the conversation it runs in.
+    /// Returns the card's id.
+    ///
+    /// A hand-off used to leave no row at all: it was on no board, and a
+    /// restart mid-run left a half-finished conversation with nothing to say
+    /// it was a task, who asked for it, or that it never finished.
+    pub async fn task_start_handoff(
+        &self,
+        title: &str,
+        description: &str,
+        assigned_to: &str,
+        created_by: &str,
+        team_id: Option<&str>,
+        session_id: &str,
+    ) -> FreecoResult<String> {
+        let conn = Arc::clone(&self.conn);
+        let title = title.to_string();
+        let description = description.to_string();
+        let assigned_to = assigned_to.to_string();
+        let created_by = created_by.to_string();
+        let team_id = team_id.unwrap_or("").to_string();
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            db.execute(
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, \
+                     title, description, assigned_to, created_by, team_id, blocked_by, updated_at, session_id)
+                 VALUES (?1, ?2, ?3, ?4, 'in_progress', 0, ?5, ?3, ?6, ?7, ?2, ?8, '[]', ?5, ?9)",
+                rusqlite::params![id, created_by, title, b"", now, description, assigned_to, team_id, session_id],
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            Ok(id)
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+
+    /// Close a hand-off's card: `completed` with the reply, or `failed` with
+    /// what went wrong.
+    ///
+    /// Only a card still in progress, or one marked `interrupted` by a
+    /// restart while this run was still going, is changed. A card someone
+    /// already moved on is left as they left it. Returns whether it changed.
+    pub async fn task_finish_handoff(
+        &self,
+        task_id: &str,
+        outcome: Result<&str, &str>,
+    ) -> FreecoResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+        let (status, result, error) = match outcome {
+            Ok(reply) => ("completed", reply.to_string(), String::new()),
+            Err(e) => ("failed", String::new(), e.to_string()),
+        };
+        tokio::task::spawn_blocking(move || {
+            let now = chrono::Utc::now().to_rfc3339();
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let n = db
+                .execute(
+                    "UPDATE task_queue SET status = ?2, result = ?3, last_error = ?4, \
+                         completed_at = ?5, updated_at = ?5
+                     WHERE id = ?1 AND status IN ('in_progress', 'interrupted')",
+                    rusqlite::params![task_id, status, result, error, now],
+                )
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            Ok(n > 0)
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+
+    /// Mark the hand-offs still in progress as `interrupted`, and return how
+    /// many there were.
+    ///
+    /// A hand-off runs inside the process that started it, so when the
+    /// daemon starts, any still in progress lost its run when the last one
+    /// stopped. Call it from the daemon's start only: a CLI that opens the
+    /// database beside a running daemon would otherwise mark the daemon's
+    /// live hand-offs. Should a run still finish after all, it closes its card
+    /// as usual ([`task_finish_handoff`](Self::task_finish_handoff)).
+    pub fn task_interrupt_handoffs(&self) -> FreecoResult<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let db = self
+            .conn
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
+        db.execute(
+            "UPDATE task_queue SET status = 'interrupted', \
+                 last_error = 'The daemon stopped before this task finished.', updated_at = ?1
+             WHERE status = 'in_progress' AND COALESCE(session_id, '') != ''",
+            [now],
+        )
+        .map_err(|e| FreecoError::Memory(e.to_string()))
+    }
 }
 
 /// The columns [`task_row`] reads, in its order.
 const TASK_COLUMNS: &str = "id, title, description, status, assigned_to, created_by, created_at, \
-     completed_at, result, COALESCE(team_id, ''), COALESCE(blocked_by, '[]'), COALESCE(updated_at, '')";
+     completed_at, result, COALESCE(team_id, ''), COALESCE(blocked_by, '[]'), COALESCE(updated_at, ''), \
+     COALESCE(session_id, ''), COALESCE(last_error, '')";
 
 /// One `task_queue` row as board JSON, with its raw `blocked_by` list.
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(serde_json::Value, String)> {
@@ -1086,6 +1191,8 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(serde_json::Value, Str
             "result": row.get::<_, Option<String>>(8).unwrap_or(None),
             "team_id": row.get::<_, String>(9).unwrap_or_default(),
             "updated_at": row.get::<_, String>(11).unwrap_or_default(),
+            "session_id": row.get::<_, String>(12).unwrap_or_default(),
+            "last_error": row.get::<_, String>(13).unwrap_or_default(),
         }),
         row.get::<_, String>(10).unwrap_or_else(|_| "[]".into()),
     ))
@@ -1590,5 +1697,98 @@ mod tests {
         assert!(substrate.task_delete(&first).await.unwrap());
         assert!(!substrate.task_delete(&first).await.unwrap());
         assert!(substrate.task_get(&first).await.unwrap().is_none());
+    }
+
+    /// A hand-off is a card in progress for the agent doing it, closed with
+    /// the reply, and nobody can claim it while it runs.
+    #[tokio::test]
+    async fn a_handoff_is_a_card_from_start_to_reply() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let id = substrate
+            .task_start_handoff(
+                "Book a table",
+                "Four people, Friday",
+                "helper",
+                "lead",
+                None,
+                "s-1",
+            )
+            .await
+            .unwrap();
+        let card = substrate.task_get(&id).await.unwrap().unwrap();
+        assert_eq!(card["column"], "doing");
+        assert_eq!(card["assigned_to"], "helper");
+        assert_eq!(card["created_by"], "lead");
+        assert_eq!(card["session_id"], "s-1");
+        assert!(substrate.task_claim("helper").await.unwrap().is_none());
+
+        assert!(substrate
+            .task_finish_handoff(&id, Ok("Booked for 8 pm"))
+            .await
+            .unwrap());
+        let card = substrate.task_get(&id).await.unwrap().unwrap();
+        assert_eq!(card["status"], "completed");
+        assert_eq!(card["result"], "Booked for 8 pm");
+        // Closed once: a second outcome does not overwrite the first.
+        assert!(!substrate
+            .task_finish_handoff(&id, Err("late error"))
+            .await
+            .unwrap());
+        assert_eq!(
+            substrate.task_get(&id).await.unwrap().unwrap()["status"],
+            "completed"
+        );
+    }
+
+    /// A failed hand-off says why on its card.
+    #[tokio::test]
+    async fn a_failed_handoff_keeps_its_reason() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let id = substrate
+            .task_start_handoff("Research", "", "helper", "lead", None, "s-2")
+            .await
+            .unwrap();
+        substrate
+            .task_finish_handoff(&id, Err("LLM driver error"))
+            .await
+            .unwrap();
+        let card = substrate.task_get(&id).await.unwrap().unwrap();
+        assert_eq!(card["status"], "failed");
+        assert_eq!(card["last_error"], "LLM driver error");
+    }
+
+    /// On the daemon's start, hand-offs still running are marked interrupted;
+    /// posted tasks an agent claimed are not hand-offs and stay as they are.
+    #[tokio::test]
+    async fn a_restart_marks_running_handoffs_interrupted() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let handoff = substrate
+            .task_start_handoff("Draft", "", "helper", "lead", None, "s-3")
+            .await
+            .unwrap();
+        let posted = substrate
+            .task_post_on_board("Posted", "", Some("worker"), None, None, &[])
+            .await
+            .unwrap();
+        substrate.task_claim("worker").await.unwrap().unwrap();
+
+        assert_eq!(substrate.task_interrupt_handoffs().unwrap(), 1);
+        let card = substrate.task_get(&handoff).await.unwrap().unwrap();
+        assert_eq!(card["status"], "interrupted");
+        assert!(!card["last_error"].as_str().unwrap().is_empty());
+        assert_eq!(
+            substrate.task_get(&posted).await.unwrap().unwrap()["status"],
+            "in_progress"
+        );
+
+        // A run that outlived the restart still closes its card.
+        assert!(substrate
+            .task_finish_handoff(&handoff, Ok("done after all"))
+            .await
+            .unwrap());
+        assert_eq!(
+            substrate.task_get(&handoff).await.unwrap().unwrap()["status"],
+            "completed"
+        );
     }
 }

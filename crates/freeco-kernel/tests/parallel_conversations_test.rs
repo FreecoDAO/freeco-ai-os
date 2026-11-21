@@ -1021,6 +1021,95 @@ async fn every_hand_off_is_recorded_with_how_it_ended() {
     );
 }
 
+/// Each hand-off is also a card on the task queue, assigned to the agent that
+/// did it, linked to its conversation and closed with its reply, so it shows
+/// on the board and outlives the in-memory list above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_hand_off_is_a_card_on_the_task_queue() {
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("handoff-cards");
+    let lead = spawn(&kernel, "lead", &url, &["agent_send"]);
+    let worker_a = spawn(&kernel, "worker-a", &url, &[]);
+    spawn(&kernel, "worker-b", &url, &[]);
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        kernel.send_message(lead, "split this up"),
+    )
+    .await
+    .expect("delegation finishes")
+    .expect("lead run succeeds");
+
+    let cards = kernel.memory.task_list(None).await.unwrap();
+    assert_eq!(cards.len(), 2, "{cards:?}");
+    for card in &cards {
+        assert_eq!(card["status"], "completed", "{card}");
+        assert_eq!(card["created_by"], lead.to_string());
+        assert!(!card["session_id"].as_str().unwrap().is_empty());
+        assert!(
+            card["result"].as_str().unwrap().contains("answered"),
+            "{card}"
+        );
+    }
+    let alpha = cards.iter().find(|c| c["title"] == "alpha").unwrap();
+    assert_eq!(alpha["assigned_to"], worker_a.to_string());
+    assert_eq!(alpha["description"], "Do alpha.");
+}
+
+/// A message from another node runs as that node, a guest, and is written to
+/// the audit trail with the node's id. It used to run as the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_from_another_node_runs_as_a_guest_and_is_audited() {
+    use freeco_kernel_runtime::audit::AuditAction;
+    use freeco_wire::peer::PeerHandle;
+
+    let script = Arc::new(Script::default());
+    let url = serve(Arc::clone(&script)).await;
+    let kernel = boot("ofp-guest");
+    let agent = spawn(&kernel, "echo", &url, &[]);
+
+    // The peer claims to be the owner; only its node id is proven.
+    let reply =
+        PeerHandle::handle_agent_message(&*kernel, "node-x", "echo", "hello", Some("owner"))
+            .await
+            .unwrap();
+    assert!(reply.contains("echo answered"), "{reply}");
+
+    let prompts = script.prompts.lock().unwrap().clone();
+    assert!(
+        prompts
+            .iter()
+            .any(|(who, p)| who == "echo" && p.contains("--- Guest conversation ---")),
+        "a remote node is a guest: {prompts:?}"
+    );
+
+    let wire: Vec<_> = kernel
+        .audit_log
+        .recent(50)
+        .into_iter()
+        .filter(|e| matches!(e.action, AuditAction::WireConnect))
+        .collect();
+    assert_eq!(wire.len(), 1, "{wire:?}");
+    assert_eq!(wire[0].agent_id, agent.to_string());
+    assert_eq!(wire[0].detail, "from_node=node-x");
+    assert_eq!(wire[0].outcome, "ok");
+
+    // An agent that does not exist is refused, and still audited.
+    assert!(
+        PeerHandle::handle_agent_message(&*kernel, "node-x", "nobody", "hi", None)
+            .await
+            .is_err()
+    );
+    let refused = kernel
+        .audit_log
+        .recent(50)
+        .into_iter()
+        .filter(|e| matches!(e.action, AuditAction::WireConnect))
+        .count();
+    assert_eq!(refused, 2);
+}
+
 /// A colleague's message must not read like the user typing: the recipient
 /// is told who sent it and that it carries no approval of the user's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

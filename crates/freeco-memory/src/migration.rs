@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Current schema version.
 // Must be bumped whenever a migration is added, or the new migration
 // never runs on an existing database.
-const SCHEMA_VERSION: u32 = 16;
+const SCHEMA_VERSION: u32 = 17;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -82,6 +82,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 16 {
         migrate_v16(conn)?;
+    }
+
+    if current_version < 17 {
+        migrate_v17(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -966,6 +970,36 @@ fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 17: hand-offs on the task queue.
+///
+/// - `task_queue.session_id`: the conversation a handed-off task runs in
+///   (`agent_delegate`). Empty for tasks posted with `task_post`.
+/// - `task_queue.last_error`: why a hand-off failed or was interrupted.
+///
+/// Every step is guarded, so re-running it is harmless.
+fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (column, ddl) in [
+        (
+            "session_id",
+            "ALTER TABLE task_queue ADD COLUMN session_id TEXT DEFAULT ''",
+        ),
+        (
+            "last_error",
+            "ALTER TABLE task_queue ADD COLUMN last_error TEXT DEFAULT ''",
+        ),
+    ] {
+        if !column_exists(conn, "task_queue", column) {
+            conn.execute(ddl, [])?;
+        }
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (17, datetime('now'), 'Hand-offs on the task queue: session_id, last_error')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// The tenant every pre-existing row belongs to.
 ///
 /// A local install has exactly one, and it keeps the same id across upgrades
@@ -1018,6 +1052,18 @@ mod tests {
         assert!(column_exists(&conn, "teams", "company_id"));
         assert!(column_exists(&conn, "task_queue", "updated_at"));
         assert!(column_exists(&conn, "team_people", "role"));
+    }
+
+    /// v17 links hand-offs to their conversation, on an install already at
+    /// v16 too.
+    #[test]
+    fn v17_adds_handoff_columns_to_the_task_queue() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 16).unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "task_queue", "session_id"));
+        assert!(column_exists(&conn, "task_queue", "last_error"));
     }
 
     /// Running migrations twice must not fail. Without this, the fix above

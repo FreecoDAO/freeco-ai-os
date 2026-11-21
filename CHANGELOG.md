@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Every `agent_delegate` hand-off is a card on the task queue: in progress
+  while it runs, assigned to the agent doing it, linked to its conversation,
+  then completed with the reply or failed with the kind of error. Hand-offs
+  still running when the daemon stopped are marked `interrupted` when it
+  starts again. Before, a hand-off left no row, so it was on no board and a
+  restart lost every trace of it.
+- OFP `send_to_peer` gives up instead of waiting forever: 10 s to connect,
+  10 s for the handshake, 10 min for the remote agent's reply
+  (`send_to_peer_within` sets its own).
 - Agents can be put to sleep. `agent_sleep` stops an agent's background loop
   and scheduled work, so it uses no tokens, until a message or
   `agent_activate` wakes it; the flag survives a restart. Any agent allowed
@@ -71,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   patterns are replaced with `[REDACTED:<name|kind>]` in assistant text and
   tool results, and `file_write` / `apply_patch` refuse content containing
   one, telling the agent to read it from env or the vault at runtime.
+- A message from another node over OFP ran as the owner, with every tool the
+  agent had: the node's claimed sender was dropped and no sender means the
+  owner. It now runs as `peer:<node id>`, a guest unless that id is bound to
+  an owner or admin in `[[users]]`, and each one is written to the audit
+  trail as `WireConnect` with the node's id.
 
 ### Added
 
