@@ -1707,7 +1707,7 @@ fn force_kill_pid(pid: u32) {
 
 /// The pid guard as a pure function, for the test: true when a kill on this
 /// pid must be refused (0 would reach our own group, 1 is init).
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn force_kill_pid_is_refused(pid: u32) -> bool {
     pid <= 1
 }
