@@ -124,6 +124,18 @@ impl Caller {
         }
     }
 
+    /// A request with no identity, i.e. what an unauthenticated or
+    /// public-route call is treated as: Viewer. Read routes use this to
+    /// resolve `Access` even when the auth middleware is not mounted (a
+    /// test router); it is the least role, never a shortcut to owner.
+    pub(crate) fn viewer() -> Self {
+        Self {
+            username: None,
+            role: UserRole::Viewer,
+            method: AuthMethod::Session,
+        }
+    }
+
     /// Whether this caller has at least `min`.
     pub fn has(&self, min: UserRole) -> bool {
         self.role >= min
@@ -134,6 +146,19 @@ impl Caller {
     /// through every `Result` (clippy `result_large_err`).
     pub fn require(&self, min: UserRole) -> Result<(), Box<Response<Body>>> {
         require_role(self.role, min)
+    }
+}
+
+/// `Option<Caller>`: `None` only when no caller was inserted — a public
+/// route (the middleware passes those through unidentitied) or a router
+/// without the auth layer (tests). Rejects nothing.
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for Caller {
+    type Rejection = Response<Body>;
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(parts.extensions.get::<Caller>().cloned())
     }
 }
 

@@ -165,6 +165,14 @@ async fn start_test_server_with_provider(
             "/api/starnet/state",
             axum::routing::get(freeco_api::live_routes::starnet_state),
         )
+        // The production router runs every non-public route behind the auth
+        // middleware; this test server does the same, so the Caller the
+        // handlers read is the one auth would insert (here: the no-key
+        // loopback caller, which is the owner).
+        .layer(axum::middleware::from_fn_with_state(
+            middleware::AuthState::from_config(&state.kernel.config, true),
+            middleware::auth,
+        ))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

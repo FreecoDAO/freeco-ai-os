@@ -54,10 +54,16 @@ fn activity_row(
 }
 
 /// GET /api/activity — every agent's live state.
-pub async fn activity(State(state): State<Arc<AppState>>, caller: Caller) -> impl IntoResponse {
+pub async fn activity(
+    State(state): State<Arc<AppState>>,
+    caller: Option<Caller>,
+) -> impl IntoResponse {
     // Agents the caller may not see are dropped from the feed (owner/admin
-    // see everyone), matching the Chamber's rule.
-    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    // see everyone), matching the Chamber's rule. `Option` because a router
+    // without the auth layer (tests) inserts no Caller: None resolves as a
+    // bare Viewer.
+    let access =
+        crate::access::Access::resolve(&state.kernel, caller.as_ref().unwrap_or(&Caller::viewer()));
     let now_ms = chrono::Utc::now().timestamp_millis();
     let seen: HashMap<String, AgentActivity> = state
         .kernel
@@ -262,12 +268,14 @@ pub(crate) fn starnet_snapshot(
 /// which part is missing, so a broken task table does not blank the view.
 pub async fn starnet_state(
     State(state): State<Arc<AppState>>,
-    caller: Caller,
+    caller: Option<Caller>,
 ) -> impl IntoResponse {
     // The pixel-art stage shows every agent: restrict it to those who may
     // see them all, exactly like the activity page (kid/user with grants
-    // see the scoped activity feed instead).
-    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    // see the scoped activity feed instead). None caller = bare Viewer, as
+    // in `activity`.
+    let access =
+        crate::access::Access::resolve(&state.kernel, caller.as_ref().unwrap_or(&Caller::viewer()));
     let now_ms = chrono::Utc::now().timestamp_millis();
     let seen: HashMap<String, AgentActivity> = state
         .kernel
@@ -312,10 +320,10 @@ pub async fn starnet_state(
     };
     // Owner/admin see every desk; anyone else only their own agents'
     // desks. Teams whose every member is hidden are dropped too.
-    let visible = access.is_admin() || {
-        let any = agents.is_empty();
-        any
-    };
+    // An empty station is fine to show (the page renders an empty room;
+    // `degraded` explains anything missing), so visibility only filters
+    // real desks.
+    let visible = access.is_admin();
     let total = agents.len();
     let filtered_agents: Vec<StarnetAgent> = agents
         .into_iter()
@@ -337,14 +345,15 @@ pub struct ChatsQuery {
 /// GET /api/org/chats?limit=60 — newest conversations of every agent.
 pub async fn recent_chats(
     State(state): State<Arc<AppState>>,
-    caller: Caller,
+    caller: Option<Caller>,
     Query(q): Query<ChatsQuery>,
 ) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(60).clamp(1, 500);
     // Owner/admin see every conversation; anyone else only the agents their
     // grants and teams allow (same rule as the Chamber: hidden = gone, to
     // avoid leaking existence).
-    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    let access =
+        crate::access::Access::resolve(&state.kernel, caller.as_ref().unwrap_or(&Caller::viewer()));
     let mut hidden = 0usize;
     match state.kernel.memory.org().recent_sessions(limit) {
         Ok(mut rows) => {
@@ -397,12 +406,13 @@ pub struct TasksQuery {
 /// GET /api/tasks?status=pending|in_progress|completed — the task board.
 pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
-    caller: Caller,
+    caller: Option<Caller>,
     Query(q): Query<TasksQuery>,
 ) -> impl IntoResponse {
     // Same access rule as recent_chats: tasks of agents the caller cannot
     // see are dropped, not shown.
-    let access = crate::access::Access::resolve(&state.kernel, &caller);
+    let access =
+        crate::access::Access::resolve(&state.kernel, caller.as_ref().unwrap_or(&Caller::viewer()));
     let status = q.status.as_deref().filter(|s| !s.is_empty());
     if let Some(s) = status {
         if !["pending", "in_progress", "completed"].contains(&s) {
