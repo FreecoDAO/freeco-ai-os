@@ -996,24 +996,39 @@ alerts (stop / target / flat-by) and analyst / pelosi run alongside
 |---|------|---------|--------|
 | 1 | Symbol universe (weekly) | `$PY $DT/trader-scanner/scan.py universe` | `trader/universe.txt` |
 | 2 | Pre-market scan | `$PY $DT/trader-scanner/scan.py daily` (or `--symbols SPY,AAPL` for the watchlist only) | `trader/watchlist.json` |
-| 3 | Opening-range breakouts | `$PY $DT/trader-scanner/scan.py orb --watchlist trader/watchlist.json` | `trader/watchlist.json` |
+| 3 | Opening-range breakouts | `$PY $DT/trader-scanner/scan.py orb --watchlist trader/premarket.json` (the separately saved, filtered pre-market candidates for this session) | `trader/watchlist.json` |
 | 4 | News + 8-Ks | `$PY $DT/trader-news/news.py --user-agent "<SEC User-Agent>"` | `trader/state/news.json` |
-| 5 | Entry signal | `$PY $DT/trader-entry/entry.py check TSLA --write` (or `watchlist`) | `trader/entry.json` |
+| 5 | Entry signal | `$PY $DT/trader-entry/entry.py watchlist`, then `$PY $DT/trader-entry/entry.py check TSLA --write` for the selected ticker; proceed only if the fresh result is triggered | `trader/entry.json` |
 | 6 | Stop + target | `$PY $DT/trader-exit/exit.py plan --write` (default stop: opening-range midpoint, target 2R) | `trader/plan.json` |
-| 7 | 10,000 replays | `$PY $DT/trader-timemachine/timemachine.py run --write` | `trader/timemachine.json` |
+| 7 | 10,000 replays | `$PY $DT/trader-timemachine/timemachine.py run --write --until <plan-flat-by>` (the effective `flat_by` from the current plan) | `trader/timemachine.json` |
 | 8 | Size the order | `$PY $DT/trader-budget/size.py --limit --write` | `trader/orders.json` |
 | 9 | Risk check | `$PY $DT/trader-risk/check.py` | PASS / BLOCK per order, recorded in `trader/state/risk.json` |
-| 10 | Ticket | `$PY $DT/trader-broker/ticket.py show` | plain ticket + Alpaca order JSON |
-| 11 | Record the user's yes | `$PY $DT/trader-broker/ticket.py approve --index 0 --reply "<reply, word for word>"` | `trader/state/broker.json` |
+| 10 | Ticket | `$PY $DT/trader-broker/ticket.py show --index 1 --json` | selected ticket, readiness and `tool_input` |
+| 11 | Record the user's yes | `$PY $DT/trader-broker/ticket.py approve --index 1 --reply "<reply, word for word>"` | `trader/state/broker.json` |
 | 12 | Record a fill | `$PY $DT/trader-broker/ticket.py fill --symbol TSLA --side buy --qty 10 --price 251.20` | `trader/portfolio.json` |
-| 13 | Exit by close | `$PY $DT/trader-broker/ticket.py flatten --symbol TSLA` | sell ticket in `trader/orders.json` |
-| 14 | Alerts from the plan | `$PY $DT/trader-alerts/alerts.py add --from-plan` then `alerts.py check` | `trader/prices.json` |
+| 13 | Exit by close | `$PY $DT/trader-broker/ticket.py flatten --symbol TSLA`, then run `check.py` on the new proposal before showing or approving it | sell ticket in `trader/orders.json` |
+| 14 | Alerts from the plan | Add separate dated stop, target and flat-by rules as below, then `alerts.py check` | `trader/alerts.json`, `trader/prices.json` |
 | 15 | Is NYSE open? | `$PY $DT/trader-alerts/alerts.py clock` (knows 2026-2027 holidays and early closes) | — |
 | 16 | Earnings (SEC XBRL) | `$PY $DT/trader-analyst/facts.py TSLA --user-agent "<SEC User-Agent>"` | report |
-| 17 | Congress trades | `$PY $DT/trader-pelosi/ptr.py new --tickers TSLA NVDA` | new PTR filings |
+| 17 | Congress trades | `$PY $DT/trader-pelosi/ptr.py new --tickers TSLA NVDA --read` | new PTR filings and ticker matches |
 
 Add `--json` to any command for machine-readable output. Add `--now "2026-10-19 10:15"`
 to replay a past moment. Run `--help` on any tool or subcommand for every flag.
+The Congress ticker check is incomplete if `pdftotext` is unavailable or a filing
+cannot be read.
+
+For alerts, read the current plan's symbol, date, stop, target and effective
+`flat_by`, and substitute them into these commands:
+
+```bash
+$PY $DT/trader-alerts/alerts.py add --symbol <TICKER> --stop <STOP> --date <PLAN-DATE>
+$PY $DT/trader-alerts/alerts.py add --symbol <TICKER> --target <TARGET> --date <PLAN-DATE>
+$PY $DT/trader-alerts/alerts.py add --symbol <TICKER> --at <PLAN-FLAT-BY> --date <PLAN-DATE> --label "flat by close"
+```
+
+Do not use `--before-close` on this already adjusted time: on an early-close
+day it would shift the alert a second time. Do not use `add --from-plan` for
+this purpose at the pinned commit.
 
 ### How to read the results
 
@@ -1022,10 +1037,14 @@ to replay a past moment. Run `--help` on any tool or subcommand for every flag.
 - **Time Machine**: target-first %, stop-first %, neither-by-close %, average R, and a verdict. If stop-first ≥ target-first, or the average R ≤ 0, treat it as no edge and HOLD.
 - **Budget**: whole shares only. It names the limit that set the size. A stop too far away for the max loss is a refusal, not a smaller order.
 - **Risk**: `BLOCK` is final. Never edit `orders.json` or `config.json` to turn a BLOCK into a PASS. Exits are never blocked by daily limits.
-- **Broker**: `ticket.py show` only shows orders that passed risk. The `order` JSON matches Alpaca's bracket order shape (see Section 4), so live execution posts that body unchanged.
+- **Broker**: `ticket.py show` also displays unready and blocked orders. Select a ticket whose `ready` is true and whose fingerprint matches today's PASS. Its `tool_input` is for `place_stock_order`, not an Alpaca REST body. For REST, copy its fields unchanged except move `take_profit_limit_price` to `take_profit.limit_price`, `stop_loss_stop_price` to `stop_loss.stop_price`, and, if present, `stop_loss_limit_price` to `stop_loss.limit_price`. Remove those flat fields. Preserve the approved symbol, side, quantity and prices exactly; if a field cannot be mapped, HOLD. See Section 4 for the REST shape.
 
 ### Limits
 
+- New toolkit entries in paper and live modes are on hold until the hand and
+  toolkit portfolios can be reconciled and paper placements count toward risk
+  limits. Monitor existing positions with the broker; the schedule and alerts
+  cannot guarantee an approved, timely close.
 - Long side only. US-listed stocks and ETFs. No options, short sales, margin or crypto.
 - The data is free and delayed. Check prices against the broker before acting.
 - FINRA dropped the $25,000 pattern-day-trader minimum on June 4, 2026 (Regulatory Notice 26-10), but brokers can phase it in until October 20, 2027. If the broker still applies the old rule, turn on PDT Guard.
