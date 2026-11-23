@@ -46,6 +46,10 @@ rand = { workspace = true }
 aes-gcm = { workspace = true }
 zeroize = { workspace = true }
 
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }

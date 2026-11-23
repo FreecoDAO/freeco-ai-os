@@ -7,6 +7,16 @@ function skillsPage() {
     skills: [],
     loading: true,
     loadError: '',
+    skillFilter: '',
+
+    // Per-agent skill switches (GET/PUT /api/agents/{id}/skills).
+    // An empty allowlist means the agent gets every skill, including ones
+    // installed later; a non-empty one means only the listed skills.
+    agentsList: [],
+    skillAgentId: '',
+    agentSkills: null,          // { assigned: [], available: [], mode: 'all' | 'allowlist' }
+    agentSkillsSaving: false,
+    agentSkillsError: '',
 
     // ClawHub state
     clawhubSearch: '',
@@ -18,6 +28,20 @@ function skillsPage() {
     clawhubNextCursor: null,
     installingSlug: null,
     installResult: null,
+
+    // GitHub install state
+    githubSource: '',
+    githubPreview: null,     // { repo, path, commit, skills: [...] } from /api/skills/github/preview
+    githubSelected: [],      // skill names ticked for install
+    githubOverwrite: false,
+    githubLoading: false,
+    githubInstalling: false,
+    githubError: '',
+    githubQuickPicks: [
+      { label: 'Ponytail', source: 'FreecoDAO/ponytail/skills' },
+      { label: 'Graphify', source: 'FreecoDAO/graphify/graphify@v8' },
+      { label: 'ECC', source: 'FreecoDAO/ECC/skills' }
+    ],
     _searchTimer: null,
     _browseCache: {},    // { key: { ts, data } } client-side 60s cache
     _searchCache: {},
@@ -82,6 +106,7 @@ function skillsPage() {
       if (!source) return { text: 'Local', cls: 'badge-dim' };
       switch (source.type) {
         case 'clawhub': return { text: 'ClawHub', cls: 'badge-info' };
+        case 'github': return { text: 'GitHub', cls: 'badge-info' };
         case 'openclaw': return { text: 'OpenClaw', cls: 'badge-info' };
         case 'bundled': return { text: 'Built-in', cls: 'badge-success' };
         default: return { text: 'Local', cls: 'badge-dim' };
@@ -120,6 +145,95 @@ function skillsPage() {
         this.loadError = e.message || 'Could not load skills.';
       }
       this.loading = false;
+    },
+
+    get filteredSkills() {
+      var words = this.skillFilter.toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return this.skills;
+      return this.skills.filter(function(s) {
+        var text = (s.name + ' ' + s.description).toLowerCase();
+        return words.every(function(w) { return text.indexOf(w) !== -1; });
+      });
+    },
+
+    // ── Per-agent skill switches ────────────────────────────────────────
+    async loadAgentsForSkills() {
+      try {
+        var data = await FreecoAPI.get('/api/agents');
+        var list = Array.isArray(data) ? data : (data.agents || []);
+        this.agentsList = list.map(function(a) { return { id: a.id, name: a.name }; });
+      } catch(e) {
+        this.agentsList = [];
+      }
+    },
+
+    async loadAgentSkills() {
+      this.agentSkills = null;
+      this.agentSkillsError = '';
+      if (!this.skillAgentId) return;
+      var id = this.skillAgentId;
+      try {
+        var data = await FreecoAPI.get('/api/agents/' + encodeURIComponent(id) + '/skills');
+        if (id !== this.skillAgentId) return;  // the user picked another agent meanwhile
+        this.agentSkills = {
+          assigned: data.assigned || [],
+          available: data.available || [],
+          mode: data.mode === 'allowlist' ? 'allowlist' : 'all'
+        };
+      } catch(e) {
+        this.agentSkillsError = e.message || 'Could not load this agent\u2019s skills.';
+      }
+    },
+
+    agentSkillsSummary() {
+      var s = this.agentSkills;
+      if (!s) return '';
+      if (s.mode === 'all') return 'Uses every skill, including ones you install later.';
+      return 'Uses ' + s.assigned.length + ' of ' + s.available.length + ' skills.';
+    },
+
+    isSkillOnForAgent(name) {
+      var s = this.agentSkills;
+      if (!s) return false;
+      return s.mode === 'all' || s.assigned.indexOf(name) !== -1;
+    },
+
+    async toggleSkillForAgent(name) {
+      var s = this.agentSkills;
+      if (!s || this.agentSkillsSaving) return;
+      var next;
+      if (this.isSkillOnForAgent(name)) {
+        var current = s.mode === 'all' ? s.available : s.assigned;
+        next = current.filter(function(n) { return n !== name; });
+        if (!next.length) {
+          // An empty list would mean "every skill", the opposite of what was asked.
+          FreecoToast.error('An agent keeps at least one skill. Switch another one on first.');
+          return;
+        }
+      } else {
+        next = s.assigned.concat([name]);
+        // Every skill on again: go back to "all", which also covers later installs.
+        var allOn = s.available.length && s.available.every(function(n) { return next.indexOf(n) !== -1; });
+        if (allOn) next = [];
+      }
+      await this.saveAgentSkills(next);
+    },
+
+    async useAllSkills() {
+      await this.saveAgentSkills([]);
+    },
+
+    async saveAgentSkills(list) {
+      var id = this.skillAgentId;
+      if (!id) return;
+      this.agentSkillsSaving = true;
+      try {
+        await FreecoAPI.put('/api/agents/' + encodeURIComponent(id) + '/skills', { skills: list });
+        await this.loadAgentSkills();
+      } catch(e) {
+        FreecoToast.error('Could not save: ' + (e.message || 'unknown error'));
+      }
+      this.agentSkillsSaving = false;
     },
 
     // ── Skill config editing ────────────────────────────────────────────
@@ -398,6 +512,87 @@ function skillsPage() {
         FreecoToast.error('Could not load skill source code');
       }
       this.skillCodeLoading = false;
+    },
+
+    // ── Install from GitHub ─────────────────────────────────────────────
+    githubSourceLabel: function(source) {
+      if (!source || source.type !== 'github') return '';
+      var path = source.path ? '/' + source.path : '';
+      return source.repo + path + ' @ ' + (source.commit || '').substring(0, 7);
+    },
+
+    githubSourceUrl: function(source) {
+      if (!source || source.type !== 'github') return '#';
+      return 'https://github.com/' + source.repo + '/tree/' + source.commit + (source.path ? '/' + source.path : '');
+    },
+
+    githubWarningCount: function(s) {
+      return (s.warnings || []).filter(function(w) { return w.severity !== 'Info'; }).length;
+    },
+
+    githubBlockedCount: function() {
+      if (!this.githubPreview) return 0;
+      return this.githubPreview.skills.filter(function(s) { return !!s.blocked; }).length;
+    },
+
+    githubSelectAll: function(on) {
+      if (!this.githubPreview) return;
+      this.githubSelected = on
+        ? this.githubPreview.skills.filter(function(s) { return !s.blocked; }).map(function(s) { return s.name; })
+        : [];
+    },
+
+    async previewGitHub() {
+      var source = this.githubSource.trim();
+      if (!source || this.githubLoading) return;
+      this.githubLoading = true;
+      this.githubError = '';
+      this.githubPreview = null;
+      this.githubSelected = [];
+      try {
+        var data = await FreecoAPI.post('/api/skills/github/preview', { source: source });
+        this.githubPreview = data;
+        // Pre-tick what can be installed and isn't already there.
+        this.githubSelected = (data.skills || [])
+          .filter(function(s) { return !s.blocked && !s.already_installed && !s.shadows_bundled; })
+          .map(function(s) { return s.name; });
+      } catch(e) {
+        this.githubError = e.message || 'Preview failed';
+      }
+      this.githubLoading = false;
+    },
+
+    async installGitHub() {
+      var preview = this.githubPreview;
+      if (!preview || !this.githubSelected.length || this.githubInstalling) return;
+      this.githubInstalling = true;
+      this.githubError = '';
+      try {
+        // Install exactly what was scanned: the preview's own repository,
+        // folder and commit, never the source box, which may have been
+        // edited since the preview.
+        var data = await FreecoAPI.post('/api/skills/github/install', {
+          source: preview.repo + (preview.path ? '/' + preview.path : ''),
+          commit: preview.commit,
+          skills: this.githubSelected.slice(),
+          overwrite: this.githubOverwrite
+        });
+        var ok = (data.installed || []).length;
+        var skipped = data.skipped || [];
+        if (ok) FreecoToast.success(ok + ' skill(s) installed from ' + data.repo + ' @ ' + data.commit.substring(0, 7));
+        if (skipped.length) {
+          FreecoToast.error(skipped.length + ' not installed: ' + skipped.map(function(s) { return s.name + ' (' + s.blocked + ')'; }).join('; '));
+        }
+        await this.loadSkills();
+        if (ok) {
+          this.githubPreview = null;
+          this.githubSelected = [];
+          this.tab = 'installed';
+        }
+      } catch(e) {
+        this.githubError = e.message || 'Install failed';
+      }
+      this.githubInstalling = false;
     },
 
     // Install from ClawHub

@@ -24,6 +24,23 @@ asked whether voice works, check whether a provider and credentials are present
 and say which of the two is true — "running" on its own is the answer that
 wastes the user's afternoon.
 
+## Speech stays local: use Speaches
+
+dograh's transcriber and voice are chosen in its own UI and stored in its
+database; the hand cannot set them through the environment. Out of the box
+dograh offers cloud providers (Deepgram, ElevenLabs). On this machine they
+should point at the local Speaches hand instead. Choose *Local Models
+(Speaches)* for both speech-to-text and text-to-speech with:
+
+- base URL `http://host.containers.internal:8010/v1` (dograh's own suggestion,
+  `http://localhost:8000/v1`, is dograh's API inside its own container);
+- API key: the `SPEACHES_API_KEY` value;
+- transcriber model `Systran/faster-whisper-small`.
+
+When asked whether voice is private, check which providers dograh actually has
+selected and say so. A cloud transcriber means every caller's voice is sent to
+that company.
+
 ## Calls reach real people and cost real money
 
 - Never dial a number or start a campaign on your own initiative. Only when the

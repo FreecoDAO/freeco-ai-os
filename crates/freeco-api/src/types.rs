@@ -23,6 +23,10 @@ pub struct SpawnRequest {
 pub struct SpawnResponse {
     pub agent_id: String,
     pub name: String,
+    /// The hire security review's findings. An owner's hire is not held by
+    /// them, as an agent's is -- the owner is who would approve it -- but
+    /// they are shown and logged.
+    pub security_review: String,
 }
 
 /// A file attachment reference (from a prior upload).
@@ -48,6 +52,16 @@ pub struct MessageRequest {
     /// Sender display name.
     #[serde(default)]
     pub sender_name: Option<String>,
+    /// The conversation this message belongs to. Without it the message goes
+    /// to the agent's current conversation, which is whichever any window last
+    /// switched to -- not necessarily the one the sender is looking at.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Where the message came from, as a gateway reports it
+    /// (`{"channel": "whatsapp", ...}`). A message relayed from a chat channel
+    /// is outside content and is checked for prompt-injection wording.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Response from sending a message.
@@ -156,6 +170,35 @@ pub struct MigrateScanRequest {
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
+}
+
+/// Request to scan a GitHub repository's skills without installing.
+#[derive(Debug, Deserialize)]
+pub struct GitHubSkillPreviewRequest {
+    /// `owner/repo[/path][@ref]` or a github.com URL.
+    pub source: String,
+}
+
+/// Request to install skills from a GitHub repository.
+#[derive(Debug, Deserialize)]
+pub struct GitHubSkillInstallRequest {
+    /// Same source string as the preview.
+    pub source: String,
+    /// Full commit SHA from the preview. Omitted = resolve the ref now.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Skill names to install; empty = every unblocked skill found.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Replace an installed or built-in skill with the same name.
+    #[serde(default)]
+    pub overwrite: bool,
+    /// Reject skills without a valid Ed25519 signature.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Optional hex-encoded allow-list of signer public keys.
+    #[serde(default)]
+    pub allowed_signer_keys: Vec<String>,
 }
 
 /// Query parameters for `GET /api/commands`.

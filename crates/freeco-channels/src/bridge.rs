@@ -93,6 +93,24 @@ fn format_channel_help() -> String {
     msg
 }
 
+/// Who wrote a channel message: the person, not the chat it arrived in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageSender {
+    /// Channel type, e.g. `telegram`.
+    pub channel: String,
+    /// The person's stable id on that channel (see `sender_user_id`).
+    pub user_id: String,
+    /// Display name, which may change and is not unique.
+    pub display_name: String,
+}
+
+impl MessageSender {
+    /// `channel:user_id`: the conversation's label and the run's sender id.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.channel, self.user_id)
+    }
+}
+
 /// Kernel operations needed by channel adapters.
 ///
 /// Defined here to avoid circular deps (freeco-channels can't depend on freeco-kernel).
@@ -120,6 +138,38 @@ pub trait ChannelBridgeHandle: Send + Sync {
             .collect::<Vec<_>>()
             .join("\n");
         self.send_message(agent_id, &text).await
+    }
+
+    /// Send one person's message, in that person's own conversation with the
+    /// agent, and run it as theirs (a guest unless they are bound to an owner
+    /// or admin account).
+    ///
+    /// Every channel user used to land in the agent's one current
+    /// conversation: a Telegram user saw the replies to whoever wrote before,
+    /// and the agent answered strangers with the owner's memory. The default
+    /// keeps that old behaviour for handles that have only one conversation.
+    async fn send_message_from(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Option<Vec<ContentBlock>>,
+        from: &MessageSender,
+    ) -> Result<String, String> {
+        let _ = from;
+        match blocks {
+            Some(blocks) => self.send_message_with_blocks(agent_id, blocks).await,
+            None => self.send_message(agent_id, message).await,
+        }
+    }
+
+    /// Whether this person runs the assistant (an owner or admin), and so may
+    /// use the commands that change it: approvals, models, schedules,
+    /// triggers, workflows, resets. Everyone else may only chat.
+    ///
+    /// The default allows everyone, for handles with no notion of users.
+    async fn is_operator(&self, channel: &str, user_id: &str) -> bool {
+        let _ = (channel, user_id);
+        true
     }
 
     /// Find an agent by name, returning its ID.
@@ -666,6 +716,15 @@ fn spawn_typing_loop(
     })
 }
 
+/// Who wrote `message`, for [`ChannelBridgeHandle::send_message_from`].
+fn message_sender(channel: &str, message: &ChannelMessage) -> MessageSender {
+    MessageSender {
+        channel: channel.to_string(),
+        user_id: sender_user_id(message).to_string(),
+        display_name: message.sender.display_name.clone(),
+    }
+}
+
 /// Extract the sender's user identity from a message.
 ///
 /// Some adapters (e.g. Slack) set `platform_id` to the channel/conversation ID
@@ -891,6 +950,7 @@ async fn dispatch_message(
             handle,
             router,
             &message.sender,
+            ct_str,
             sender_user_id(message),
         )
         .await;
@@ -1102,6 +1162,7 @@ async fn dispatch_message(
                 handle,
                 router,
                 &message.sender,
+                ct_str,
                 sender_user_id(message),
             )
             .await;
@@ -1150,8 +1211,9 @@ async fn dispatch_message(
                             let t = text.clone();
                             let aid = *aid;
                             let name = name.clone();
+                            let from = message_sender(ct_str, message);
                             handles_vec.push(tokio::spawn(async move {
-                                let result = h.send_message(aid, &t).await;
+                                let result = h.send_message_from(aid, &t, None, &from).await;
                                 (name, aid, result)
                             }));
                         }
@@ -1168,7 +1230,15 @@ async fn dispatch_message(
                 freeco_types::config::BroadcastStrategy::Sequential => {
                     for (name, maybe_id) in &targets {
                         if let Some(aid) = maybe_id {
-                            match handle.send_message(*aid, &text).await {
+                            match handle
+                                .send_message_from(
+                                    *aid,
+                                    &text,
+                                    None,
+                                    &message_sender(ct_str, message),
+                                )
+                                .await
+                            {
                                 Ok(r) => responses.push(format!("[{name}]: {r}")),
                                 Err(e) => responses.push(format!("[{name}]: Error: {e}")),
                             }
@@ -1331,7 +1401,10 @@ async fn dispatch_message(
     };
 
     // Send to agent and relay response
-    let result = handle.send_message(agent_id, &prefixed_text).await;
+    let from = message_sender(ct_str, message);
+    let result = handle
+        .send_message_from(agent_id, &prefixed_text, None, &from)
+        .await;
 
     // Stop the typing refresh now that we have a response
     typing_task.abort();
@@ -1359,7 +1432,7 @@ async fn dispatch_message(
             // Try re-resolution before reporting error
             if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
                 let typing_task2 = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
-                let retry = handle.send_message(new_id, &text).await;
+                let retry = handle.send_message_from(new_id, &text, None, &from).await;
                 typing_task2.abort();
                 match retry {
                     Ok(response) => {
@@ -1784,8 +1857,9 @@ async fn dispatch_with_blocks(
     // Continuous typing indicator (see spawn_typing_loop doc)
     let typing_task = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
 
+    let from = message_sender(ct_str, message);
     let result = handle
-        .send_message_with_blocks(agent_id, blocks.clone())
+        .send_message_from(agent_id, "", Some(blocks.clone()), &from)
         .await;
 
     typing_task.abort();
@@ -1823,7 +1897,9 @@ async fn dispatch_with_blocks(
             // Try re-resolution before reporting error
             if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
                 let typing_task2 = spawn_typing_loop(adapter_arc.clone(), message.sender.clone());
-                let retry = handle.send_message_with_blocks(new_id, blocks).await;
+                let retry = handle
+                    .send_message_from(new_id, "", Some(blocks), &from)
+                    .await;
                 typing_task2.abort();
                 match retry {
                     Ok(response) => {
@@ -1931,12 +2007,21 @@ async fn dispatch_with_blocks(
 /// (Discord, Slack), callers must pass `sender_user_id(message)` here so that
 /// per-user agent routing works correctly. For adapters where platform_id is
 /// already the user (CLI, Telegram DM), the two are equivalent.
+/// Commands anyone who may chat can use. Every other command changes or
+/// reveals how the assistant runs, and is for its operators only.
+const PUBLIC_COMMANDS: &[&str] = &["start", "help", "agents", "agent"];
+
+/// Told to someone who used an operator's command.
+const OPERATOR_ONLY: &str = "That command is for the people who run this assistant.";
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     name: &str,
     args: &[String],
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
     sender: &ChannelUser,
+    channel: &str,
     user_id: &str,
 ) -> String {
     // Canonicalise through the unified command registry: aliases resolve to
@@ -1947,6 +2032,12 @@ async fn handle_command(
         .filter(|def| def.surfaces.contains(Surfaces::CHANNEL))
         .map(|def| def.name)
         .unwrap_or(name);
+    // Commands ran before any access check: anyone who could message a
+    // channel could /approve a pending shell command, add schedules and
+    // triggers, run workflows, switch the agent's model or reset its chat.
+    if !PUBLIC_COMMANDS.contains(&canonical) && !handle.is_operator(channel, user_id).await {
+        return OPERATOR_ONLY.to_string();
+    }
     match canonical {
         "start" => {
             let agents = handle.list_agents().await.unwrap_or_default();
@@ -2265,10 +2356,11 @@ mod tests {
             freeco_user: None,
         };
 
-        let result = handle_command("agents", &[], &handle, &router, &sender, "user1").await;
+        let result =
+            handle_command("agents", &[], &handle, &router, &sender, "test", "user1").await;
         assert!(result.contains("coder"));
 
-        let result = handle_command("help", &[], &handle, &router, &sender, "user1").await;
+        let result = handle_command("help", &[], &handle, &router, &sender, "test", "user1").await;
         assert!(result.contains("/agents"));
     }
 
@@ -2292,6 +2384,7 @@ mod tests {
             &handle,
             &router,
             &sender,
+            "test",
             "user1",
         )
         .await;
@@ -2327,6 +2420,7 @@ mod tests {
             &handle,
             &router,
             &sender,
+            "test",
             user_id,
         )
         .await;
@@ -2357,7 +2451,7 @@ mod tests {
             freeco_user: None,
         };
 
-        let result = handle_command("agent", &[], &handle, &router, &sender, "user1").await;
+        let result = handle_command("agent", &[], &handle, &router, &sender, "test", "user1").await;
         assert!(result.contains("Usage: /agent <name>"));
         assert!(result.contains("coder"));
     }
@@ -2809,5 +2903,55 @@ mod tests {
             media_type_from_url("https://api.telegram.org/file/bot123/photos/file_42"),
             "image/jpeg"
         );
+    }
+
+    /// A handle whose senders are all guests: no one runs the assistant.
+    struct GuestOnlyHandle;
+
+    #[async_trait]
+    impl ChannelBridgeHandle for GuestOnlyHandle {
+        async fn send_message(&self, _agent_id: AgentId, _message: &str) -> Result<String, String> {
+            Ok("reply".to_string())
+        }
+        async fn find_agent_by_name(&self, _name: &str) -> Result<Option<AgentId>, String> {
+            Ok(None)
+        }
+        async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+            Ok(vec![])
+        }
+        async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+            Err("no".to_string())
+        }
+        async fn is_operator(&self, _channel: &str, _user_id: &str) -> bool {
+            false
+        }
+        async fn resolve_approval_text(&self, _id: &str, _approve: bool) -> String {
+            "APPROVED".to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn guests_may_chat_but_not_run_the_assistant() {
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(GuestOnlyHandle);
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "42".to_string(),
+            display_name: "Guest".to_string(),
+            freeco_user: None,
+        };
+        for (cmd, args) in [
+            ("approve", vec!["abc".to_string()]),
+            ("model", vec!["gpt".to_string()]),
+            ("new", vec![]),
+            ("schedule", vec!["add".to_string()]),
+            ("trigger", vec!["del".to_string(), "x".to_string()]),
+            ("workflow", vec!["run".to_string(), "x".to_string()]),
+            ("budget", vec![]),
+        ] {
+            let out = handle_command(cmd, &args, &handle, &router, &sender, "telegram", "42").await;
+            assert_eq!(out, OPERATOR_ONLY, "/{cmd} must be refused");
+        }
+        let help = handle_command("help", &[], &handle, &router, &sender, "telegram", "42").await;
+        assert_ne!(help, OPERATOR_ONLY);
     }
 }

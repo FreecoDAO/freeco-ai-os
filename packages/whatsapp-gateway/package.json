@@ -8,15 +8,16 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6",
+    "@whiskeysockets/baileys": "6.7.24",
     "qrcode": "^1.5",
     "pino": "^9"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "license": "MIT"
 }

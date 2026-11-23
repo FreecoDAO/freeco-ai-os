@@ -818,6 +818,42 @@ List all active sessions across agents.
 }
 ```
 
+### GET /api/starnet/state
+
+What the dashboard's Starnet page draws, in one read-only poll. Rooms are
+teams (sorted by name), with a last "No team" room for agents on no team;
+every agent appears in exactly one room. `state` is `idle`, `thinking`,
+`tool`, `waiting_on_helper`, `waiting_for_you` or `error` (the agent crashed,
+or its last tool failed less than a minute ago). `task` is the newest
+in-progress task assigned to the agent. `degraded` lists `teams` or `tasks`
+when that part could not be read; the agents are still returned.
+
+**Response** `200 OK`:
+
+```json
+{
+  "now_ms": 1763510400000,
+  "rooms": [
+    { "id": "t1b2...", "name": "Research", "project": "Launch", "agents": ["a1b2c3d4-..."] },
+    { "id": null, "name": "No team", "project": null, "agents": ["e5f6..."] }
+  ],
+  "agents": [
+    {
+      "agent_id": "a1b2c3d4-...",
+      "name": "researcher",
+      "state": "tool",
+      "tool": "web_fetch",
+      "since_ms": 1763510395000,
+      "turns": 1,
+      "waiting_approvals": 0,
+      "task": "Compare three suppliers",
+      "room": "t1b2..."
+    }
+  ],
+  "degraded": []
+}
+```
+
 ### DELETE /api/sessions/{id}
 
 Delete a specific session and its conversation history.
@@ -1254,6 +1290,63 @@ Install a skill from ClawHub. Downloads, verifies SHA256 checksum, scans for pro
 }
 ```
 
+### POST /api/skills/github/preview
+
+Scan the skills in a GitHub repository without installing anything. The ref is resolved to a full commit SHA, that commit's archive is downloaded, and every folder with a `SKILL.md` gets the prompt-injection scan, a scan of its scripts and files, and the manifest scan. Skills with a Critical finding are marked `blocked`.
+
+`source` accepts `owner/repo`, `owner/repo/path/to/skills`, an optional `@branch-or-tag`, or a `https://github.com/owner/repo/tree/<ref>/<path>` link. Set `GITHUB_TOKEN` for private repositories or higher rate limits.
+
+**Request Body**:
+
+```json
+{ "source": "FreecoDAO/ponytail/skills" }
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "repo": "FreecoDAO/ponytail",
+  "requested_ref": null,
+  "path": "skills",
+  "commit": "96608e0…(40 hex)",
+  "archive_sha256": "…",
+  "skills": [
+    {
+      "name": "ponytail",
+      "description": "Lazy senior dev mode…",
+      "repo_path": "skills/ponytail",
+      "is_prompt_only": true,
+      "files": 1,
+      "warnings": [],
+      "blocked": null,
+      "already_installed": false,
+      "shadows_bundled": false
+    }
+  ]
+}
+```
+
+### POST /api/skills/github/install
+
+Install skills from a GitHub repository at one commit. Pass the `commit` from the preview so the files installed are the files scanned. Blocked skills are never installed. A skill that is already installed or that would replace a built-in skill is skipped unless `overwrite` is true. Installed skills land in `~/.freeco-ai/skills/<name>/` with `source = github` (repo, commit, path) in `skill.toml` and a `.freeco-source.json` provenance file, and the registry hot-reloads.
+
+**Request Body**:
+
+```json
+{
+  "source": "FreecoDAO/ponytail/skills",
+  "commit": "96608e0…(40 hex)",
+  "skills": ["ponytail", "ponytail-review"],
+  "overwrite": false,
+  "require_signed": false
+}
+```
+
+**Response** `200 OK`: `{ "status": "installed" | "nothing_installed", "repo", "commit", "archive_sha256", "installed": [report…], "skipped": [report…] }`. Each skipped report's `blocked` says why.
+
+Agents use the same flow through the `skill_github_preview` tool (read-only) and the `skill_install_github` tool, which always asks a human for approval, whatever `[approval]` says.
+
 ---
 
 ## MCP & A2A Protocol Endpoints
@@ -1676,15 +1769,17 @@ Run the migration. Converts manifests, imports skills, and optionally imports se
 
 ### POST /api/agents/{id}/session/reset
 
-Reset an agent's session, clearing all conversation history.
+Start a new conversation and make it the agent's current one. The previous
+conversation is kept and stays listed in `GET /api/agents/{id}/sessions`;
+delete one explicitly with `DELETE /api/sessions/{id}`.
 
 **Response** `200 OK`:
 
 ```json
 {
-  "status": "reset",
-  "agent_id": "a1b2c3d4-...",
-  "new_session_id": "s5e6f7g8-..."
+  "status": "ok",
+  "message": "New conversation started",
+  "session_id": "s5e6f7g8-..."
 }
 ```
 
@@ -2283,7 +2378,9 @@ The `Retry-After` header indicates the window duration in seconds.
 | POST | `/api/agents/{id}/message/stream` | Send message (SSE stream) |
 | GET | `/api/agents/{id}/session` | Get conversation history |
 | GET | `/api/agents/{id}/ws` | WebSocket chat |
-| POST | `/api/agents/{id}/session/reset` | Reset session |
+| POST | `/api/agents/{id}/session/reset` | Start a new conversation (the old one is kept) |
+| POST | `/api/dispatch` | Which conversation a popup message belongs in (`here`, `session`, `new_task`, `propose`) |
+| POST | `/api/transcribe` | Words in an audio body (`Content-Type: audio/*`, max 16 MB); nothing stored |
 | POST | `/api/agents/{id}/session/compact` | LLM-based compaction |
 | POST | `/api/agents/{id}/stop` | Cancel current run |
 | PUT | `/api/agents/{id}/model` | Switch model |
@@ -2320,7 +2417,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | DELETE | `/api/providers/{name}/key` | Remove provider API key |
 | POST | `/api/providers/{name}/test` | Test provider connectivity |
 | **Skills & Marketplace** | | |
-| GET | `/api/skills` | List installed skills (60 bundled) |
+| GET | `/api/skills` | List installed skills (66 bundled) |
 | POST | `/api/skills/install` | Install skill |
 | POST | `/api/skills/uninstall` | Uninstall skill |
 | POST | `/api/skills/create` | Create new skill |
@@ -2330,6 +2427,9 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/clawhub/browse` | Browse ClawHub |
 | GET | `/api/clawhub/skill/{slug}` | Skill details |
 | POST | `/api/clawhub/install` | Install from ClawHub |
+| **GitHub skills** | | |
+| POST | `/api/skills/github/preview` | Scan a repo's skills at one commit |
+| POST | `/api/skills/github/install` | Install scanned skills from that commit |
 | **MCP & A2A** | | |
 | GET | `/api/mcp/servers` | MCP server connections |
 | POST | `/mcp` | MCP endpoint for Claude Code / Codex (token required) |

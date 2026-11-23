@@ -10,11 +10,36 @@
 //! the write fails, rather than leaving plaintext keys readable to other
 //! accounts on the machine.
 
+/// Reject a secrets.env entry that could break out of its own line.
+///
+/// secrets.env is loaded into the process environment at startup, so a value
+/// containing a newline would let the caller define arbitrary extra variables
+/// (e.g. `LD_PRELOAD`) that every child process then inherits. Keys must be a
+/// plain env var name; `std::env::set_var` also panics on `=` or NUL in a key.
+pub fn validate_secret_env_entry(key: &str, value: &str) -> Result<(), String> {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "Invalid variable name '{key}': only letters, digits and '_' are allowed"
+        ));
+    }
+    if value.contains(['\n', '\r', '\0']) {
+        return Err("Value must not contain line breaks or NUL characters".to_string());
+    }
+    Ok(())
+}
+
+/// Write or update a key in the secrets.env file.
+/// File format: one `KEY=value` per line. Existing keys are overwritten.
+/// Fails with `ErrorKind::InvalidInput` if the entry is rejected by
+/// [`validate_secret_env_entry`].
 pub fn write_secret_env(
     path: &std::path::Path,
     key: &str,
     value: &str,
 ) -> Result<(), std::io::Error> {
+    validate_secret_env_entry(key, value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -74,4 +99,19 @@ pub fn write_secret_env(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_injection_and_bad_names() {
+        assert!(validate_secret_env_entry("GROQ_API_KEY", "sk-x\nLD_PRELOAD=/x.so").is_err());
+        assert!(validate_secret_env_entry("GROQ_API_KEY", "sk-x\r").is_err());
+        for key in ["", "A=B", "A\nB", "A B", "A\0B"] {
+            assert!(validate_secret_env_entry(key, "v").is_err(), "{key:?}");
+        }
+        assert!(validate_secret_env_entry("MY_PROVIDER_API_KEY", "sk-abc=123").is_ok());
+    }
 }

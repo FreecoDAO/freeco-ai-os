@@ -2,7 +2,10 @@
 //!
 //! Auto-cascades through available providers based on configured API keys.
 
+use crate::media_understanding::local_speech_error;
 use freeco_types::config::TtsConfig;
+use freeco_types::media::is_local_url;
+use tracing::error;
 
 /// Maximum audio response size (10MB).
 const MAX_AUDIO_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
@@ -33,6 +36,9 @@ pub struct TtsEngine {
     /// from `MediaConfig.local_audio_api_key_env`. A custom endpoint must not
     /// be sent the real `OPENAI_API_KEY`.
     local_api_key_env: Option<String>,
+    /// `MediaConfig::local_only_effective()`: speak only through a local
+    /// endpoint, never auto-detect or fall back to a cloud provider.
+    local_only: bool,
 }
 
 impl TtsEngine {
@@ -42,6 +48,53 @@ impl TtsEngine {
             openai_base_url: None,
             elevenlabs_base_url: None,
             local_api_key_env: None,
+            local_only: false,
+        }
+    }
+
+    /// Keep speech local (`[media].local_only`): only the configured local
+    /// endpoint is used, and its failure is returned as an error.
+    pub fn with_local_only(mut self, local_only: bool) -> Self {
+        self.local_only = local_only;
+        self
+    }
+
+    /// The provider to use when `local_only` is in effect: the one whose base
+    /// URL is set to a local address. OpenAI and ElevenLabs keys in the
+    /// environment are never consulted.
+    fn local_only_provider(&self) -> Result<&'static str, String> {
+        let local = |url: &Option<String>| -> Option<Result<(), String>> {
+            let url = url.as_deref().map(str::trim).filter(|u| !u.is_empty())?;
+            if is_local_url(url) {
+                Some(Ok(()))
+            } else {
+                Some(Err(format!(
+                    "Text-to-speech refused: [media].local_only is on, but {url} is not a \
+                     local address, so no text was sent to it. Point it at the local \
+                     Speaches service, or set [media].local_only = false to allow it."
+                )))
+            }
+        };
+        let not_configured = |setting: &str| {
+            format!(
+                "Text-to-speech refused: [media].local_only is on, but no local \
+                 text-to-speech is configured. Set [media].{setting} to the local \
+                 Speaches service (for example http://127.0.0.1:8010). No cloud \
+                 service was tried."
+            )
+        };
+        match self.config.provider.as_deref() {
+            Some("elevenlabs") => match local(&self.elevenlabs_base_url) {
+                Some(Ok(())) => Ok("elevenlabs"),
+                Some(Err(e)) => Err(e),
+                None => Err(not_configured("tts_elevenlabs_base_url")),
+            },
+            None | Some("openai") => match local(&self.openai_base_url) {
+                Some(Ok(())) => Ok("openai"),
+                Some(Err(e)) => Err(e),
+                None => Err(not_configured("tts_openai_base_url")),
+            },
+            Some(other) => Err(format!("Unknown TTS provider: {other}")),
         }
     }
 
@@ -100,12 +153,17 @@ impl TtsEngine {
             ));
         }
 
-        let provider = self
-            .config
-            .provider
-            .as_deref()
-            .or_else(|| Self::detect_provider())
-            .ok_or("No TTS provider configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY")?;
+        let provider: &str = if self.local_only {
+            self.local_only_provider().inspect_err(|e| {
+                error!(error = %e, "text-to-speech refused: [media].local_only is on");
+            })?
+        } else {
+            self.config
+                .provider
+                .as_deref()
+                .or_else(|| Self::detect_provider())
+                .ok_or("No TTS provider configured. Set OPENAI_API_KEY or ELEVENLABS_API_KEY")?
+        };
 
         match provider {
             "openai" => {
@@ -165,12 +223,25 @@ impl TtsEngine {
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .send()
             .await
-            .map_err(|e| format!("OpenAI TTS request failed: {e}"))?;
+            .map_err(|e| {
+                if self.local_only {
+                    local_speech_error("text-to-speech", &url, &format!("request failed: {e}"))
+                } else {
+                    format!("OpenAI TTS request failed: {e}")
+                }
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let err = response.text().await.unwrap_or_default();
             let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            if self.local_only {
+                return Err(local_speech_error(
+                    "text-to-speech",
+                    &url,
+                    &format!("HTTP {status}: {truncated}"),
+                ));
+            }
             return Err(format!("OpenAI TTS failed (HTTP {status}): {truncated}"));
         }
 
@@ -247,12 +318,25 @@ impl TtsEngine {
             .timeout(std::time::Duration::from_secs(self.config.timeout_secs))
             .send()
             .await
-            .map_err(|e| format!("ElevenLabs TTS request failed: {e}"))?;
+            .map_err(|e| {
+                if self.local_only {
+                    local_speech_error("text-to-speech", &url, &format!("request failed: {e}"))
+                } else {
+                    format!("ElevenLabs TTS request failed: {e}")
+                }
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let err = response.text().await.unwrap_or_default();
             let truncated = crate::str_utils::safe_truncate_str(&err, 500);
+            if self.local_only {
+                return Err(local_speech_error(
+                    "text-to-speech",
+                    &url,
+                    &format!("HTTP {status}: {truncated}"),
+                ));
+            }
             return Err(format!(
                 "ElevenLabs TTS failed (HTTP {status}): {truncated}"
             ));
@@ -455,5 +539,71 @@ mod tests {
             build(Some("https://eleven.example.com/"), voice),
             format!("https://eleven.example.com/v1/text-to-speech/{voice}")
         );
+    }
+
+    /// A local port nothing listens on: bind an ephemeral port, then free it.
+    fn closed_local_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn enabled_config() -> TtsConfig {
+        let mut config = default_config();
+        config.enabled = true;
+        config
+    }
+
+    /// local_only with nothing local configured refuses, whatever cloud keys
+    /// the environment holds -- the cloud provider is never auto-detected.
+    #[tokio::test]
+    async fn local_only_never_picks_a_cloud_provider() {
+        let engine = TtsEngine::new(enabled_config()).with_local_only(true);
+        let err = engine.synthesize("Hello", None, None).await.unwrap_err();
+        assert!(err.contains("local_only"), "{err}");
+        assert!(err.contains("tts_openai_base_url"), "{err}");
+
+        // Explicitly asking for ElevenLabs without a local gateway: refused too.
+        let mut config = enabled_config();
+        config.provider = Some("elevenlabs".into());
+        let engine = TtsEngine::new(config).with_local_only(true);
+        let err = engine.synthesize("Hello", None, None).await.unwrap_err();
+        assert!(err.contains("tts_elevenlabs_base_url"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn local_only_refuses_a_remote_base_url() {
+        let engine = TtsEngine::new(enabled_config())
+            .with_base_urls(Some("https://api.openai.com".into()), None)
+            .with_local_only(true);
+        let err = engine.synthesize("Hello", None, None).await.unwrap_err();
+        assert!(err.contains("not a local address"), "{err}");
+    }
+
+    #[test]
+    fn local_only_provider_accepts_a_local_speaches() {
+        let engine = TtsEngine::new(enabled_config())
+            .with_base_urls(Some("http://127.0.0.1:8010".into()), None)
+            .with_local_only(true);
+        assert_eq!(engine.local_only_provider().unwrap(), "openai");
+    }
+
+    /// The local endpoint is down: the caller gets an error naming the URL and
+    /// saying no cloud service was tried.
+    #[tokio::test]
+    async fn local_only_surfaces_a_local_failure() {
+        let port = closed_local_port();
+        let base = format!("http://127.0.0.1:{port}");
+        let mut config = enabled_config();
+        config.timeout_secs = 5;
+        let engine = TtsEngine::new(config)
+            .with_base_urls(Some(base.clone()), None)
+            .with_local_only(true);
+        let err = engine.synthesize("Hello", None, None).await.unwrap_err();
+        assert!(
+            err.contains(&format!("{base}/v1/audio/speech")),
+            "error must name the URL: {err}"
+        );
+        assert!(err.contains("request failed"), "{err}");
+        assert!(err.contains("no cloud service was tried"), "{err}");
     }
 }

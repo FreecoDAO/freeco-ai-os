@@ -161,6 +161,10 @@ async fn start_test_server_with_provider(
             "/api/cron/jobs",
             axum::routing::get(routes::list_cron_jobs).post(routes::create_cron_job),
         )
+        .route(
+            "/api/starnet/state",
+            axum::routing::get(freeco_api::live_routes::starnet_state),
+        )
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -382,6 +386,54 @@ async fn test_spawn_list_kill_agent() {
     let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["name"], "assistant");
+}
+
+/// The Starnet view's one poll: a new agent on no team gets a desk in the
+/// "No team" room, idle, with no task, and nothing is reported missing.
+#[tokio::test]
+async fn test_starnet_state_seats_every_agent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    let resp = client
+        .get(format!("{}/api/starnet/state", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["now_ms"].as_i64().unwrap() > 0);
+    assert_eq!(body["degraded"], serde_json::json!([]));
+
+    let agent = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent_id"] == agent_id.as_str())
+        .expect("the new agent has a desk");
+    assert_eq!(agent["name"], "test-agent");
+    assert_eq!(agent["state"], "idle");
+    assert!(agent["task"].is_null());
+    assert!(agent["room"].is_null());
+
+    let rooms = body["rooms"].as_array().unwrap();
+    let no_team = rooms.last().expect("a room for agents on no team");
+    assert_eq!(no_team["name"], "No team");
+    assert!(no_team["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == agent_id.as_str()));
 }
 
 /// Regression test for issue #1026: GET /api/agents returns `is_inferencing`
@@ -1010,19 +1062,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         security: std::sync::Arc::new(freeco_api::security::SecurityService::default()),
     });
 
-    let api_key = state.kernel.config.api_key.trim().to_string();
-    let auth_state = middleware::AuthState {
-        api_key: api_key.clone(),
-        auth_enabled: state.kernel.config.auth.enabled,
-        session_secret: if !api_key.is_empty() {
-            api_key.clone()
-        } else if state.kernel.config.auth.enabled {
-            state.kernel.config.auth.password_hash.clone()
-        } else {
-            String::new()
-        },
-        allow_no_auth: true,
-    };
+    let auth_state = middleware::AuthState::from_config(&state.kernel.config, true);
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))

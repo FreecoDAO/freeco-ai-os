@@ -32,12 +32,16 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+pub mod access;
 pub mod backup;
 pub mod bundled_templates;
+pub mod chamber;
 pub mod channel_bridge;
 pub mod chat_tools;
 pub mod crm;
 pub mod csrf;
+pub mod dispatch;
+pub mod live_routes;
 pub mod local_ai;
 pub mod mcp_http;
 pub mod middleware;
@@ -56,6 +60,8 @@ pub mod services;
 pub mod session_auth;
 pub mod stream_chunker;
 pub mod stream_dedup;
+pub mod team_access;
+pub mod teams_routes;
 pub mod types;
 pub mod usage_breakdown;
 pub mod webchat;

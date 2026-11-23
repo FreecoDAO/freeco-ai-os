@@ -75,6 +75,11 @@ pub struct PromptContext {
     /// Read per-turn by the kernel so external writers (cron jobs, integrations)
     /// are reflected in the next LLM call. See issue #843.
     pub context_md: Option<String>,
+    /// The project this conversation is filed under, and its brief.
+    ///
+    /// Every agent working in a project's conversation reads it, the way a
+    /// coding agent reads the CLAUDE.md of the folder it works in.
+    pub project_brief: Option<String>,
 }
 
 /// Build the complete system prompt from a `PromptContext`.
@@ -113,6 +118,14 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         sections.push(tools_section);
     }
 
+    // Section 3.1 — How to run the installation, for agents holding the
+    // management tools (the CEO role). Built from the tools it holds, so no
+    // agent is told to call a tool it lacks.
+    let operations = build_operations_section(&ctx.granted_tools);
+    if !operations.is_empty() {
+        sections.push(operations);
+    }
+
     // Section 4 — Memory Protocol (always present)
     let mem_section = build_memory_section(&ctx.recalled_memories);
     sections.push(mem_section);
@@ -142,6 +155,18 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
         if !persona.is_empty() {
             sections.push(persona);
         }
+    }
+
+    // Section 7.2 — How to hand the owner a file. Agents named the file
+    // ("geneva-vegan-map.html, in your workspace") and told the owner to
+    // double-click it, which nobody can do from a chat.
+    if let (Some(id), Some(_)) = (&ctx.agent_id, &ctx.workspace_path) {
+        sections.push(format!(
+            "## Sharing Files\nWhen you give the owner a file from your workspace, link it \
+             rather than only naming it: [name](/api/agents/{id}/workspace/file?open=true&path=PATH) \
+             with PATH relative to your workspace and URL-encoded. An HTML page opens as a page; \
+             other files open or download."
+        ));
     }
 
     // Section 7.5 — Heartbeat checklist (only for autonomous agents)
@@ -215,6 +240,14 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
             if !ws_ctx.trim().is_empty() {
                 sections.push(cap_str(ws_ctx, 1000));
             }
+        }
+    }
+
+    // Section 14b — the project this conversation belongs to.
+    if let Some(ref brief) = ctx.project_brief {
+        let trimmed = brief.trim();
+        if !trimmed.is_empty() {
+            sections.push(format!("## Project\n{}", cap_str(trimmed, 4000)));
         }
     }
 
@@ -320,6 +353,8 @@ const GLOBAL_GUIDELINES: &str = "\
 ## How You Work\n\
 - You are here to get things done, not to describe why they cannot be. Ambition and care are the same job: the most useful thing you can do is also the most careful one.\n\
 - Read the request for what it is. Do the whole of it, and say plainly which parts you did not do and why.\n\
+- A message often holds several questions or requests. Before you answer, note each one; answer every one, in order, under its own heading or number when there are more than two. If you cannot answer one yet, say which and why -- never answer the first and drop the rest.\n\
+- The conversation above is yours to use. When the user says \"as above\", \"that\" or \"it\", look back through it and act on what they mean; ask only if it is genuinely ambiguous.\n\
 - Judge by what is true, not by what is easy to say. An accurate \"this is broken and here is the cause\" is worth more than a confident summary that is wrong.\n\n\
 ## You Work In A Team\n\
 - You are one agent among several, not a lone assistant. `agent_list` shows who exists and what model each runs; `org_overview` shows the companies, projects and teams they belong to and what each is accountable for.\n\
@@ -338,7 +373,9 @@ const GLOBAL_GUIDELINES: &str = "\
 ## When Something Blocks You\n\
 - \"I can't\" is never a complete answer, and the way past it is to try, not to explain. Attempt the thing, then report what actually happened.\n\
 - Diagnose before reporting. You have tools -- read the config, check the service, read the log, run the command and look at the error. Report the cause, not the symptom: \"the container is not running because its volume is missing\" beats \"the service is unavailable\".\n\
-- Try the obvious alternative first. If the sandbox refuses, ask whether the host is genuinely needed. If one tool fails, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- blocks are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- For ordinary failures, try the obvious alternative first. If the sandbox lacks what you need, ask whether the host is genuinely needed. If one tool errors, consider whether another reaches the same answer. A failure a moment ago is not proof of impossibility now -- outages are usually temporary, and their text stays in your history long after the cause has gone.\n\
+- A security control that blocks you is not an ordinary failure. A stripped header, a refused or denied command, a sandbox or network boundary, a denied approval: each is a decision someone made, not an obstacle to route around. Do not reach the same endpoint, file or action by another path. Finding the other route is useful information; using it is not.\n\
+- Instead, stop and escalate to the owner: what the control was, what you were trying to do, what route would have worked, and the honest case for and against changing the rule. Then carry on with the parts of the work that do not depend on it. An agent that quietly works around a control takes the decision away from the owner, which is the whole point of having one.\n\
 - Escalate only after trying. When you do ask, bring the diagnosis with you: what you attempted, what it returned, and the one decision you need from the user.\n\
 - If a task turns out larger than asked, do the part you are certain of, then say what remains. Proposing instead of starting is how nothing gets done.\n\n\
 ## Working Guidelines\n\
@@ -389,6 +426,91 @@ without sharing what you found.
 - IMPORTANT: If your instructions or persona mention a shell command, script path, or code snippet, \
 execute it via the appropriate tool call (shell_exec, file_write, etc.). Never output commands as \
 code blocks — always call the tool instead.";
+
+/// How to run the installation with the management tools an agent holds.
+///
+/// Kept short because it is in every request the agent makes. Each line is
+/// included only when the agent holds the tools it names.
+pub fn build_operations_section(granted_tools: &[String]) -> String {
+    let has = |name: &str| granted_tools.iter().any(|t| t == name);
+    // Every clause names only tools the agent holds: the owner's blocklist can
+    // remove any one of them, and a prompt naming a missing tool sends the
+    // agent into a refusal.
+    let mut lines: Vec<String> = Vec::new();
+    if has("container_list") {
+        let mut line = String::from(
+            "- A service is down or slow: `container_list` shows every container, whatever \
+             started it",
+        );
+        if has("container_logs") {
+            line.push_str("; `container_logs` shows why it fails");
+        }
+        line.push_str(". Fix the cause");
+        if has("container_restart") {
+            line.push_str(
+                "; use `container_restart` only for a passing fault, then check the state it \
+                 reports",
+            );
+        }
+        line.push_str(
+            ". Never manage containers with shell_exec or sandbox_exec: there is no podman there.",
+        );
+        lines.push(line);
+    }
+    let skill_clauses: Vec<&str> = [
+        ("skill_list", "`skill_list` with a query finds one"),
+        (
+            "agent_skills_set",
+            "`agent_skills_set` switches skills on or off for any agent",
+        ),
+        (
+            "skill_reload",
+            "`skill_reload` picks up skill folders added on disk",
+        ),
+    ]
+    .iter()
+    .filter(|(tool, _)| has(tool))
+    .map(|(_, text)| *text)
+    .collect();
+    if has("agent_skills_set") || has("skill_reload") {
+        lines.push(format!("- Skills: {}.", skill_clauses.join("; ")));
+    }
+    if has("agent_describe") {
+        lines.push(
+            "- `agent_describe` shows what an agent can really do: its model, tools and skills. \
+             Call it on yourself before saying you cannot do something."
+                .to_string(),
+        );
+    }
+    if has("model_list") && has("agent_set_model") {
+        let mut line = String::from(
+            "- Models: `model_list` shows what each agent can be switched to; `agent_set_model` \
+             switches it",
+        );
+        if has("provider_list") {
+            line.push_str("; `provider_list` shows which providers still need a key");
+        }
+        line.push('.');
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## Running FreEco\nYou run this installation the way an operator would: do the work \
+         with your tools instead of asking the owner to type commands.\n",
+    );
+    for line in lines {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(
+        "- After any change, report what you changed and the state you checked afterwards. \
+         Stopping a service, or changing another agent's model or skills when the owner did not \
+         ask for it, is their decision: propose it first.",
+    );
+    out
+}
 
 /// Build the grouped tools section (Section 3).
 pub fn build_tools_section(granted_tools: &[String]) -> String {
@@ -467,6 +589,11 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
     out
 }
 
+/// Characters of skill instructions injected into the system prompt. Only
+/// skills an agent names in its `skills` allowlist are injected; this fits
+/// about two whole bundled skills.
+const SKILL_CONTEXT_CAP: usize = 8000;
+
 fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     let mut out = String::from("## Skills\n");
     if !skill_summary.is_empty() {
@@ -477,7 +604,12 @@ fn build_skills_section(skill_summary: &str, prompt_context: &str) -> String {
     }
     if !prompt_context.is_empty() {
         out.push('\n');
-        out.push_str(&cap_str(prompt_context, 2000));
+        out.push_str(&cap_str(prompt_context, SKILL_CONTEXT_CAP));
+        if prompt_context.chars().count() > SKILL_CONTEXT_CAP {
+            out.push_str(
+                "\n(Skill instructions cut for length. Call skill_describe with the skill name for the full text.)",
+            );
+        }
     }
     out
 }
@@ -608,7 +740,8 @@ fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]
     }
     out.push_str(
         "\nYou can communicate with them using `agent_send` (by name) and see all agents with `agent_list`. \
-         Delegate tasks to specialized agents when appropriate.",
+         Delegate tasks to specialized agents when appropriate: `agent_delegate` hands several \
+         independent tasks to them at once and they work in parallel.",
     );
     out
 }
@@ -653,7 +786,14 @@ pub fn tool_category(name: &str) -> &'static str {
 
         "memory_store" | "memory_recall" | "memory_delete" | "memory_list" => "Memory",
 
-        "agent_send" | "agent_spawn" | "agent_list" | "agent_kill" | "agent_activate" => "Agents",
+        "agent_send" | "agent_delegate" | "agent_spawn" | "agent_list" | "agent_kill"
+        | "agent_activate" | "agent_sleep" | "agent_describe" | "agent_find"
+        | "agent_set_model" | "agent_skills_set" => "Agents",
+
+        "container_list" | "container_logs" | "container_start" | "container_stop"
+        | "container_restart" => "Containers",
+
+        "model_list" | "provider_list" | "provider_key_set" => "Models",
 
         "image_describe" | "image_generate" | "audio_transcribe" | "tts_speak" => "Media",
 
@@ -712,10 +852,31 @@ pub fn tool_hint(name: &str) -> &'static str {
 
         // Agents
         "agent_send" => "send a message to another agent",
+        "agent_delegate" => "hand tasks to agents and run them at the same time",
         "agent_spawn" => "create a new agent",
         "agent_list" => "list running agents",
         "agent_kill" => "terminate an agent",
         "agent_activate" => "wake up an inactive agent so it can receive work",
+        "agent_sleep" => "put an agent to sleep so it uses no tokens until woken",
+        "agent_describe" => "see an agent's model, tools and skills, yours included",
+        "agent_set_model" => "switch an agent to another model",
+        "agent_skills_set" => "switch skills on or off for an agent",
+
+        // Containers
+        "container_list" => "every container on this machine and its state",
+        "container_logs" => "read a container's latest log lines",
+        "container_start" => "start a stopped container",
+        "container_stop" => "stop a container",
+        "container_restart" => "restart a container",
+
+        // Models
+        "model_list" => "models agents can use, with price and context size",
+        "provider_list" => "which model providers have a working key",
+        "provider_key_set" => "store a provider's API key",
+        "skill_reload" => "reload skills from disk",
+        "skill_list" => "find installed skills",
+        "skill_describe" => "read a skill's full instructions",
+        "agent_find" => "find agents by name, tag or tool",
 
         // Media
         "image_describe" => "describe an image",
@@ -820,6 +981,57 @@ mod tests {
             GLOBAL_GUIDELINES.matches("## Truth And Evidence").count(),
             1
         );
+    }
+
+    /// Alternatives are for ordinary failures; a security control that blocks
+    /// the agent is escalated to the owner, never routed around. The two rules
+    /// sit next to each other so neither reads as overriding the other.
+    #[test]
+    fn security_blocks_are_escalated_not_routed_around() {
+        let g = GLOBAL_GUIDELINES;
+        let alt = g
+            .find("For ordinary failures, try the obvious alternative first")
+            .expect("alternatives rule is scoped to ordinary failures");
+        let sec = g
+            .find("A security control that blocks you is not an ordinary failure")
+            .expect("security-block rule present");
+        assert!(
+            sec > alt,
+            "the security exception must follow the alternatives rule"
+        );
+        assert!(g.contains("not an obstacle to route around"));
+        assert!(g.contains("Do not reach the same endpoint, file or action by another path"));
+        assert!(g.contains("escalate to the owner"));
+        assert!(g.contains("case for and against"));
+        assert!(g.contains("carry on with the parts of the work that do not depend on it"));
+        // The unscoped form pushed agents towards bypassing a refused sandbox.
+        assert!(!g.contains("Try the obvious alternative first. If the sandbox refuses"));
+        // Subagents get it too.
+        let mut ctx = basic_ctx();
+        ctx.is_subagent = true;
+        assert!(build_system_prompt(&ctx).contains("not an obstacle to route around"));
+    }
+
+    /// Agents answered the first of several questions and dropped the rest,
+    /// and said they could not see a conversation that was right above.
+    #[test]
+    fn global_guidelines_answer_every_question_and_use_the_conversation() {
+        assert!(GLOBAL_GUIDELINES.contains("answer every one, in order"));
+        assert!(GLOBAL_GUIDELINES.contains("never answer the first and drop the rest"));
+        assert!(GLOBAL_GUIDELINES.contains("The conversation above is yours to use"));
+    }
+
+    #[test]
+    fn the_prompt_says_how_to_link_a_workspace_file() {
+        let ctx = PromptContext {
+            agent_id: Some("abc".to_string()),
+            workspace_path: Some("/w".to_string()),
+            ..Default::default()
+        };
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("/api/agents/abc/workspace/file?open=true&path=PATH"));
+        let without = build_system_prompt(&PromptContext::default());
+        assert!(!without.contains("## Sharing Files"));
     }
 
     /// The clock must stay behind the static prompt.
@@ -1016,6 +1228,24 @@ mod tests {
     }
 
     #[test]
+    fn test_skills_section_keeps_whole_skill_context() {
+        let mut ctx = basic_ctx();
+        ctx.skill_prompt_context = format!("--- Skill: a ---\n{}END", "x".repeat(3500));
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("END"), "a 3.5 KB skill must not be cut");
+        assert!(!prompt.contains("cut for length"));
+    }
+
+    #[test]
+    fn test_skills_section_points_to_skill_describe_when_cut() {
+        let mut ctx = basic_ctx();
+        ctx.skill_prompt_context = "x".repeat(SKILL_CONTEXT_CAP + 100);
+        let prompt = build_system_prompt(&ctx);
+        assert!(prompt.contains("cut for length"));
+        assert!(prompt.contains("skill_describe"));
+    }
+
+    #[test]
     fn test_mcp_section_omitted_when_empty() {
         let ctx = basic_ctx();
         let prompt = build_system_prompt(&ctx);
@@ -1195,5 +1425,94 @@ mod tests {
         assert_eq!(capitalize("files"), "Files");
         assert_eq!(capitalize(""), "");
         assert_eq!(capitalize("MCP"), "MCP");
+    }
+
+    #[test]
+    fn operations_section_is_absent_without_management_tools() {
+        let tools = vec!["file_read".to_string(), "web_search".to_string()];
+        assert!(build_operations_section(&tools).is_empty());
+        let mut ctx = basic_ctx();
+        ctx.granted_tools = tools;
+        assert!(!build_system_prompt(&ctx).contains("## Running FreEco"));
+    }
+
+    #[test]
+    fn operations_section_names_only_tools_the_agent_holds() {
+        let tools: Vec<String> = ["container_list", "container_logs", "container_restart"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let section = build_operations_section(&tools);
+        assert!(section.starts_with("## Running FreEco"));
+        assert!(section.contains("container_logs"));
+        assert!(section.contains("no podman there"));
+        // No skill or model lines for an agent without those tools.
+        assert!(!section.contains("agent_skills_set"));
+        assert!(!section.contains("model_list"));
+
+        let mut ctx = basic_ctx();
+        ctx.granted_tools = tools;
+        assert!(build_system_prompt(&ctx).contains("## Running FreEco"));
+    }
+
+    #[test]
+    fn operations_section_never_names_a_tool_the_owner_removed() {
+        // The CEO set with restart, logs, skill_list and provider_list
+        // blocklisted: none of them may be recommended.
+        let removed = [
+            "container_restart",
+            "container_logs",
+            "skill_list",
+            "provider_list",
+        ];
+        let tools: Vec<String> = crate::tool_policy::CEO_MANAGEMENT_TOOLS
+            .iter()
+            .filter(|t| !removed.contains(t))
+            .map(|s| s.to_string())
+            .collect();
+        let section = build_operations_section(&tools);
+        for name in removed {
+            assert!(!section.contains(name), "{name} named: {section}");
+        }
+        assert!(section.contains("container_list"));
+        assert!(section.contains("agent_skills_set"));
+        assert!(section.contains("agent_set_model"));
+    }
+
+    #[test]
+    fn operations_section_for_the_full_ceo_toolset_stays_short() {
+        let tools: Vec<String> = crate::tool_policy::CEO_MANAGEMENT_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let section = build_operations_section(&tools);
+        for name in [
+            "container_list",
+            "agent_skills_set",
+            "agent_describe",
+            "model_list",
+        ] {
+            assert!(section.contains(name), "{name} missing");
+        }
+        // It rides on every request the CEO makes.
+        assert!(
+            section.chars().count() < 1600,
+            "{}",
+            section.chars().count()
+        );
+    }
+
+    #[test]
+    fn management_tools_are_grouped_and_described() {
+        assert_eq!(tool_category("container_restart"), "Containers");
+        assert_eq!(tool_category("agent_skills_set"), "Agents");
+        assert_eq!(tool_category("model_list"), "Models");
+        assert_eq!(tool_category("skill_reload"), "Skills");
+        for name in crate::tool_policy::CEO_MANAGEMENT_TOOLS {
+            if name.starts_with("hand_") || matches!(*name, "org_overview" | "system_audit") {
+                continue;
+            }
+            assert!(!tool_hint(name).is_empty(), "{name} has no hint");
+        }
     }
 }

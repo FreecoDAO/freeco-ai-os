@@ -14,10 +14,9 @@ pub enum Outcome {
 
 /// A single learning event emitted by an agent after handling a message.
 ///
-/// The native [`freeco_kernel_runtime`] collects these and persists them to SQLite
-/// for the **freeco-learning** self-improvement loop: analysing which
-/// decisions lead to good outcomes lets the system gradually improve its
-/// routing, prompt selection, and tier classification.
+/// Nothing in the daemon collects these yet. The self-improvement loop they
+/// were written for (the `freeco-learning` crate) was never linked and has
+/// been removed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningRecord {
     pub agent_id: String,

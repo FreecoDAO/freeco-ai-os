@@ -185,23 +185,13 @@ pub async fn build_router(
         }
     }
 
-    let auth_state = crate::middleware::AuthState {
-        api_key: api_key.clone(),
-        auth_enabled: state.kernel.config.auth.enabled,
-        session_secret: if !api_key.is_empty() {
-            api_key.clone()
-        } else if state.kernel.config.auth.enabled {
-            state.kernel.config.auth.password_hash.clone()
-        } else {
-            String::new()
-        },
-        allow_no_auth,
-    };
+    let auth_state = crate::middleware::AuthState::from_config(&state.kernel.config, allow_no_auth);
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
         .route("/fonts/{name}", axum::routing::get(webchat::font_file))
+        .route("/starnet/{name}", axum::routing::get(webchat::starnet_file))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/manifest.json", axum::routing::get(webchat::manifest_json))
@@ -250,13 +240,19 @@ pub async fn build_router(
             "/api/agents/{id}/activate",
             axum::routing::post(routes::restart_agent),
         )
+        // Above the 2 MB default body limit, so a long paste reaches the
+        // handler, which keeps it in the agent's workspace.
         .route(
             "/api/agents/{id}/message",
-            axum::routing::post(routes::send_message),
+            axum::routing::post(routes::send_message).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_MESSAGE_BYTES + 1024 * 1024,
+            )),
         )
         .route(
             "/api/agents/{id}/message/stream",
-            axum::routing::post(routes::send_message_stream),
+            axum::routing::post(routes::send_message_stream).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/agents/{id}/session",
@@ -294,6 +290,18 @@ pub async fn build_router(
         .route(
             "/api/sessions/route",
             axum::routing::post(routes::route_session),
+        )
+        // The assistant popup: which conversation a new message belongs in.
+        .route(
+            "/api/dispatch",
+            axum::routing::post(crate::dispatch::dispatch),
+        )
+        // Dictation: the words in a piece of audio, nothing stored.
+        .route(
+            "/api/transcribe",
+            axum::routing::post(routes::transcribe_only).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_UPLOAD_SIZE + 1024 * 1024),
+            ),
         )
         .route(
             "/api/agents/{id}/model",
@@ -337,7 +345,11 @@ pub async fn build_router(
         )
         .route(
             "/api/agents/{id}/upload",
-            axum::routing::post(routes::upload_file),
+            // Above the 2 MB default, which refused most documents and
+            // videos (from the dashboard and from WhatsApp) with a 413.
+            axum::routing::post(routes::upload_file).layer(axum::extract::DefaultBodyLimit::max(
+                routes::MAX_UPLOAD_SIZE + 1024 * 1024,
+            )),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         // Upload serving
@@ -367,6 +379,10 @@ pub async fn build_router(
         .route(
             "/api/channels/whatsapp/qr/status",
             axum::routing::get(routes::whatsapp_qr_status),
+        )
+        .route(
+            "/api/channels/whatsapp/status",
+            axum::routing::get(routes::whatsapp_status),
         )
         // Template endpoints
         .route("/api/templates", axum::routing::get(routes::list_templates))
@@ -443,6 +459,10 @@ pub async fn build_router(
             axum::routing::post(routes::scan_security_content),
         )
         .route(
+            "/api/security/pending",
+            axum::routing::get(routes::list_security_pending),
+        )
+        .route(
             "/api/security/approve/{content_hash}",
             axum::routing::post(routes::approve_security_content),
         )
@@ -488,6 +508,15 @@ pub async fn build_router(
         .route(
             "/api/marketplace/search",
             axum::routing::get(routes::marketplace_search),
+        )
+        // GitHub skill install (pinned to a commit, scanned before install)
+        .route(
+            "/api/skills/github/preview",
+            axum::routing::post(routes::github_skill_preview),
+        )
+        .route(
+            "/api/skills/github/install",
+            axum::routing::post(routes::github_skill_install),
         )
         // ClawHub (OpenClaw ecosystem) endpoints
         .route(
@@ -629,6 +658,25 @@ pub async fn build_router(
         // Companies, projects and teams. Without a surface the structure is
         // invisible, and a conversation that belongs to a project the user
         // cannot see is the same as one that belongs nowhere.
+        // The sidebar's chat and task lists and the Live view.
+        .route(
+            "/api/activity",
+            axum::routing::get(crate::live_routes::activity),
+        )
+        .route(
+            "/api/org/chats",
+            axum::routing::get(crate::live_routes::recent_chats),
+        )
+        .route(
+            "/api/tasks",
+            axum::routing::get(crate::live_routes::list_tasks),
+        )
+        // The Starnet view: rooms (teams), desks (agents), states and tasks
+        // in one read-only poll.
+        .route(
+            "/api/starnet/state",
+            axum::routing::get(crate::live_routes::starnet_state),
+        )
         .route(
             "/api/org/overview",
             axum::routing::get(crate::org_routes::overview),
@@ -648,8 +696,85 @@ pub async fn build_router(
             axum::routing::get(crate::org_routes::list_teams).post(crate::org_routes::create_team),
         )
         .route(
+            "/api/org/projects/{id}",
+            axum::routing::get(crate::org_routes::get_project)
+                .put(crate::org_routes::update_project),
+        )
+        .route(
             "/api/org/projects/{id}/sessions",
             axum::routing::get(crate::org_routes::project_sessions),
+        )
+        .route(
+            "/api/org/projects/{id}/conversations",
+            axum::routing::post(crate::org_routes::start_project_conversation),
+        )
+        .route(
+            "/api/org/teams/{id}/members",
+            axum::routing::get(crate::teams_routes::list_members)
+                .post(crate::teams_routes::add_member)
+                .put(crate::org_routes::set_team_member),
+        )
+        // Every unattended run: schedules, triggers, background ticks.
+        .route("/api/runs/history", axum::routing::get(routes::run_history))
+        // What changed in the organisation, and who changed it.
+        .route(
+            "/api/org/changes",
+            axum::routing::get(crate::org_routes::changes),
+        )
+        .route(
+            "/api/org/teams/{id}/run",
+            axum::routing::post(crate::org_routes::run_team),
+        )
+        // The Chamber: every conversation (agent chats and every channel)
+        // in one inbox, filtered for the caller by crate::access.
+        .route(
+            "/api/chamber/conversations",
+            axum::routing::get(crate::chamber::list_conversations),
+        )
+        .route(
+            "/api/chamber/conversations/{id}/messages",
+            axum::routing::get(crate::chamber::conversation_messages),
+        )
+        .route(
+            "/api/chamber/conversations/{id}/reply",
+            axum::routing::post(crate::chamber::reply),
+        )
+        .route(
+            "/api/chamber/stream",
+            axum::routing::get(crate::chamber::stream),
+        )
+        // The Teams floor: who is on each team, who is working right now,
+        // each team's task board and the latest hand-offs between agents.
+        .route(
+            "/api/teams/floor",
+            axum::routing::get(crate::teams_routes::floor),
+        )
+        .route(
+            "/api/org/teams/{id}/members/{agent_id}",
+            axum::routing::delete(crate::teams_routes::remove_member),
+        )
+        .route(
+            "/api/org/teams/{id}/tasks",
+            axum::routing::get(crate::teams_routes::team_tasks)
+                .post(crate::teams_routes::post_team_task),
+        )
+        // Team boards: move, assign, edit or delete a card; and the rest of
+        // companies and teams. Permission is checked per team in the handler
+        // (`team_access`).
+        .route(
+            "/api/org/teams/{id}/tasks/{task_id}",
+            axum::routing::put(crate::teams_routes::update_team_task)
+                .delete(crate::teams_routes::delete_team_task),
+        )
+        .route(
+            "/api/org/teams/{id}",
+            axum::routing::put(crate::teams_routes::update_team),
+        )
+        .route(
+            "/api/org/companies/{id}",
+            axum::routing::get(crate::teams_routes::get_company)
+                .put(crate::teams_routes::update_company)
+                .delete(crate::teams_routes::delete_company),
         )
         .route(
             "/api/sessions/{id}/assign",
@@ -720,7 +845,11 @@ pub async fn build_router(
         // Secrets typed into a chat: found before sending, kept in the vault.
         .route(
             "/api/gateway/scan",
-            axum::routing::post(crate::secret_guard::scan),
+            // A long paste is scanned too, or a key inside it is not offered
+            // to the vault.
+            axum::routing::post(crate::secret_guard::scan).layer(
+                axum::extract::DefaultBodyLimit::max(routes::MAX_MESSAGE_BYTES + 1024 * 1024),
+            ),
         )
         .route(
             "/api/vault/secrets",
@@ -1369,8 +1498,14 @@ fn start_backup_scheduler(
             }
             // The archive above covers ~/.freeco-ai only. Service data lives in
             // container volumes, which it never reached -- so it is saved here,
-            // on the same schedule and with the same retention.
-            match crate::service_backup::export_service_data(&backups_dir, 7).await {
+            // on the same schedule. Its retention is lower: one run can be
+            // gigabytes, where an archive is megabytes.
+            match crate::service_backup::export_service_data(
+                &backups_dir,
+                crate::service_backup::RETENTION_RUNS,
+            )
+            .await
+            {
                 Ok(r) => info!(
                     directory = %r.directory,
                     saved = r.saved.len(),
@@ -1573,12 +1708,11 @@ async fn shutdown_signal(api_shutdown: Arc<tokio::sync::Notify>) {
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // Use kill -0 to check if process exists without sending a signal
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // Signal 0 checks that the process exists without sending anything.
+        // Through libc, not `kill -0`: no argument parsing, and pid 0/1 are
+        // never "alive" here (pid 0 would mean the caller's own group).
+        // SAFETY: a plain libc call on an integer argument.
+        i32::try_from(pid).is_ok_and(|p| p > 1 && unsafe { libc::kill(p, 0) } == 0)
     }
 
     #[cfg(windows)]

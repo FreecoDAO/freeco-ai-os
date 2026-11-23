@@ -50,3 +50,16 @@ listen_addr = "127.0.0.1:4200"           # OFP listen address
 # name = "filesystem"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# Streamable-HTTP MCP server with an auth header, e.g. OmniRoute's MCP endpoint
+# (used by the bundled omniroute hand). ${VAR} in a header is read from the
+# environment or the vault, so the key never sits in this file; if it is unset
+# the server is not connected and the error names the variable.
+# [[mcp_servers]]
+# name = "omniroute"
+# timeout_secs = 120
+# headers = ["Authorization: Bearer ${OMNIROUTE_MCP_KEY}"]
+#
+# [mcp_servers.transport]
+# type = "http"
+# url = "http://127.0.0.1:20128/api/mcp/stream"

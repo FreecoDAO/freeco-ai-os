@@ -24,6 +24,35 @@ pub struct Session {
     pub label: Option<String>,
 }
 
+/// Longest last-message preview in [`ConversationSummary`].
+pub const PREVIEW_CHARS: usize = 140;
+
+/// A conversation without its messages, for an inbox list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationSummary {
+    /// The session id.
+    pub session_id: String,
+    /// The agent it is with.
+    pub agent_id: String,
+    /// Its label: `channel:user_id` for a channel conversation.
+    pub label: Option<String>,
+    /// The tenant that owns it.
+    pub tenant_id: String,
+    /// How many messages it holds, tool traffic included.
+    pub message_count: usize,
+    /// How many of those are user or assistant messages with text: what a
+    /// reader sees of it.
+    pub text_count: usize,
+    /// RFC 3339.
+    pub created_at: String,
+    /// RFC 3339; changes on every save.
+    pub updated_at: String,
+    /// Who wrote the last previewable message.
+    pub last_role: Option<Role>,
+    /// The start of the last user or assistant message with text.
+    pub last_text: Option<String>,
+}
+
 /// Longest auto-generated label. Long enough to be recognisable in a list,
 /// short enough not to wrap in a sidebar.
 const MAX_LABEL_CHARS: usize = 48;
@@ -111,12 +140,22 @@ pub fn derive_session_label(messages: &[Message]) -> Option<String> {
 #[derive(Clone)]
 pub struct SessionStore {
     conn: Arc<Mutex<Connection>>,
+    /// Held across every load-change-save of a canonical session.
+    ///
+    /// The load and the save each take the connection on their own, so two
+    /// writers in between -- one agent answering a WhatsApp guest and a
+    /// dashboard chat at once -- both loaded the same history and the second
+    /// save dropped the first one's messages.
+    canonical_write: Arc<Mutex<()>>,
 }
 
 impl SessionStore {
     /// Create a new session store wrapping the given connection.
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            canonical_write: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Load a session from the database.
@@ -479,6 +518,119 @@ impl SessionStore {
         Ok(sessions)
     }
 
+    /// An agent's most recent conversations, each with what it is about: its
+    /// label and the last thing the user asked in it.
+    ///
+    /// Most recently active first. For the dispatcher, which has to know
+    /// where work already lives. A label alone is often missing on older
+    /// conversations, and the last request says what the thread is doing now.
+    pub fn recent_session_topics(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, messages, created_at, label FROM sessions WHERE agent_id = ?1 \
+                 ORDER BY updated_at DESC LIMIT ?2",
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                |row| {
+                    let session_id: String = row.get(0)?;
+                    let blob: Vec<u8> = row.get(1)?;
+                    let created_at: String = row.get(2)?;
+                    let label: Option<String> = row.get(3)?;
+                    let messages = rmp_serde::from_slice::<Vec<Message>>(&blob).unwrap_or_default();
+                    let last_user = messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == freeco_types::message::Role::User)
+                        .map(|m| m.content.text_content())
+                        .find(|t| !t.trim().is_empty())
+                        .map(|t| t.chars().take(160).collect::<String>())
+                        .unwrap_or_default();
+                    Ok(serde_json::json!({
+                        "session_id": session_id,
+                        "message_count": messages.len(),
+                        "created_at": created_at,
+                        "label": label,
+                        "last_user": last_user,
+                    }))
+                },
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| FreecoError::Memory(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
+    /// Every conversation that is not in the trash, most recently updated
+    /// first, without its messages: what an inbox lists.
+    ///
+    /// The last message is the newest user or assistant message that has
+    /// text, cut to [`PREVIEW_CHARS`]; system prompts and tool traffic are
+    /// never previewed.
+    pub fn list_conversation_summaries(&self) -> FreecoResult<Vec<ConversationSummary>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, agent_id, messages, created_at, updated_at, label, tenant_id \
+                 FROM sessions WHERE COALESCE(trashed, 0) = 0 ORDER BY updated_at DESC",
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let messages_blob: Vec<u8> = row.get(2)?;
+                let messages =
+                    rmp_serde::from_slice::<Vec<Message>>(&messages_blob).unwrap_or_default();
+                let readable =
+                    |m: &Message| m.role != Role::System && !message_text(m).trim().is_empty();
+                let text_count = messages.iter().filter(|m| readable(m)).count();
+                let last = messages.iter().rev().find_map(|m| {
+                    if m.role == Role::System {
+                        return None;
+                    }
+                    let text = message_text(m);
+                    let text = text.trim();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    let preview: String = text.chars().take(PREVIEW_CHARS).collect();
+                    Some((m.role, preview))
+                });
+                Ok(ConversationSummary {
+                    session_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    message_count: messages.len(),
+                    text_count,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    label: row.get(5)?,
+                    tenant_id: row.get(6)?,
+                    last_role: last.as_ref().map(|(r, _)| *r),
+                    last_text: last.map(|(_, t)| t),
+                })
+            })
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| FreecoError::Memory(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     /// Create a new session with an optional label.
     pub fn create_session_with_label(
         &self,
@@ -507,6 +659,10 @@ impl SessionStore {
         summary: &str,
         kept_messages: Vec<Message>,
     ) -> FreecoResult<()> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.compacted_summary = Some(summary.to_string());
 
@@ -656,6 +812,10 @@ impl SessionStore {
     /// Name an agent's conversation. An empty name clears it, so the next
     /// write derives one from the first user message again.
     pub fn set_canonical_label(&self, agent_id: AgentId, label: Option<&str>) -> FreecoResult<()> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.label = label
             .map(|l| l.trim().to_string())
@@ -770,6 +930,10 @@ impl SessionStore {
         new_messages: &[Message],
         compaction_threshold: Option<usize>,
     ) -> FreecoResult<CanonicalSession> {
+        let _write = self
+            .canonical_write
+            .lock()
+            .map_err(|e| FreecoError::Internal(e.to_string()))?;
         let mut canonical = self.load_canonical(agent_id)?;
         canonical.messages.extend(new_messages.iter().cloned());
 
@@ -1018,9 +1182,81 @@ mod tests {
     }
 
     #[test]
+    fn conversation_summaries_preview_the_last_text_and_skip_the_trash() {
+        let store = setup();
+        let agent = AgentId::new();
+        let mut chat = store
+            .create_session_with_label(agent, Some("telegram:42"))
+            .unwrap();
+        chat.messages = vec![
+            Message::system("secret system prompt"),
+            user_msg("hello there"),
+            Message::assistant("General Kenobi"),
+        ];
+        store.save_session(&chat).unwrap();
+        let empty = store.create_session(agent).unwrap();
+        let trashed = store.create_session(agent).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE sessions SET trashed = 1 WHERE id = ?1",
+                [trashed.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let list = store.list_conversation_summaries().unwrap();
+        assert_eq!(list.len(), 2, "the trashed one is not listed");
+        let tg = list
+            .iter()
+            .find(|c| c.session_id == chat.id.0.to_string())
+            .unwrap();
+        assert_eq!(tg.label.as_deref(), Some("telegram:42"));
+        assert_eq!(tg.agent_id, agent.to_string());
+        assert_eq!(tg.message_count, 3);
+        assert_eq!(tg.text_count, 2, "the system prompt is not counted");
+        assert_eq!(tg.last_role, Some(Role::Assistant));
+        assert_eq!(tg.last_text.as_deref(), Some("General Kenobi"));
+        assert_eq!(tg.tenant_id, crate::migration::LOCAL_TENANT_ID);
+        let blank = list
+            .iter()
+            .find(|c| c.session_id == empty.id.0.to_string())
+            .unwrap();
+        assert_eq!(blank.last_text, None);
+        assert!(list
+            .iter()
+            .all(|c| c.last_text.as_deref() != Some("secret system prompt")));
+    }
+
+    #[test]
     fn labels_a_session_from_its_first_user_message() {
         let label = derive_session_label(&[user_msg("fix the login redirect loop")]);
         assert_eq!(label.as_deref(), Some("Fix the login redirect loop"));
+    }
+
+    /// The dispatcher's view of an agent's conversations: what each is about
+    /// now (its label and the last request), most recently active first.
+    #[test]
+    fn recent_topics_name_the_last_request_newest_first() {
+        let store = setup();
+        let agent = AgentId::new();
+        let mut older = store
+            .create_session_with_label(agent, Some("Garden"))
+            .unwrap();
+        older.messages = vec![user_msg("plant the tomatoes"), user_msg("water them")];
+        store.save_session(&older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut newer = store.create_session(agent).unwrap();
+        newer.messages = vec![user_msg("book the train")];
+        store.save_session(&newer).unwrap();
+
+        let topics = store.recent_session_topics(agent, 5).unwrap();
+        assert_eq!(topics.len(), 2);
+        assert_eq!(topics[0]["session_id"], newer.id.0.to_string());
+        assert_eq!(topics[0]["last_user"], "book the train");
+        assert_eq!(topics[1]["label"], "Garden");
+        assert_eq!(topics[1]["last_user"], "water them");
+        assert_eq!(store.recent_session_topics(agent, 1).unwrap().len(), 1);
     }
 
     /// Long prompts must be cut on a word boundary. A label ending mid-word

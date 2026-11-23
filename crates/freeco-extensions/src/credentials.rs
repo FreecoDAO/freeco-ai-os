@@ -79,6 +79,28 @@ impl CredentialResolver {
         None
     }
 
+    /// Every entry in the unlocked vault, as `(name, value)`. Empty when the
+    /// vault is missing or locked. For redacting known secrets out of agent
+    /// output; never log or return these values.
+    pub fn vault_entries(&self) -> Vec<(String, Zeroizing<String>)> {
+        match self.vault {
+            Some(ref vault) if vault.is_unlocked() => vault
+                .list_keys()
+                .into_iter()
+                .filter_map(|k| vault.get(k).map(|v| (k.to_string(), v)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Every entry loaded from the dotenv file, as `(name, value)`.
+    pub fn dotenv_entries(&self) -> Vec<(String, Zeroizing<String>)> {
+        self.dotenv
+            .iter()
+            .map(|(k, v)| (k.clone(), Zeroizing::new(v.clone())))
+            .collect()
+    }
+
     /// Check if a credential is available (without prompting).
     pub fn has_credential(&self, key: &str) -> bool {
         // Check vault

@@ -33,12 +33,20 @@ pub struct ModelCatalog {
     /// and every model it lists stays offered — hiding a model that works is
     /// worse than showing one that might not.
     served: HashMap<String, std::collections::HashSet<String>>,
+    /// Last probe answer for each keyless (local or gateway) provider:
+    /// `true` if it answered, `false` if it did not. Absent = never probed.
+    ///
+    /// "No key needed" is not "ready". Ollama, vLLM and LM Studio were offered
+    /// in every model picker with nothing listening on their ports, so a
+    /// fallback chosen from the list pointed at a server that was not there.
+    local_reachable: HashMap<String, bool>,
 }
 
 impl ModelCatalog {
     /// Create a new catalog populated with builtin models and providers.
     pub fn new() -> Self {
-        let models = builtin_models();
+        let mut models = builtin_models();
+        models.extend(claude_code_versions());
         let mut aliases = builtin_aliases();
         let mut providers = builtin_providers();
 
@@ -60,6 +68,7 @@ impl ModelCatalog {
             aliases,
             providers,
             served: HashMap::new(),
+            local_reachable: HashMap::new(),
         }
     }
 
@@ -526,6 +535,56 @@ impl ModelCatalog {
             return;
         }
         self.served.insert(provider.to_lowercase(), set);
+    }
+
+    /// Record one probe of a keyless provider: whether it answered, and the
+    /// models it listed.
+    ///
+    /// The listed models become the provider's served set, not only additions
+    /// to the catalog. Merging alone never removes anything, so a model the
+    /// server stopped offering -- or a gateway route with no provider behind
+    /// it -- stayed in every picker for good.
+    pub fn record_local_probe(&mut self, provider: &str, reachable: bool, discovered: &[String]) {
+        self.local_reachable
+            .insert(provider.to_lowercase(), reachable);
+        if reachable && !discovered.is_empty() {
+            self.merge_discovered_models(provider, discovered);
+            // Only a keyless provider's listing is the whole truth. A keyed
+            // provider probed without its key can list less than the key gets,
+            // and its entitlement is recorded by the authenticated probe.
+            let keyless = self
+                .get_provider(provider)
+                .map(|p| !p.key_required)
+                .unwrap_or(false);
+            if keyless {
+                self.set_served(provider, discovered.iter().cloned());
+            }
+        }
+    }
+
+    /// Whether a model can be used right now: its provider has a key, or is a
+    /// keyless server that answered its last probe, and the provider lists it.
+    ///
+    /// This is what a model picker should offer. A keyless provider that has
+    /// never been probed is not ready: nothing has shown it is running.
+    pub fn is_ready(&self, m: &ModelCatalogEntry) -> bool {
+        let provider = match self.get_provider(&m.provider) {
+            Some(p) => p,
+            // Models added by hand under a provider we do not know.
+            None => return m.tier == ModelTier::Custom,
+        };
+        if provider.auth_status == AuthStatus::Missing {
+            return false;
+        }
+        // Any keyless server with a URL must have answered, whatever its auth
+        // label: an OLLAMA_HOST or LMSTUDIO_BASE_URL override marks it
+        // "configured", and it was offered while nothing listened. CLI
+        // providers (claude-code) have no URL to probe and are not held back.
+        let keyless_server = !provider.key_required && !provider.base_url.is_empty();
+        if keyless_server && self.local_reachable.get(&m.provider.to_lowercase()) != Some(&true) {
+            return false;
+        }
+        self.is_served(&m.provider, &m.id) != Some(false)
     }
 
     /// Whether `model_id` is known to be served by `provider` for this key.
@@ -1200,6 +1259,95 @@ fn builtin_aliases() -> HashMap<String, String> {
         .into_iter()
         .map(|(k, v)| (k.to_lowercase(), v.to_string()))
         .collect()
+}
+
+/// Claude Code models by version and effort.
+///
+/// The list offered only "Claude Opus (CLI)" and the like: no version, no
+/// effort, so nobody could tell which Opus answered or ask it to think
+/// harder. The CLI takes a full model name and `--effort` (low, medium, high,
+/// xhigh, max); an id `claude-code/<model>@<effort>` carries both, and the
+/// driver passes them on. Without `@` the CLI's own default effort applies.
+fn claude_code_versions() -> Vec<ModelCatalogEntry> {
+    // (model id, name, tier, max output, input $/M, output $/M)
+    // Prices are Anthropic's first-party list prices (checked 2026-11). The
+    // context window is kept at 200k, the CLI's default, though the API
+    // models take 1M: compaction is sized from it, and a smaller window only
+    // compacts earlier.
+    const VERSIONS: &[(&str, &str, ModelTier, u64, f64, f64)] = &[
+        (
+            "claude-opus-5-5",
+            "Claude Opus 5.5",
+            ModelTier::Frontier,
+            128_000,
+            4.0,
+            20.0,
+        ),
+        (
+            "claude-fable-5-1",
+            "Claude Fable 5.1",
+            ModelTier::Frontier,
+            128_000,
+            10.0,
+            50.0,
+        ),
+        (
+            "claude-sonnet-5-5",
+            "Claude Sonnet 5.5",
+            ModelTier::Smart,
+            128_000,
+            2.0,
+            10.0,
+        ),
+        (
+            "claude-haiku-4-5",
+            "Claude Haiku 4.5",
+            ModelTier::Fast,
+            64_000,
+            1.0,
+            5.0,
+        ),
+    ];
+    const EFFORTS: &[&str] = &["", "low", "medium", "high", "xhigh", "max"];
+    let mut out = Vec::new();
+    for (model, name, tier, max_out, inp, outp) in VERSIONS {
+        // Haiku 4.5 takes no effort setting: the API refuses one.
+        let efforts: &[&str] = if model.starts_with("claude-haiku-4-5") {
+            &EFFORTS[..1]
+        } else {
+            EFFORTS
+        };
+        for effort in efforts {
+            let (id, display) = if effort.is_empty() {
+                (
+                    format!("claude-code/{model}"),
+                    format!("{name} (Claude Code)"),
+                )
+            } else {
+                (
+                    format!("claude-code/{model}@{effort}"),
+                    format!("{name} · effort {effort} (Claude Code)"),
+                )
+            };
+            out.push(ModelCatalogEntry {
+                id,
+                display_name: display,
+                provider: "claude-code".into(),
+                tier: *tier,
+                context_window: 200_000,
+                max_output_tokens: *max_out,
+                input_cost_per_m: *inp,
+                output_cost_per_m: *outp,
+                // The driver gives the model its tools in the prompt and reads
+                // the calls back, so agents on Claude Code do use tools.
+                supports_tools: true,
+                supports_vision: false,
+                supports_streaming: true,
+                aliases: vec![],
+            });
+        }
+    }
+    out
 }
 
 fn builtin_models() -> Vec<ModelCatalogEntry> {
@@ -4278,42 +4426,42 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
             id: "claude-code/opus".into(),
-            display_name: "Claude Opus (CLI)".into(),
+            display_name: "Claude Opus — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Frontier,
             context_window: 200_000,
             max_output_tokens: 128_000,
             input_cost_per_m: 5.0,
             output_cost_per_m: 25.0,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code-opus".into()],
         },
         ModelCatalogEntry {
             id: "claude-code/sonnet".into(),
-            display_name: "Claude Sonnet (CLI)".into(),
+            display_name: "Claude Sonnet — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Smart,
             context_window: 200_000,
             max_output_tokens: 64_000,
             input_cost_per_m: 3.0,
             output_cost_per_m: 15.0,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code".into(), "claude-code-sonnet".into()],
         },
         ModelCatalogEntry {
             id: "claude-code/haiku".into(),
-            display_name: "Claude Haiku (CLI)".into(),
+            display_name: "Claude Haiku — latest (Claude Code)".into(),
             provider: "claude-code".into(),
             tier: ModelTier::Fast,
             context_window: 200_000,
             max_output_tokens: 8_192,
             input_cost_per_m: 0.25,
             output_cost_per_m: 1.25,
-            supports_tools: false,
+            supports_tools: true,
             supports_vision: false,
             supports_streaming: true,
             aliases: vec!["claude-code-haiku".into()],
@@ -4894,10 +5042,29 @@ mod tests {
     fn test_claude_code_models() {
         let catalog = ModelCatalog::new();
         let models = catalog.models_by_provider("claude-code");
-        assert_eq!(models.len(), 3);
+        // Three "latest" aliases, three versions at the CLI's default effort
+        // and each of its five effort levels, and Haiku 4.5, which takes no
+        // effort.
+        assert_eq!(models.len(), 3 + 3 * 6 + 1);
+        assert!(models
+            .iter()
+            .any(|m| m.id == "claude-code/claude-haiku-4-5"));
+        assert!(!models
+            .iter()
+            .any(|m| m.id.starts_with("claude-code/claude-haiku-4-5@")));
         assert!(models.iter().any(|m| m.id == "claude-code/opus"));
         assert!(models.iter().any(|m| m.id == "claude-code/sonnet"));
         assert!(models.iter().any(|m| m.id == "claude-code/haiku"));
+        let opus_high = models
+            .iter()
+            .find(|m| m.id == "claude-code/claude-opus-5-5@high")
+            .expect("Opus 5.5 at high effort is offered");
+        assert_eq!(
+            opus_high.display_name,
+            "Claude Opus 5.5 · effort high (Claude Code)"
+        );
+        // The driver gives Claude Code its tools; the UI must not hide it.
+        assert!(models.iter().all(|m| m.supports_tools));
     }
 
     #[test]
@@ -5391,5 +5558,74 @@ mod tests {
         let mut c = ModelCatalog::new();
         c.set_served("openai", Vec::<String>::new());
         assert_eq!(c.is_served("openai", "gpt-5.6-luna"), None);
+    }
+
+    fn model<'a>(c: &'a ModelCatalog, provider: &str, id: &str) -> &'a ModelCatalogEntry {
+        c.list_models()
+            .iter()
+            .find(|m| m.provider == provider && m.id == id)
+            .unwrap_or_else(|| panic!("{provider}/{id} not in catalog"))
+    }
+
+    /// A keyless server that is not running is not offered: "no key needed"
+    /// had put LM Studio and vLLM in every picker with nothing listening.
+    #[test]
+    fn keyless_provider_is_ready_only_after_it_answers() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "never probed"
+        );
+        c.record_local_probe("lmstudio", false, &[]);
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "offline"
+        );
+        c.record_local_probe("lmstudio", true, &["lmstudio-local".to_string()]);
+        assert!(
+            c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "online and listed"
+        );
+    }
+
+    /// A URL override marks a local server "configured"; it still has to
+    /// answer before its models are offered.
+    #[test]
+    fn configured_keyless_server_still_needs_to_answer() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        if let Some(p) = c.providers.iter_mut().find(|p| p.id == "lmstudio") {
+            p.auth_status = AuthStatus::Configured;
+        }
+        c.record_local_probe("lmstudio", false, &[]);
+        assert!(
+            !c.is_ready(model(&c, "lmstudio", "lmstudio-local")),
+            "configured by override, offline"
+        );
+        c.record_local_probe("lmstudio", true, &["lmstudio-local".to_string()]);
+        assert!(c.is_ready(model(&c, "lmstudio", "lmstudio-local")));
+    }
+
+    /// An answering keyless server offers what it listed and nothing else:
+    /// a gateway route with no provider behind it must drop out.
+    #[test]
+    fn keyless_provider_offers_only_what_it_listed() {
+        let mut c = ModelCatalog::new();
+        c.detect_auth();
+        c.record_local_probe("vllm", true, &["served-model".to_string()]);
+        assert!(c.is_ready(model(&c, "vllm", "served-model")));
+        assert!(
+            !c.is_ready(model(&c, "vllm", "vllm-local")),
+            "builtin, not listed"
+        );
+    }
+
+    /// A probe without the key never narrows a keyed provider's models.
+    #[test]
+    fn unauthenticated_probe_does_not_narrow_keyed_provider() {
+        let mut c = ModelCatalog::new();
+        c.record_local_probe("openai", true, &["gpt-4o".to_string()]);
+        assert_eq!(c.is_served("openai", "gpt-4.1"), None);
     }
 }

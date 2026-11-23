@@ -39,6 +39,14 @@ pub struct SavedItem {
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// How many runs are kept. One run of the accounting service alone reached
+/// 5 GB, and seven of them filled the system disk.
+pub const RETENTION_RUNS: usize = 3;
+
+/// Older runs are also removed while all runs together exceed this. The
+/// newest run is always kept, whatever its size.
+pub const MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+
 async fn run(args: &[&str]) -> Result<std::process::Output, String> {
     let out = tokio::time::timeout(
         STEP_TIMEOUT,
@@ -166,15 +174,24 @@ pub async fn export_service_data(
                 kind: "volume",
                 bytes: std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
             }),
-            Ok(o) => report.failed.push(format!(
-                "{v}: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            )),
-            Err(e) => report.failed.push(format!("{v}: {e}")),
+            Ok(o) => {
+                // A failed export -- the disk filling up is the usual cause --
+                // leaves a truncated tar behind. Kept, it looked like a backup
+                // and counted as one when older, complete runs were pruned.
+                let _ = std::fs::remove_file(&out);
+                report.failed.push(format!(
+                    "{v}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ))
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&out);
+                report.failed.push(format!("{v}: {e}"))
+            }
         }
     }
 
-    prune(&root, retention);
+    prune(&root, retention, MAX_TOTAL_BYTES);
     Ok(report)
 }
 
@@ -206,15 +223,16 @@ async fn dump_database(
     })
 }
 
-/// Keep the newest `retention` runs; older ones are removed. Names are
+/// Keep the newest `retention` runs, and remove older ones while all runs
+/// together exceed `max_bytes`; the newest run is always kept. Names are
 /// timestamps, so lexical order is chronological.
-fn prune(root: &Path, retention: usize) {
+fn prune(root: &Path, retention: usize, max_bytes: u64) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     // Only runs that saved something count. An empty run directory is junk
     // from a failed run: removed, and never allowed to push out a real one.
-    let mut runs: Vec<PathBuf> = Vec::new();
+    let mut runs: Vec<(PathBuf, u64)> = Vec::new();
     for p in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
         let empty = std::fs::read_dir(&p)
             .map(|mut d| d.next().is_none())
@@ -222,17 +240,34 @@ fn prune(root: &Path, retention: usize) {
         if empty {
             let _ = std::fs::remove_dir(&p);
         } else {
-            runs.push(p);
+            let size = run_size(&p);
+            runs.push((p, size));
         }
     }
     runs.sort();
-    if runs.len() <= retention {
-        return;
-    }
-    let excess = runs.len() - retention;
-    for old in runs.into_iter().take(excess) {
+    let mut total: u64 = runs.iter().map(|(_, size)| size).sum();
+    let mut kept = runs.len();
+    for (old, size) in runs {
+        if kept <= 1 || (kept <= retention.max(1) && total <= max_bytes) {
+            break;
+        }
         let _ = std::fs::remove_dir_all(&old);
+        total = total.saturating_sub(size);
+        kept -= 1;
     }
+}
+
+/// Bytes in a run directory's files. Runs hold files only.
+fn run_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -274,7 +309,7 @@ mod tests {
             std::fs::create_dir_all(tmp.join(stamp)).unwrap();
             std::fs::write(tmp.join(stamp).join("db.sql"), "dump").unwrap();
         }
-        prune(&tmp, 2);
+        prune(&tmp, 2, u64::MAX);
         let mut left: Vec<String> = std::fs::read_dir(&tmp)
             .unwrap()
             .flatten()
@@ -296,13 +331,39 @@ mod tests {
         for stamp in ["20260102T000000Z", "20260103T000000Z", "20260104T000000Z"] {
             std::fs::create_dir_all(tmp.join(stamp)).unwrap();
         }
-        prune(&tmp, 2);
+        prune(&tmp, 2, u64::MAX);
         let left: Vec<String> = std::fs::read_dir(&tmp)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(left, vec!["20260101T000000Z"]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Runs within the count but over the size cap are removed oldest first,
+    /// and the newest run survives even when it alone is over the cap.
+    #[test]
+    fn prune_enforces_the_size_cap_but_keeps_the_newest_run() {
+        let tmp = std::env::temp_dir().join(format!("svcbk-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        for stamp in ["20260101T000000Z", "20260102T000000Z", "20260103T000000Z"] {
+            std::fs::create_dir_all(tmp.join(stamp)).unwrap();
+            std::fs::write(tmp.join(stamp).join("data.tar"), vec![0u8; 100]).unwrap();
+        }
+        let left = |tmp: &Path| {
+            let mut v: Vec<String> = std::fs::read_dir(tmp)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        prune(&tmp, 3, 250);
+        assert_eq!(left(&tmp), vec!["20260102T000000Z", "20260103T000000Z"]);
+        prune(&tmp, 3, 10);
+        assert_eq!(left(&tmp), vec!["20260103T000000Z"]);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

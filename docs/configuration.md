@@ -16,6 +16,7 @@ Complete reference for `config.toml`, covering every configurable field in the F
   - [\[memory\]](#memory)
   - [\[network\]](#network)
   - [\[web\]](#web)
+  - [\[media\]](#media)
   - [\[channels\]](#channels)
   - [\[\[mcp\_servers\]\]](#mcp_servers)
   - [\[a2a\]](#a2a)
@@ -199,6 +200,8 @@ discord = "987654321"
 [[users]]
 name = "Bob"
 role = "user"
+agents = ["assistant"]                # agents Bob may see and chat with ("*" = all)
+channels = ["whatsapp", "email"]      # channel conversations Bob may see ("*" = all)
 [users.channel_bindings]
 slack = "U0123ABCDEF"
 
@@ -518,6 +521,51 @@ readability = true
 | `max_response_bytes` | usize | `10485760` (10 MB) | Maximum HTTP response body size in bytes. |
 | `timeout_secs` | u64 | `30` | HTTP request timeout in seconds. |
 | `readability` | bool | `true` | Enable HTML-to-Markdown readability extraction. When true, fetched HTML is converted to clean Markdown. |
+
+---
+
+### `[media]`
+
+Speech-to-text, text-to-speech and media understanding. With the bundled
+Speaches hand running, point both speech directions at it:
+
+```toml
+[media]
+audio_base_url = "http://127.0.0.1:8010"
+tts_openai_base_url = "http://127.0.0.1:8010"
+local_audio_api_key_env = "SPEACHES_API_KEY"
+audio_model = "Systran/faster-whisper-small"
+# local_only = true   # implied by the local URLs above; see below
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `audio_provider` | string | auto | `openai`, `groq` or `parakeet-mlx`. Auto-detected from API keys only when `local_only` is off. |
+| `audio_base_url` | string | none | OpenAI-compatible transcription endpoint (`<url>/v1/audio/transcriptions`). |
+| `audio_model` | string | provider default | Model name sent to the transcription endpoint. |
+| `tts_openai_base_url` | string | none | OpenAI-compatible speech endpoint (`<url>/v1/audio/speech`). |
+| `tts_elevenlabs_base_url` | string | none | ElevenLabs-compatible gateway. |
+| `local_audio_api_key_env` | string | none | Env var holding the local service's key; the cloud key is never sent to a custom URL. |
+| `local_only` | bool | see rule | Keep speech on this machine. |
+
+**`local_only` rule.** An explicit `true` or `false` always wins. When it is
+not set, it is **on** if `audio_base_url` and/or `tts_openai_base_url` is set
+and every one of them that is set is a local address (loopback, a private or
+link-local IP, `localhost`, a `.local`/`.lan`/`.internal`/`.home.arpa` name, or
+a single-label container name such as `speaches`); otherwise it is off.
+
+When `local_only` is on:
+
+- Groq, OpenAI and ElevenLabs are never picked from their API keys, and there
+  is no fallback to them.
+- Transcription goes only to `audio_base_url` (or Parakeet MLX); speech only to
+  `tts_openai_base_url` (or `tts_elevenlabs_base_url` with
+  `[tts] provider = "elevenlabs"`). A non-local URL there is refused.
+- If the local service fails, the caller gets an error naming the URL and what
+  failed (connection refused, HTTP status, empty reply), and the daemon logs it
+  at error level.
+
+Set `local_only = false` to allow a cloud speech provider next to a local one.
 
 ---
 
@@ -1224,11 +1272,25 @@ type = "sse"
 url = "https://mcp.example.com/sse"
 ```
 
+OmniRoute's MCP endpoint (used by the bundled `omniroute` hand), over Streamable HTTP with an auth header. Create a scoped MCP key in the OmniRoute dashboard and store it as `OMNIROUTE_MCP_KEY` in the environment or the vault:
+
+```toml
+[[mcp_servers]]
+name = "omniroute"
+timeout_secs = 120
+headers = ["Authorization: Bearer ${OMNIROUTE_MCP_KEY}"]
+
+[mcp_servers.transport]
+type = "http"
+url = "http://127.0.0.1:20128/api/mcp/stream"
+```
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Display name for this MCP server. Tools are namespaced as `mcp_{name}_{tool}`. |
 | `timeout_secs` | u64 | `30` | Request timeout in seconds. |
 | `env` | list of strings | `[]` | Environment variable names to pass through to the subprocess (stdio transport only). |
+| `headers` | list of strings | `[]` | Extra HTTP headers for `sse` / `http` transports, each `"Header-Name: value"`. `${VAR}` in a value is resolved from the process environment, then the vault / `.env`. An unresolved variable stops that server from connecting (the error names the variable, never a value). |
 
 **Transport variants** (tagged union on `type`):
 
@@ -1236,6 +1298,7 @@ url = "https://mcp.example.com/sse"
 |--------|--------|-------------|
 | `stdio` | `command` (string), `args` (list of strings, default `[]`) | Spawn a subprocess, communicate via JSON-RPC over stdin/stdout. |
 | `sse` | `url` (string) | Connect to an HTTP Server-Sent Events endpoint. |
+| `http` | `url` (string) | Connect to a Streamable-HTTP MCP endpoint. |
 
 ---
 
@@ -1320,6 +1383,8 @@ slack = "U0ABCDEFG"
 | `role` | string | `"user"` | User role in the RBAC hierarchy. |
 | `channel_bindings` | map of string to string | `{}` | Maps channel platform names to platform-specific user IDs, binding this user identity across channels. |
 | `api_key_hash` | string or null | `null` | SHA256 hash of the user's personal API key for authenticated API access. |
+| `agents` | list of strings | `[]` | Agents (name or id, `"*"` for all) this account may see and chat with in the Chamber and the WebSocket chat. Ignored for `owner`/`admin`, who see every agent. See [Chamber access](chamber-access.md). |
+| `channels` | list of strings | `[]` | External channels (`whatsapp`, `telegram`, `email`, ...; `"*"` for all) whose conversations this account may see in the Chamber. Ignored for `owner`/`admin`; a `kid` never sees external channels. |
 
 **Role hierarchy** (highest to lowest privilege):
 

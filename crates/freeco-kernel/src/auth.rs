@@ -7,49 +7,11 @@ use dashmap::DashMap;
 use freeco_types::agent::UserId;
 use freeco_types::config::UserConfig;
 use freeco_types::error::{FreecoError, FreecoResult};
-use std::fmt;
 use tracing::info;
 
-/// User roles with hierarchical permissions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UserRole {
-    /// Read-only access — can view agent output but cannot interact.
-    Viewer = 0,
-    /// Child account — can chat with a kid-safe agent, but no config, no
-    /// spawn/kill, no billing. The basis for the Kids edition.
-    Kid = 1,
-    /// Standard user — can chat with agents.
-    User = 2,
-    /// Admin — can spawn/kill agents, install skills, view usage.
-    Admin = 3,
-    /// Owner — full access including user management and config changes.
-    Owner = 4,
-}
-
-impl fmt::Display for UserRole {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            UserRole::Viewer => write!(f, "viewer"),
-            UserRole::Kid => write!(f, "kid"),
-            UserRole::User => write!(f, "user"),
-            UserRole::Admin => write!(f, "admin"),
-            UserRole::Owner => write!(f, "owner"),
-        }
-    }
-}
-
-impl UserRole {
-    /// Parse a role from a string.
-    pub fn from_str_role(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "owner" => UserRole::Owner,
-            "admin" => UserRole::Admin,
-            "kid" => UserRole::Kid,
-            "viewer" => UserRole::Viewer,
-            _ => UserRole::User,
-        }
-    }
-}
+/// The role model is shared with the API's session auth; see
+/// [`freeco_types::auth::UserRole`].
+pub use freeco_types::auth::UserRole;
 
 /// Actions that can be authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,11 +32,14 @@ pub enum Action {
     ViewUsage,
     /// Manage users (create, delete, change roles).
     ManageUsers,
+    /// Any other change made through the API: agents, skills, channels,
+    /// workflows, budgets, approvals and the rest.
+    ChangeSystem,
 }
 
 impl Action {
     /// Minimum role required for this action.
-    fn required_role(&self) -> UserRole {
+    pub fn required_role(&self) -> UserRole {
         match self {
             Action::ChatWithAgent => UserRole::Kid,
             Action::ViewConfig => UserRole::User,
@@ -84,6 +49,7 @@ impl Action {
             Action::InstallSkill => UserRole::Admin,
             Action::ModifyConfig => UserRole::Owner,
             Action::ManageUsers => UserRole::Owner,
+            Action::ChangeSystem => UserRole::Admin,
         }
     }
 }
@@ -126,8 +92,17 @@ impl AuthManager {
 
             manager.users.insert(user_id, identity);
 
-            // Index channel bindings
-            for (channel_type, platform_id) in &config.channel_bindings {
+            // Index channel bindings. A disabled account's bindings are left
+            // out, so its channel ids are strangers again: an owner switched
+            // off must not keep owner rights on WhatsApp. It still counts as a
+            // configured user, so switching every account off does not turn
+            // access control off.
+            let bindings = if config.enabled {
+                config.channel_bindings.iter().collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            for (channel_type, platform_id) in bindings {
                 let key = format!("{channel_type}:{platform_id}");
                 manager.channel_index.insert(key, user_id);
             }
@@ -150,6 +125,19 @@ impl AuthManager {
     pub fn identify(&self, channel_type: &str, platform_id: &str) -> Option<UserId> {
         let key = format!("{channel_type}:{platform_id}");
         self.channel_index.get(&key).map(|r| *r.value())
+    }
+
+    /// Identify a user from a platform id whose channel is not known, such as
+    /// a phone number passed as an API message's `sender_id`.
+    pub fn identify_any(&self, platform_id: &str) -> Option<UserId> {
+        self.channel_index
+            .iter()
+            .find(|e| {
+                e.key()
+                    .split_once(':')
+                    .is_some_and(|(_, id)| id == platform_id)
+            })
+            .map(|e| *e.value())
     }
 
     /// Get a user's identity by their UserId.
@@ -197,6 +185,44 @@ impl AuthManager {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn a_disabled_account_keeps_no_channel_identity() {
+        let mut bindings = HashMap::new();
+        bindings.insert("whatsapp".to_string(), "+41790000000".to_string());
+        let owner = UserConfig {
+            name: "Owner".to_string(),
+            role: "owner".to_string(),
+            channel_bindings: bindings,
+            api_key_hash: None,
+            password_hash: None,
+            enabled: false,
+            ..Default::default()
+        };
+        let manager = AuthManager::new(&[owner]);
+        assert!(manager.identify("whatsapp", "+41790000000").is_none());
+        assert!(manager.identify_any("+41790000000").is_none());
+        assert!(manager.is_enabled(), "access control stays on");
+    }
+
+    #[test]
+    fn identify_any_finds_a_binding_on_any_channel() {
+        let mut bindings = HashMap::new();
+        bindings.insert("whatsapp".to_string(), "+41790000000".to_string());
+        let owner = UserConfig {
+            name: "Owner".to_string(),
+            role: "owner".to_string(),
+            channel_bindings: bindings,
+            api_key_hash: None,
+            password_hash: None,
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = AuthManager::new(&[owner]);
+        let id = manager.identify_any("+41790000000").expect("bound");
+        assert_eq!(manager.get_user(id).unwrap().role, UserRole::Owner);
+        assert!(manager.identify_any("+41790000001").is_none());
+    }
 
     fn test_configs() -> Vec<UserConfig> {
         vec![

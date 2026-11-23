@@ -388,3 +388,33 @@ async fn put_reloads_registry_so_agents_see_change() {
     assert_eq!(skill_cfg.get("github_token").unwrap(), "ghp_new");
     assert_eq!(skill_cfg.get("default_branch").unwrap(), "release");
 }
+
+#[tokio::test]
+async fn list_skills_includes_bundled_skills_sorted() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/skills", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let skills = body["skills"].as_array().expect("skills array");
+
+    let source_of = |name: &str| {
+        skills
+            .iter()
+            .find(|s| s["name"] == name)
+            .map(|s| s["source"]["type"].clone())
+    };
+    // The dashboard must show what agents see, built-in skills included.
+    assert_eq!(source_of("freeco-design"), Some("bundled".into()));
+    assert_eq!(source_of("github"), Some("bundled".into()));
+
+    let names: Vec<&str> = skills.iter().filter_map(|s| s["name"].as_str()).collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted, "skills are listed by name");
+}

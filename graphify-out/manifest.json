@@ -1,0 +1,2917 @@
+{
+  ".claude/hooks/session-start.sh": {
+    "mtime": 1795040398.9503543,
+    "seen": 1795104956.4173028,
+    "ast_hash": "9d5f48b67784b9bc9ee8885710914770",
+    "semantic_hash": "9d5f48b67784b9bc9ee8885710914770"
+  },
+  ".claude/settings.json": {
+    "mtime": 1795040398.9503543,
+    "seen": 1795104956.4177363,
+    "ast_hash": "f25e617c98948661b1ce5ae5cf8c3766",
+    "semantic_hash": "f25e617c98948661b1ce5ae5cf8c3766",
+    "ast_empty": true
+  },
+  ".claude/skills/exposure-audit/scripts/scan.sh": {
+    "mtime": 1795040398.9512742,
+    "seen": 1795104956.4177465,
+    "ast_hash": "f2deb57cf212855d3a9e08a220a4657e",
+    "semantic_hash": "f2deb57cf212855d3a9e08a220a4657e"
+  },
+  ".claude/skills/founder-cfo/example.json": {
+    "mtime": 1795040398.9531949,
+    "seen": 1795104956.4179542,
+    "ast_hash": "d2ed28fe58214efa0b61802eff1a8258",
+    "semantic_hash": "d2ed28fe58214efa0b61802eff1a8258",
+    "ast_empty": true
+  },
+  ".claude/skills/founder-cfo/unit_economics.py": {
+    "mtime": 1795040398.9531949,
+    "seen": 1795104956.4179626,
+    "ast_hash": "0791c29e94013230e184c7007e2b4eb6",
+    "semantic_hash": "0791c29e94013230e184c7007e2b4eb6"
+  },
+  ".claude/skills/founder-consumer/customer.example.json": {
+    "mtime": 1795040398.9539883,
+    "seen": 1795104956.41811,
+    "ast_hash": "9663c4c60ccf3bc8911e3cf8efaf5ee5",
+    "semantic_hash": "9663c4c60ccf3bc8911e3cf8efaf5ee5",
+    "ast_empty": true
+  },
+  ".claude/skills/founder-consumer/panel.py": {
+    "mtime": 1795040398.9539883,
+    "seen": 1795104956.4181185,
+    "ast_hash": "f9e358d4ee8ac7b32d204df9f16c62f6",
+    "semantic_hash": "f9e358d4ee8ac7b32d204df9f16c62f6"
+  },
+  ".claude/skills/founder-plan/compile.py": {
+    "mtime": 1795040398.956277,
+    "seen": 1795104956.4182498,
+    "ast_hash": "179f72f8c35998008403806b32d4f616",
+    "semantic_hash": "179f72f8c35998008403806b32d4f616"
+  },
+  ".claude/skills/founder-pricing/van_westendorp.py": {
+    "mtime": 1795040398.9567666,
+    "seen": 1795104956.418386,
+    "ast_hash": "051e271e8a687a35fe2fc2f02b93f5b2",
+    "semantic_hash": "051e271e8a687a35fe2fc2f02b93f5b2"
+  },
+  ".github/FUNDING.yml": {
+    "mtime": 1795040398.9567666,
+    "seen": 1795104956.4185107,
+    "ast_hash": "35a31682cc8b33e5aed03448085f011c",
+    "semantic_hash": "35a31682cc8b33e5aed03448085f011c",
+    "ast_empty": true
+  },
+  ".github/ISSUE_TEMPLATE/bug_report.yml": {
+    "mtime": 1795040398.957761,
+    "seen": 1795104956.4185176,
+    "ast_hash": "5fd7dd50607940bd4369a63d671a4158",
+    "semantic_hash": "5fd7dd50607940bd4369a63d671a4158"
+  },
+  ".github/ISSUE_TEMPLATE/feature_request.yml": {
+    "mtime": 1795040398.9581435,
+    "seen": 1795104956.4186378,
+    "ast_hash": "267fcfbf18b1ea03dbdcfed6f05d6eb8",
+    "semantic_hash": "267fcfbf18b1ea03dbdcfed6f05d6eb8"
+  },
+  ".github/dependabot.yml": {
+    "mtime": 1795040398.9581435,
+    "seen": 1795104956.4187458,
+    "ast_hash": "988eed7093ffb7f34ff5b04d077098a2",
+    "semantic_hash": "988eed7093ffb7f34ff5b04d077098a2"
+  },
+  ".github/workflows/auto-tag.yml": {
+    "mtime": 1795040398.9581435,
+    "seen": 1795104956.4188495,
+    "ast_hash": "e0b977e61520b2572cde7c8b18d257d3",
+    "semantic_hash": "e0b977e61520b2572cde7c8b18d257d3"
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1795040398.9587293,
+    "seen": 1795104956.41898,
+    "ast_hash": "231e8692dd2b54d960d77bd2108a6064",
+    "semantic_hash": "231e8692dd2b54d960d77bd2108a6064"
+  },
+  ".github/workflows/ethicalcheck.yml": {
+    "mtime": 1795040398.9587293,
+    "seen": 1795104956.4190917,
+    "ast_hash": "4de1c07a71518b6a94bb1241bf2cdae1",
+    "semantic_hash": "4de1c07a71518b6a94bb1241bf2cdae1"
+  },
+  ".github/workflows/prepare-release.yml": {
+    "mtime": 1795040398.9587293,
+    "seen": 1795104956.4191997,
+    "ast_hash": "5d8983adc6520f4e0b894dcc7f60cf32",
+    "semantic_hash": "5d8983adc6520f4e0b894dcc7f60cf32"
+  },
+  ".github/workflows/release.yml": {
+    "mtime": 1795051157.5001318,
+    "seen": 1795104956.4193058,
+    "ast_hash": "c3a7a8efbb23074cb351b607a72ecfb4",
+    "semantic_hash": "c3a7a8efbb23074cb351b607a72ecfb4"
+  },
+  "Cargo.toml": {
+    "mtime": 1795198961.3772624,
+    "seen": 1795199525.2791324,
+    "ast_hash": "2c4f54cd51fd7a81aaba2aaa940bfc1f",
+    "semantic_hash": "2c4f54cd51fd7a81aaba2aaa940bfc1f",
+    "ast_empty": true
+  },
+  "agents/langchain-code-reviewer/agent.py": {
+    "mtime": 1795040398.9714637,
+    "seen": 1795104956.4194198,
+    "ast_hash": "c4ccbad2d7d54f5500afea8e083bb4ab",
+    "semantic_hash": "c4ccbad2d7d54f5500afea8e083bb4ab"
+  },
+  "agents/langchain-code-reviewer/server.py": {
+    "mtime": 1795040398.9714637,
+    "seen": 1795104956.4195952,
+    "ast_hash": "739d5a648d2a769921701625d4c6b4f1",
+    "semantic_hash": "739d5a648d2a769921701625d4c6b4f1"
+  },
+  "agents/langchain-code-reviewer/workflow.json": {
+    "mtime": 1795040398.9714637,
+    "seen": 1795104956.4197094,
+    "ast_hash": "0f371caffc0c00b8c2b7d34d41fb331b",
+    "semantic_hash": "0f371caffc0c00b8c2b7d34d41fb331b",
+    "ast_empty": true
+  },
+  "connectors/akaunting-mcp/server.py": {
+    "mtime": 1795040398.978754,
+    "seen": 1795104956.4197187,
+    "ast_hash": "11a569e7deca8b2876a77bbae430ae5f",
+    "semantic_hash": "11a569e7deca8b2876a77bbae430ae5f"
+  },
+  "connectors/graphify-mcp/server.py": {
+    "mtime": 1795040398.9796999,
+    "seen": 1795104956.4198394,
+    "ast_hash": "ebd01b891d8c26371f71015ac814a76b",
+    "semantic_hash": "ebd01b891d8c26371f71015ac814a76b"
+  },
+  "connectors/twenty-crm-mcp/server.py": {
+    "mtime": 1795040398.9806626,
+    "seen": 1795104956.4199598,
+    "ast_hash": "3e2a8050e6b8706645ead72cdc938373",
+    "semantic_hash": "3e2a8050e6b8706645ead72cdc938373"
+  },
+  "crates/freeco-agent-ceo/Cargo.toml": {
+    "mtime": 1795040398.9812715,
+    "seen": 1795104956.4200826,
+    "ast_hash": "73446d48d2a705aee3793782d1ccd4b9",
+    "semantic_hash": "73446d48d2a705aee3793782d1ccd4b9"
+  },
+  "crates/freeco-agent-ceo/src/agent.rs": {
+    "mtime": 1795040398.98155,
+    "seen": 1795104956.4201975,
+    "ast_hash": "d1e6bbfb08c86796ada5fadb3ea0daad",
+    "semantic_hash": "d1e6bbfb08c86796ada5fadb3ea0daad"
+  },
+  "crates/freeco-agent-ceo/src/error.rs": {
+    "mtime": 1795040398.9816535,
+    "seen": 1795104956.4203146,
+    "ast_hash": "efe3e0fae26e8b6aa7f2e81ee2e58261",
+    "semantic_hash": "efe3e0fae26e8b6aa7f2e81ee2e58261"
+  },
+  "crates/freeco-agent-ceo/src/lib.rs": {
+    "mtime": 1795040398.9816535,
+    "seen": 1795104956.4204834,
+    "ast_hash": "55420f69add9e920148b4f73ca827e6a",
+    "semantic_hash": "55420f69add9e920148b4f73ca827e6a"
+  },
+  "crates/freeco-agent-ceo/src/types.rs": {
+    "mtime": 1795040398.9816535,
+    "seen": 1795104956.420605,
+    "ast_hash": "40fef713313fe3512501512ce9c85356",
+    "semantic_hash": "40fef713313fe3512501512ce9c85356"
+  },
+  "crates/freeco-agent-core/Cargo.toml": {
+    "mtime": 1795040398.9816535,
+    "seen": 1795104956.4207335,
+    "ast_hash": "8ae403f32189415c6ec2ee66c170de4c",
+    "semantic_hash": "8ae403f32189415c6ec2ee66c170de4c"
+  },
+  "crates/freeco-agent-core/src/agent.rs": {
+    "mtime": 1795040398.9823468,
+    "seen": 1795104956.4208539,
+    "ast_hash": "74627c856ba20a2933e439057ea7df02",
+    "semantic_hash": "74627c856ba20a2933e439057ea7df02"
+  },
+  "crates/freeco-agent-core/src/capability.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4209733,
+    "ast_hash": "793f905f66ce42bfeb3fdddd851c7236",
+    "semantic_hash": "793f905f66ce42bfeb3fdddd851c7236"
+  },
+  "crates/freeco-agent-core/src/context.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4210887,
+    "ast_hash": "e1678d0cead3308aea49da48d43234de",
+    "semantic_hash": "e1678d0cead3308aea49da48d43234de"
+  },
+  "crates/freeco-agent-core/src/error.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4212022,
+    "ast_hash": "d6ade66634c6bf3f94334615cad25531",
+    "semantic_hash": "d6ade66634c6bf3f94334615cad25531"
+  },
+  "crates/freeco-agent-core/src/freeco_bridge.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4213142,
+    "ast_hash": "f508b7b373b8fbbf6fc6fba6f6c6d47e",
+    "semantic_hash": "f508b7b373b8fbbf6fc6fba6f6c6d47e"
+  },
+  "crates/freeco-agent-core/src/learning.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4214308,
+    "ast_hash": "6e68b464f76215480cb0206adf614526",
+    "semantic_hash": "6e68b464f76215480cb0206adf614526"
+  },
+  "crates/freeco-agent-core/src/lib.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4216526,
+    "ast_hash": "8c807b2f8f7f3fa3c23387dc540f3d3f",
+    "semantic_hash": "8c807b2f8f7f3fa3c23387dc540f3d3f"
+  },
+  "crates/freeco-agent-core/src/message.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.421792,
+    "ast_hash": "1f5dd5e8b9d5c6a922332243e9271af9",
+    "semantic_hash": "1f5dd5e8b9d5c6a922332243e9271af9"
+  },
+  "crates/freeco-agent-core/src/response.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4219153,
+    "ast_hash": "1e170bfb6c30ffb16b4fca02cc309983",
+    "semantic_hash": "1e170bfb6c30ffb16b4fca02cc309983"
+  },
+  "crates/freeco-agent-core/src/time_util.rs": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4220345,
+    "ast_hash": "8327febdfa019cf66e46520b8b0f0fba",
+    "semantic_hash": "8327febdfa019cf66e46520b8b0f0fba"
+  },
+  "crates/freeco-agent-secretary/Cargo.toml": {
+    "mtime": 1795040398.9825175,
+    "seen": 1795104956.4221659,
+    "ast_hash": "5977d08d4c456b82bbb09005cca3a10e",
+    "semantic_hash": "5977d08d4c456b82bbb09005cca3a10e"
+  },
+  "crates/freeco-agent-secretary/src/agent.rs": {
+    "mtime": 1795040398.9834158,
+    "seen": 1795104956.4222798,
+    "ast_hash": "5edc9995214128ca0c724823c37117c6",
+    "semantic_hash": "5edc9995214128ca0c724823c37117c6"
+  },
+  "crates/freeco-agent-secretary/src/classifier.rs": {
+    "mtime": 1795040398.983841,
+    "seen": 1795104956.4224317,
+    "ast_hash": "f7ab792fb646d008acbc492a443a20bc",
+    "semantic_hash": "f7ab792fb646d008acbc492a443a20bc"
+  },
+  "crates/freeco-agent-secretary/src/error.rs": {
+    "mtime": 1795040398.983841,
+    "seen": 1795104956.422556,
+    "ast_hash": "2f809a396036f309d9fa94c32c5026e4",
+    "semantic_hash": "2f809a396036f309d9fa94c32c5026e4"
+  },
+  "crates/freeco-agent-secretary/src/lib.rs": {
+    "mtime": 1795040398.983841,
+    "seen": 1795104956.4226859,
+    "ast_hash": "4723cd95321ec21aa309a4bed3f0eac0",
+    "semantic_hash": "4723cd95321ec21aa309a4bed3f0eac0"
+  },
+  "crates/freeco-agent-shopping/Cargo.toml": {
+    "mtime": 1795040398.983841,
+    "seen": 1795104956.4228075,
+    "ast_hash": "0af5cb06d3b22f13cc33a4172b6f30af",
+    "semantic_hash": "0af5cb06d3b22f13cc33a4172b6f30af"
+  },
+  "crates/freeco-agent-shopping/src/agent.rs": {
+    "mtime": 1795040398.984404,
+    "seen": 1795104956.4229221,
+    "ast_hash": "e008801a542612be3aee709f3ac23933",
+    "semantic_hash": "e008801a542612be3aee709f3ac23933"
+  },
+  "crates/freeco-agent-shopping/src/error.rs": {
+    "mtime": 1795040398.9844697,
+    "seen": 1795104956.4230728,
+    "ast_hash": "763abafc27f46e0b169ad897111471d4",
+    "semantic_hash": "763abafc27f46e0b169ad897111471d4"
+  },
+  "crates/freeco-agent-shopping/src/lib.rs": {
+    "mtime": 1795040398.9844697,
+    "seen": 1795104956.423201,
+    "ast_hash": "1047aa5f32d69372678c9468d075f828",
+    "semantic_hash": "1047aa5f32d69372678c9468d075f828"
+  },
+  "crates/freeco-agent-shopping/src/research.rs": {
+    "mtime": 1795040398.9844697,
+    "seen": 1795104956.4233174,
+    "ast_hash": "a7bcc7480ee9adb30a69fdb9f3bebcc8",
+    "semantic_hash": "a7bcc7480ee9adb30a69fdb9f3bebcc8"
+  },
+  "crates/freeco-api/Cargo.toml": {
+    "mtime": 1795088767.76126,
+    "seen": 1795104956.4234335,
+    "ast_hash": "8477e902173b726502dadbed221309e4",
+    "semantic_hash": "8477e902173b726502dadbed221309e4"
+  },
+  "crates/freeco-api/src/access.rs": {
+    "mtime": 1795050637.8961437,
+    "seen": 1795104956.4236042,
+    "ast_hash": "c593f7df79c2050a2c25690f461e5864",
+    "semantic_hash": "c593f7df79c2050a2c25690f461e5864"
+  },
+  "crates/freeco-api/src/backup.rs": {
+    "mtime": 1795040398.9850488,
+    "seen": 1795104956.4237318,
+    "ast_hash": "9fedaa4a3945f68155ccee2abd0a8db9",
+    "semantic_hash": "9fedaa4a3945f68155ccee2abd0a8db9"
+  },
+  "crates/freeco-api/src/bundled_templates.rs": {
+    "mtime": 1795103093.1369689,
+    "seen": 1795104956.423851,
+    "ast_hash": "79f83e6aeaaf0ded2e742bf6902b7b6f",
+    "semantic_hash": "79f83e6aeaaf0ded2e742bf6902b7b6f"
+  },
+  "crates/freeco-api/src/chamber.rs": {
+    "mtime": 1795050637.8961437,
+    "seen": 1795104956.4239852,
+    "ast_hash": "02ca7a1c611f7d6391d83cb2d6065684",
+    "semantic_hash": "02ca7a1c611f7d6391d83cb2d6065684"
+  },
+  "crates/freeco-api/src/channel_bridge.rs": {
+    "mtime": 1795050360.8881369,
+    "seen": 1795104956.4241185,
+    "ast_hash": "5a6e78d182957cb398528c637a650c7c",
+    "semantic_hash": "5a6e78d182957cb398528c637a650c7c"
+  },
+  "crates/freeco-api/src/chat_tools.rs": {
+    "mtime": 1795049466.5001464,
+    "seen": 1795104956.424239,
+    "ast_hash": "0a18571a13f1683e588bde8c62218a30",
+    "semantic_hash": "0a18571a13f1683e588bde8c62218a30"
+  },
+  "crates/freeco-api/src/crm.rs": {
+    "mtime": 1795103093.188969,
+    "seen": 1795104956.424355,
+    "ast_hash": "c982e867e563dd3843f7ca84156d092b",
+    "semantic_hash": "c982e867e563dd3843f7ca84156d092b"
+  },
+  "crates/freeco-api/src/csrf.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4244704,
+    "ast_hash": "2611edaa344c6bba41d1b3f3196fdf21",
+    "semantic_hash": "2611edaa344c6bba41d1b3f3196fdf21"
+  },
+  "crates/freeco-api/src/dispatch.rs": {
+    "mtime": 1795049466.5001464,
+    "seen": 1795104956.4245868,
+    "ast_hash": "fd798fccc29e04833896dd65b63a749c",
+    "semantic_hash": "fd798fccc29e04833896dd65b63a749c"
+  },
+  "crates/freeco-api/src/lib.rs": {
+    "mtime": 1795051554.9441295,
+    "seen": 1795104956.424701,
+    "ast_hash": "102201d0ad39c6093b448b743fb4d794",
+    "semantic_hash": "102201d0ad39c6093b448b743fb4d794"
+  },
+  "crates/freeco-api/src/live_routes.rs": {
+    "mtime": 1795090657.7809587,
+    "seen": 1795104956.4248958,
+    "ast_hash": "c988c9931227d94f25d4b0ea766a92b3",
+    "semantic_hash": "c988c9931227d94f25d4b0ea766a92b3"
+  },
+  "crates/freeco-api/src/local_ai.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4250238,
+    "ast_hash": "3bea7cb997ff0703f422c9595f7a5cc3",
+    "semantic_hash": "3bea7cb997ff0703f422c9595f7a5cc3"
+  },
+  "crates/freeco-api/src/mcp_http.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4251447,
+    "ast_hash": "716a931d24b2a0d580f4f656a6d084c3",
+    "semantic_hash": "716a931d24b2a0d580f4f656a6d084c3"
+  },
+  "crates/freeco-api/src/middleware.rs": {
+    "mtime": 1795090657.0287807,
+    "seen": 1795104956.4252777,
+    "ast_hash": "81092d62422d5c9919ffcda869109788",
+    "semantic_hash": "81092d62422d5c9919ffcda869109788"
+  },
+  "crates/freeco-api/src/openai_compat.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4253972,
+    "ast_hash": "70e566a004d78b3144fe08e337953768",
+    "semantic_hash": "70e566a004d78b3144fe08e337953768"
+  },
+  "crates/freeco-api/src/openrouter_free.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4255764,
+    "ast_hash": "0de6764a5bf921e26d6b5e0b082deac2",
+    "semantic_hash": "0de6764a5bf921e26d6b5e0b082deac2"
+  },
+  "crates/freeco-api/src/org_routes.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4257228,
+    "ast_hash": "ada84f48c19cd3198167804e1d052a46",
+    "semantic_hash": "ada84f48c19cd3198167804e1d052a46"
+  },
+  "crates/freeco-api/src/provider_signup.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4258397,
+    "ast_hash": "ac4104f2b6081291feeedf17b565a4a1",
+    "semantic_hash": "ac4104f2b6081291feeedf17b565a4a1"
+  },
+  "crates/freeco-api/src/rate_limiter.rs": {
+    "mtime": 1795040398.98521,
+    "seen": 1795104956.4259543,
+    "ast_hash": "2460d8934eece60093dbb0e1e592359a",
+    "semantic_hash": "2460d8934eece60093dbb0e1e592359a"
+  },
+  "crates/freeco-api/src/routes.rs": {
+    "mtime": 1795090679.3449545,
+    "seen": 1795104956.4260669,
+    "ast_hash": "d02ecb81f16cc6dbed38231ecd06e341",
+    "semantic_hash": "d02ecb81f16cc6dbed38231ecd06e341"
+  },
+  "crates/freeco-api/src/sandbox_status.rs": {
+    "mtime": 1795040398.9865487,
+    "seen": 1795104956.4261968,
+    "ast_hash": "690f227eceafd851b9e3c7133c9afdc6",
+    "semantic_hash": "690f227eceafd851b9e3c7133c9afdc6"
+  },
+  "crates/freeco-api/src/secret_guard.rs": {
+    "mtime": 1795040398.9865487,
+    "seen": 1795104956.4263139,
+    "ast_hash": "14126c13fc9aac9b2214636ffc0e2553",
+    "semantic_hash": "14126c13fc9aac9b2214636ffc0e2553"
+  },
+  "crates/freeco-api/src/security.rs": {
+    "mtime": 1795103093.5529692,
+    "seen": 1795104956.4264293,
+    "ast_hash": "93fc7b9e18456e2f4aa36bc95ae10075",
+    "semantic_hash": "93fc7b9e18456e2f4aa36bc95ae10075"
+  },
+  "crates/freeco-api/src/server.rs": {
+    "mtime": 1795088767.7593534,
+    "seen": 1795104956.426554,
+    "ast_hash": "95488acc6868d1fd3a9b84f1e9bf8105",
+    "semantic_hash": "95488acc6868d1fd3a9b84f1e9bf8105"
+  },
+  "crates/freeco-api/src/service_backup.rs": {
+    "mtime": 1795049336.156145,
+    "seen": 1795104956.4266834,
+    "ast_hash": "78a998b1539f864633219b6f6df412a0",
+    "semantic_hash": "78a998b1539f864633219b6f6df412a0"
+  },
+  "crates/freeco-api/src/services.rs": {
+    "mtime": 1795050046.9961412,
+    "seen": 1795104956.4268088,
+    "ast_hash": "40da30c27b4185244030865271b72910",
+    "semantic_hash": "40da30c27b4185244030865271b72910"
+  },
+  "crates/freeco-api/src/session_auth.rs": {
+    "mtime": 1795050637.9001436,
+    "seen": 1795104956.4269385,
+    "ast_hash": "7cf9a1b6831e8b641c597e93bf853598",
+    "semantic_hash": "7cf9a1b6831e8b641c597e93bf853598"
+  },
+  "crates/freeco-api/src/stream_chunker.rs": {
+    "mtime": 1795040398.9865487,
+    "seen": 1795104956.427073,
+    "ast_hash": "a8af4c1a99318f4d52f3fe9e7b8e475b",
+    "semantic_hash": "a8af4c1a99318f4d52f3fe9e7b8e475b"
+  },
+  "crates/freeco-api/src/stream_dedup.rs": {
+    "mtime": 1795040398.9865487,
+    "seen": 1795104956.4272041,
+    "ast_hash": "0076ac074a21bfaf37f82f0ccafee13d",
+    "semantic_hash": "0076ac074a21bfaf37f82f0ccafee13d"
+  },
+  "crates/freeco-api/src/team_access.rs": {
+    "mtime": 1795103093.6449692,
+    "seen": 1795104956.4273362,
+    "ast_hash": "b475f7e48418f83c7fc4b74cb6ec9563",
+    "semantic_hash": "b475f7e48418f83c7fc4b74cb6ec9563"
+  },
+  "crates/freeco-api/src/teams_routes.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4274704,
+    "ast_hash": "a6bc0bdb145970cfc3febf07dcc6da77",
+    "semantic_hash": "a6bc0bdb145970cfc3febf07dcc6da77"
+  },
+  "crates/freeco-api/src/types.rs": {
+    "mtime": 1795049336.156145,
+    "seen": 1795104956.4276617,
+    "ast_hash": "69bfb5fb2597ff2b10c92d57bbe29ef7",
+    "semantic_hash": "69bfb5fb2597ff2b10c92d57bbe29ef7"
+  },
+  "crates/freeco-api/src/usage_breakdown.rs": {
+    "mtime": 1795040398.9865487,
+    "seen": 1795104956.427803,
+    "ast_hash": "00eafd8961a3a1e25744d0aa18b44afc",
+    "semantic_hash": "00eafd8961a3a1e25744d0aa18b44afc"
+  },
+  "crates/freeco-api/src/webchat.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4279392,
+    "ast_hash": "83320def60c1a27c047bbc492a5a7ef1",
+    "semantic_hash": "83320def60c1a27c047bbc492a5a7ef1"
+  },
+  "crates/freeco-api/src/ws.rs": {
+    "mtime": 1795050937.5399435,
+    "seen": 1795104956.4280682,
+    "ast_hash": "8e301222d20aacccb6ac018b807dc832",
+    "semantic_hash": "8e301222d20aacccb6ac018b807dc832"
+  },
+  "crates/freeco-api/static/i18n/en.json": {
+    "mtime": 1795040398.9947236,
+    "seen": 1795104956.4282064,
+    "ast_hash": "99df3d80d72d0ff0ee10211c684fd7fe",
+    "semantic_hash": "99df3d80d72d0ff0ee10211c684fd7fe",
+    "ast_empty": true
+  },
+  "crates/freeco-api/static/i18n/i18n.js": {
+    "mtime": 1795040398.9963765,
+    "seen": 1795104956.428213,
+    "ast_hash": "0999bc0b1bac02d3681daee33812affa",
+    "semantic_hash": "0999bc0b1bac02d3681daee33812affa"
+  },
+  "crates/freeco-api/static/i18n/ru.json": {
+    "mtime": 1795040398.9963765,
+    "seen": 1795104956.4283464,
+    "ast_hash": "3121710bcac4b641bf63f8f70b19c17c",
+    "semantic_hash": "3121710bcac4b641bf63f8f70b19c17c",
+    "ast_empty": true
+  },
+  "crates/freeco-api/static/js/api.js": {
+    "mtime": 1795049466.5081463,
+    "seen": 1795104956.4283516,
+    "ast_hash": "a850dc7576c570c02ad9674fab34cb43",
+    "semantic_hash": "a850dc7576c570c02ad9674fab34cb43"
+  },
+  "crates/freeco-api/static/js/app.js": {
+    "mtime": 1795054170.048124,
+    "seen": 1795104956.4284832,
+    "ast_hash": "48ee2a9ce9e7b266686ef0c5d5dcb045",
+    "semantic_hash": "48ee2a9ce9e7b266686ef0c5d5dcb045"
+  },
+  "crates/freeco-api/static/js/katex.js": {
+    "mtime": 1795040399.0003238,
+    "seen": 1795104956.4286113,
+    "ast_hash": "cdb6174693038de47e4f1ad03aec81c1",
+    "semantic_hash": "cdb6174693038de47e4f1ad03aec81c1"
+  },
+  "crates/freeco-api/static/js/pages/agents.js": {
+    "mtime": 1795040399.0003238,
+    "seen": 1795104956.4287345,
+    "ast_hash": "3253531059205257c585b35275b0288d",
+    "semantic_hash": "3253531059205257c585b35275b0288d"
+  },
+  "crates/freeco-api/static/js/pages/approvals.js": {
+    "mtime": 1795050987.2681339,
+    "seen": 1795104956.428872,
+    "ast_hash": "012847db04580dba1e01c45b8d40fa2d",
+    "semantic_hash": "012847db04580dba1e01c45b8d40fa2d"
+  },
+  "crates/freeco-api/static/js/pages/assistant.js": {
+    "mtime": 1795049466.5081463,
+    "seen": 1795104956.4290087,
+    "ast_hash": "61fc4278bd7e5e9236887867a5d24d20",
+    "semantic_hash": "61fc4278bd7e5e9236887867a5d24d20"
+  },
+  "crates/freeco-api/static/js/pages/chamber.js": {
+    "mtime": 1795050637.9041436,
+    "seen": 1795104956.4291897,
+    "ast_hash": "c4920bc47afd82b016bc0e33b8b34f18",
+    "semantic_hash": "c4920bc47afd82b016bc0e33b8b34f18"
+  },
+  "crates/freeco-api/static/js/pages/channels.js": {
+    "mtime": 1795050360.8921368,
+    "seen": 1795104956.429334,
+    "ast_hash": "bc297a14dabf0cb984eba303b15564ba",
+    "semantic_hash": "bc297a14dabf0cb984eba303b15564ba"
+  },
+  "crates/freeco-api/static/js/pages/chat.js": {
+    "mtime": 1795054170.052124,
+    "seen": 1795104956.42947,
+    "ast_hash": "2fd6a7661f2794824954bd5b2be5f944",
+    "semantic_hash": "2fd6a7661f2794824954bd5b2be5f944"
+  },
+  "crates/freeco-api/static/js/pages/comms.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4297097,
+    "ast_hash": "69b29e0c25c2f5b348cad8d03ef1468f",
+    "semantic_hash": "69b29e0c25c2f5b348cad8d03ef1468f"
+  },
+  "crates/freeco-api/static/js/pages/hands.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4298534,
+    "ast_hash": "83219da4fd3683d4d603455e5cf1f275",
+    "semantic_hash": "83219da4fd3683d4d603455e5cf1f275"
+  },
+  "crates/freeco-api/static/js/pages/live.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4299896,
+    "ast_hash": "967be3d31ffde8d0bc7eac97dd2c4dfc",
+    "semantic_hash": "967be3d31ffde8d0bc7eac97dd2c4dfc"
+  },
+  "crates/freeco-api/static/js/pages/logs.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4301386,
+    "ast_hash": "6db616f3675f882c9daa8f3ad101787e",
+    "semantic_hash": "6db616f3675f882c9daa8f3ad101787e"
+  },
+  "crates/freeco-api/static/js/pages/overview.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4303036,
+    "ast_hash": "b1ea947cab51066af6989c6443f5fee0",
+    "semantic_hash": "b1ea947cab51066af6989c6443f5fee0"
+  },
+  "crates/freeco-api/static/js/pages/projects.js": {
+    "mtime": 1795049336.156145,
+    "seen": 1795104956.4304664,
+    "ast_hash": "6e9c6817a541abd94fc4adbb2e3b6f33",
+    "semantic_hash": "6e9c6817a541abd94fc4adbb2e3b6f33"
+  },
+  "crates/freeco-api/static/js/pages/runtime.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4306302,
+    "ast_hash": "d9b3c20830b44ed5b7c0a0793f7381f9",
+    "semantic_hash": "d9b3c20830b44ed5b7c0a0793f7381f9"
+  },
+  "crates/freeco-api/static/js/pages/scheduler.js": {
+    "mtime": 1795049336.156145,
+    "seen": 1795104956.4307897,
+    "ast_hash": "a64b287b92dff0103ebae87677fee93a",
+    "semantic_hash": "a64b287b92dff0103ebae87677fee93a"
+  },
+  "crates/freeco-api/static/js/pages/sessions.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4309359,
+    "ast_hash": "838dd72287179881ff5ae2a5551e75bf",
+    "semantic_hash": "838dd72287179881ff5ae2a5551e75bf"
+  },
+  "crates/freeco-api/static/js/pages/settings.js": {
+    "mtime": 1795050046.9961412,
+    "seen": 1795104956.4310765,
+    "ast_hash": "5e0abbb55d626ffb14dfca74474ef06e",
+    "semantic_hash": "5e0abbb55d626ffb14dfca74474ef06e"
+  },
+  "crates/freeco-api/static/js/pages/sidenav.js": {
+    "mtime": 1795054170.052124,
+    "seen": 1795104956.4312172,
+    "ast_hash": "257be28061a59abc16d0215311d6beb7",
+    "semantic_hash": "257be28061a59abc16d0215311d6beb7"
+  },
+  "crates/freeco-api/static/js/pages/skills.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4313564,
+    "ast_hash": "dc420c660145b6b83a7b42f794a23eab",
+    "semantic_hash": "dc420c660145b6b83a7b42f794a23eab"
+  },
+  "crates/freeco-api/static/js/pages/starnet.js": {
+    "mtime": 1795049888.84414,
+    "seen": 1795104956.431496,
+    "ast_hash": "e7ad6b3483f8dbe46d0b331403f323f8",
+    "semantic_hash": "e7ad6b3483f8dbe46d0b331403f323f8"
+  },
+  "crates/freeco-api/static/js/pages/teams.js": {
+    "mtime": 1795051554.9521294,
+    "seen": 1795104956.4316967,
+    "ast_hash": "c7e30703776960f913b88a12986a359e",
+    "semantic_hash": "c7e30703776960f913b88a12986a359e"
+  },
+  "crates/freeco-api/static/js/pages/usage.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4318435,
+    "ast_hash": "9be6c630d80460d9cff72f8b8b0c8ee1",
+    "semantic_hash": "9be6c630d80460d9cff72f8b8b0c8ee1"
+  },
+  "crates/freeco-api/static/js/pages/wizard.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4319842,
+    "ast_hash": "70639dd00ca25ef84e175419b61b118b",
+    "semantic_hash": "70639dd00ca25ef84e175419b61b118b"
+  },
+  "crates/freeco-api/static/js/pages/workflow-builder.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.432124,
+    "ast_hash": "18462487a70fcb5f7cc41c8117a57fe0",
+    "semantic_hash": "18462487a70fcb5f7cc41c8117a57fe0"
+  },
+  "crates/freeco-api/static/js/pages/workflows.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4322822,
+    "ast_hash": "ded4da7a62cd291042c85d669853ff30",
+    "semantic_hash": "ded4da7a62cd291042c85d669853ff30"
+  },
+  "crates/freeco-api/static/js/shared/inline-approvals.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4325345,
+    "ast_hash": "49c5877b6b567a8ba8f46d7b057c1da9",
+    "semantic_hash": "49c5877b6b567a8ba8f46d7b057c1da9"
+  },
+  "crates/freeco-api/static/manifest.json": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.432687,
+    "ast_hash": "1379bcc1eac6165e2a4e57b5618f3e58",
+    "semantic_hash": "1379bcc1eac6165e2a4e57b5618f3e58"
+  },
+  "crates/freeco-api/static/sw.js": {
+    "mtime": 1795040399.001121,
+    "seen": 1795104956.4328134,
+    "ast_hash": "5b15bd68ec98bf97f368bbc542bd5e4a",
+    "semantic_hash": "5b15bd68ec98bf97f368bbc542bd5e4a"
+  },
+  "crates/freeco-api/static/vendor/alpine.min.js": {
+    "mtime": 1795040399.0057676,
+    "seen": 1795104956.4329376,
+    "ast_hash": "7f53c06f93ae095221ff718c3a158a93",
+    "semantic_hash": "7f53c06f93ae095221ff718c3a158a93"
+  },
+  "crates/freeco-api/static/vendor/chart.umd.min.js": {
+    "mtime": 1795040399.0057676,
+    "seen": 1795104956.4330714,
+    "ast_hash": "9568f48f80c164cf2ecc437e0072f930",
+    "semantic_hash": "9568f48f80c164cf2ecc437e0072f930"
+  },
+  "crates/freeco-api/static/vendor/highlight.min.js": {
+    "mtime": 1795040399.0057676,
+    "seen": 1795104956.4332042,
+    "ast_hash": "e43d5372b6165de50a5320cd67559be3",
+    "semantic_hash": "e43d5372b6165de50a5320cd67559be3"
+  },
+  "crates/freeco-api/static/vendor/marked.min.js": {
+    "mtime": 1795040399.0057676,
+    "seen": 1795104956.433335,
+    "ast_hash": "e04ae0bf88da292e65e1e677394f6058",
+    "semantic_hash": "e04ae0bf88da292e65e1e677394f6058"
+  },
+  "crates/freeco-api/tests/api_integration_test.rs": {
+    "mtime": 1795049888.84814,
+    "seen": 1795104956.4335184,
+    "ast_hash": "5bd0e0b74f7ba9c7109ddff5c04f903e",
+    "semantic_hash": "5bd0e0b74f7ba9c7109ddff5c04f903e"
+  },
+  "crates/freeco-api/tests/chamber_test.rs": {
+    "mtime": 1795050637.9041436,
+    "seen": 1795104956.4337473,
+    "ast_hash": "06384121aa9540e7df81625b7e55b41a",
+    "semantic_hash": "06384121aa9540e7df81625b7e55b41a"
+  },
+  "crates/freeco-api/tests/daemon_lifecycle_test.rs": {
+    "mtime": 1795040399.0089495,
+    "seen": 1795104956.4338763,
+    "ast_hash": "7ea262a20c7c624d42052c5343e94352",
+    "semantic_hash": "7ea262a20c7c624d42052c5343e94352"
+  },
+  "crates/freeco-api/tests/load_test.rs": {
+    "mtime": 1795040399.0089495,
+    "seen": 1795104956.4339983,
+    "ast_hash": "94a6d7f0ece5c44fbb78984c5b5fa904",
+    "semantic_hash": "94a6d7f0ece5c44fbb78984c5b5fa904"
+  },
+  "crates/freeco-api/tests/org_runs_api_test.rs": {
+    "mtime": 1795103093.7489693,
+    "seen": 1795104956.434119,
+    "ast_hash": "255c4b7ebc69ff1ef0154d743c6a0c3e",
+    "semantic_hash": "255c4b7ebc69ff1ef0154d743c6a0c3e"
+  },
+  "crates/freeco-api/tests/skill_config_api_test.rs": {
+    "mtime": 1795040399.0089495,
+    "seen": 1795104956.4342487,
+    "ast_hash": "19d66d35febc42eb83ed1669d26db74e",
+    "semantic_hash": "19d66d35febc42eb83ed1669d26db74e"
+  },
+  "crates/freeco-api/tests/teams_api_test.rs": {
+    "mtime": 1795103093.7649693,
+    "seen": 1795104956.4343662,
+    "ast_hash": "dcd98fb76e4ab787bd2ee709d8b52d58",
+    "semantic_hash": "dcd98fb76e4ab787bd2ee709d8b52d58"
+  },
+  "crates/freeco-channels/Cargo.toml": {
+    "mtime": 1795040399.0089495,
+    "seen": 1795104956.4345028,
+    "ast_hash": "45e1b267a0bace98f2b3e01f385c2a77",
+    "semantic_hash": "45e1b267a0bace98f2b3e01f385c2a77"
+  },
+  "crates/freeco-channels/src/bluesky.rs": {
+    "mtime": 1795040399.010378,
+    "seen": 1795104956.434625,
+    "ast_hash": "ee6e0ef465e4115a2a5bff5ab27814f1",
+    "semantic_hash": "ee6e0ef465e4115a2a5bff5ab27814f1"
+  },
+  "crates/freeco-channels/src/bridge.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4347687,
+    "ast_hash": "9c776e551f3a11f764705afa6edd36ce",
+    "semantic_hash": "9c776e551f3a11f764705afa6edd36ce"
+  },
+  "crates/freeco-channels/src/dingtalk.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.434904,
+    "ast_hash": "9c9b32b2925f83ea8f3cc2e2b98ecd9c",
+    "semantic_hash": "9c9b32b2925f83ea8f3cc2e2b98ecd9c"
+  },
+  "crates/freeco-channels/src/dingtalk_stream.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4350429,
+    "ast_hash": "64d621fd2d814b239980b9ef60aeb405",
+    "semantic_hash": "64d621fd2d814b239980b9ef60aeb405"
+  },
+  "crates/freeco-channels/src/discord.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4351795,
+    "ast_hash": "ed5693ce9107d4f07fc72aad187d7fe2",
+    "semantic_hash": "ed5693ce9107d4f07fc72aad187d7fe2"
+  },
+  "crates/freeco-channels/src/discourse.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4353168,
+    "ast_hash": "ec650291a5a6a2f8be169d71fbcea57e",
+    "semantic_hash": "ec650291a5a6a2f8be169d71fbcea57e"
+  },
+  "crates/freeco-channels/src/email.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4354546,
+    "ast_hash": "71d0624f7c30d798cb2453f89e3e786f",
+    "semantic_hash": "71d0624f7c30d798cb2453f89e3e786f"
+  },
+  "crates/freeco-channels/src/feishu.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4355881,
+    "ast_hash": "80f8bf3caec5bf2e7ce563f26f3108ad",
+    "semantic_hash": "80f8bf3caec5bf2e7ce563f26f3108ad"
+  },
+  "crates/freeco-channels/src/flock.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4357922,
+    "ast_hash": "072b46bafb1b1f7c11c79506516d8e38",
+    "semantic_hash": "072b46bafb1b1f7c11c79506516d8e38"
+  },
+  "crates/freeco-channels/src/formatter.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4359102,
+    "ast_hash": "f9852699fd822007ae7865f3b2890c2a",
+    "semantic_hash": "f9852699fd822007ae7865f3b2890c2a"
+  },
+  "crates/freeco-channels/src/gitter.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.436024,
+    "ast_hash": "3403be71bc88fac6ce99dfa8aed1b2cd",
+    "semantic_hash": "3403be71bc88fac6ce99dfa8aed1b2cd"
+  },
+  "crates/freeco-channels/src/google_chat.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4361372,
+    "ast_hash": "c204b8fb0f8d668e12418115c451ace1",
+    "semantic_hash": "c204b8fb0f8d668e12418115c451ace1"
+  },
+  "crates/freeco-channels/src/gotify.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4362676,
+    "ast_hash": "a97ebdd9a3508fe34ef4f905d0d5e943",
+    "semantic_hash": "a97ebdd9a3508fe34ef4f905d0d5e943"
+  },
+  "crates/freeco-channels/src/guilded.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4363968,
+    "ast_hash": "1b9a197e0b53e88660217f20a6a2ae29",
+    "semantic_hash": "1b9a197e0b53e88660217f20a6a2ae29"
+  },
+  "crates/freeco-channels/src/irc.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.436535,
+    "ast_hash": "b96d64d2275fc0bff2179df21348a7a9",
+    "semantic_hash": "b96d64d2275fc0bff2179df21348a7a9"
+  },
+  "crates/freeco-channels/src/keybase.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.436678,
+    "ast_hash": "7ab649eadb7152e5245a37aa48224211",
+    "semantic_hash": "7ab649eadb7152e5245a37aa48224211"
+  },
+  "crates/freeco-channels/src/lib.rs": {
+    "mtime": 1795050360.8921368,
+    "seen": 1795104956.4368174,
+    "ast_hash": "52fb752781091f01949788adc7cffe5f",
+    "semantic_hash": "52fb752781091f01949788adc7cffe5f"
+  },
+  "crates/freeco-channels/src/line.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4369426,
+    "ast_hash": "51ff250788f6611a8cd3b89c5b4d880b",
+    "semantic_hash": "51ff250788f6611a8cd3b89c5b4d880b"
+  },
+  "crates/freeco-channels/src/linkedin.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4370632,
+    "ast_hash": "2bb80c56bb2408028efa15875681327a",
+    "semantic_hash": "2bb80c56bb2408028efa15875681327a"
+  },
+  "crates/freeco-channels/src/mastodon.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4371805,
+    "ast_hash": "9c03a2a7b4abea9f29b2efeeac309b2d",
+    "semantic_hash": "9c03a2a7b4abea9f29b2efeeac309b2d"
+  },
+  "crates/freeco-channels/src/matrix.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4372978,
+    "ast_hash": "5c0af6a46ba9bfed4b896b80023bb028",
+    "semantic_hash": "5c0af6a46ba9bfed4b896b80023bb028"
+  },
+  "crates/freeco-channels/src/mattermost.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4374158,
+    "ast_hash": "878124ecd3642288457d81c4208be332",
+    "semantic_hash": "878124ecd3642288457d81c4208be332"
+  },
+  "crates/freeco-channels/src/messenger.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.437559,
+    "ast_hash": "7bb38bf75dd97c1b360f02c4170dbd00",
+    "semantic_hash": "7bb38bf75dd97c1b360f02c4170dbd00"
+  },
+  "crates/freeco-channels/src/mqtt.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4377475,
+    "ast_hash": "002efbde1f5d5619fd0386be51019e9c",
+    "semantic_hash": "002efbde1f5d5619fd0386be51019e9c"
+  },
+  "crates/freeco-channels/src/mumble.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4378877,
+    "ast_hash": "f5035d1503fc0fa01d2214b6b4be2333",
+    "semantic_hash": "f5035d1503fc0fa01d2214b6b4be2333"
+  },
+  "crates/freeco-channels/src/nextcloud.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.438011,
+    "ast_hash": "d667ab8307b1301d5312536c1b15469e",
+    "semantic_hash": "d667ab8307b1301d5312536c1b15469e"
+  },
+  "crates/freeco-channels/src/nostr.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4381325,
+    "ast_hash": "b784dd39c2ead2e15cc149ae1379a848",
+    "semantic_hash": "b784dd39c2ead2e15cc149ae1379a848"
+  },
+  "crates/freeco-channels/src/ntfy.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.438271,
+    "ast_hash": "a81fa04891e4f39f76792d30981c16a5",
+    "semantic_hash": "a81fa04891e4f39f76792d30981c16a5"
+  },
+  "crates/freeco-channels/src/pumble.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4383903,
+    "ast_hash": "707a3a250bbdb38214c933123df2da56",
+    "semantic_hash": "707a3a250bbdb38214c933123df2da56"
+  },
+  "crates/freeco-channels/src/reddit.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.438508,
+    "ast_hash": "9347839865a06570c47a8362fa2f5b02",
+    "semantic_hash": "9347839865a06570c47a8362fa2f5b02"
+  },
+  "crates/freeco-channels/src/revolt.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.438624,
+    "ast_hash": "a4a63acf56bbe717b1eabd6016f2707b",
+    "semantic_hash": "a4a63acf56bbe717b1eabd6016f2707b"
+  },
+  "crates/freeco-channels/src/rocketchat.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.438766,
+    "ast_hash": "7c59c1ebbd97409ec83a743cdfa2549d",
+    "semantic_hash": "7c59c1ebbd97409ec83a743cdfa2549d"
+  },
+  "crates/freeco-channels/src/router.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4388914,
+    "ast_hash": "69e774f2f400e319ebfd0789cce31c3d",
+    "semantic_hash": "69e774f2f400e319ebfd0789cce31c3d"
+  },
+  "crates/freeco-channels/src/signal.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4390333,
+    "ast_hash": "914d53a5f9e2b5c1c03d7ade8e404a89",
+    "semantic_hash": "914d53a5f9e2b5c1c03d7ade8e404a89"
+  },
+  "crates/freeco-channels/src/slack.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4391663,
+    "ast_hash": "30a30b5f8fd994b56d28acf6bcfceee9",
+    "semantic_hash": "30a30b5f8fd994b56d28acf6bcfceee9"
+  },
+  "crates/freeco-channels/src/teams.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4393008,
+    "ast_hash": "ef31d2828b7d542b5a7b26334b617714",
+    "semantic_hash": "ef31d2828b7d542b5a7b26334b617714"
+  },
+  "crates/freeco-channels/src/telegram.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4394395,
+    "ast_hash": "ebbc94e35d82d846f86242643a0be465",
+    "semantic_hash": "ebbc94e35d82d846f86242643a0be465"
+  },
+  "crates/freeco-channels/src/threema.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.439568,
+    "ast_hash": "a3236162c22b1f21f2bab79184e66cc6",
+    "semantic_hash": "a3236162c22b1f21f2bab79184e66cc6"
+  },
+  "crates/freeco-channels/src/twist.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4397752,
+    "ast_hash": "ee32d68fb132603f90d577d1893581e0",
+    "semantic_hash": "ee32d68fb132603f90d577d1893581e0"
+  },
+  "crates/freeco-channels/src/twitch.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4399197,
+    "ast_hash": "2ecfbe57b7a89ec7c0712faecf74cfe8",
+    "semantic_hash": "2ecfbe57b7a89ec7c0712faecf74cfe8"
+  },
+  "crates/freeco-channels/src/types.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4400756,
+    "ast_hash": "8adcd5b2c10d43733b32327ca659cd2a",
+    "semantic_hash": "8adcd5b2c10d43733b32327ca659cd2a"
+  },
+  "crates/freeco-channels/src/viber.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4401937,
+    "ast_hash": "9f9971d38d33c4671fdc835ddfbc9659",
+    "semantic_hash": "9f9971d38d33c4671fdc835ddfbc9659"
+  },
+  "crates/freeco-channels/src/webex.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4403229,
+    "ast_hash": "8f7163a21fe2ff10a6184f84f3853e7c",
+    "semantic_hash": "8f7163a21fe2ff10a6184f84f3853e7c"
+  },
+  "crates/freeco-channels/src/webhook.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.4404397,
+    "ast_hash": "3dcb18ec7eae2c716cbfb73b4cf697e1",
+    "semantic_hash": "3dcb18ec7eae2c716cbfb73b4cf697e1"
+  },
+  "crates/freeco-channels/src/wecom.rs": {
+    "mtime": 1795040399.01058,
+    "seen": 1795104956.440556,
+    "ast_hash": "328e01089b1bc2269057f28d404a6530",
+    "semantic_hash": "328e01089b1bc2269057f28d404a6530"
+  },
+  "crates/freeco-channels/src/whatsapp.rs": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.4406717,
+    "ast_hash": "199167660eb47d72ed3cead3c6ebb147",
+    "semantic_hash": "199167660eb47d72ed3cead3c6ebb147"
+  },
+  "crates/freeco-channels/src/whatsapp_allowlist.rs": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.4407895,
+    "ast_hash": "04b1938e8dde3aedf69eecc7aff23581",
+    "semantic_hash": "04b1938e8dde3aedf69eecc7aff23581"
+  },
+  "crates/freeco-channels/src/xmpp.rs": {
+    "mtime": 1795040399.0145488,
+    "seen": 1795104956.4409122,
+    "ast_hash": "c113bfb0cde41f23647f2e8167bd3ea5",
+    "semantic_hash": "c113bfb0cde41f23647f2e8167bd3ea5"
+  },
+  "crates/freeco-channels/src/zulip.rs": {
+    "mtime": 1795040399.0145488,
+    "seen": 1795104956.4412854,
+    "ast_hash": "76574896f6443058ccdfd50e475e3f66",
+    "semantic_hash": "76574896f6443058ccdfd50e475e3f66"
+  },
+  "crates/freeco-channels/tests/bridge_integration_test.rs": {
+    "mtime": 1795040399.0145488,
+    "seen": 1795104956.441411,
+    "ast_hash": "05835654b3e80579f6e6b044ca5dd08e",
+    "semantic_hash": "05835654b3e80579f6e6b044ca5dd08e"
+  },
+  "crates/freeco-cli/Cargo.toml": {
+    "mtime": 1795040399.0145488,
+    "seen": 1795104956.4415643,
+    "ast_hash": "a7c71eba32ae8d25f7b5b7da201daf3d",
+    "semantic_hash": "a7c71eba32ae8d25f7b5b7da201daf3d"
+  },
+  "crates/freeco-cli/src/bundled_agents.rs": {
+    "mtime": 1795040399.0197043,
+    "seen": 1795104956.4417822,
+    "ast_hash": "2cf2de1d21814f57d111d3822e513cd9",
+    "semantic_hash": "2cf2de1d21814f57d111d3822e513cd9"
+  },
+  "crates/freeco-cli/src/dotenv.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4420083,
+    "ast_hash": "e83f3447414340e1ade83b087e416e91",
+    "semantic_hash": "e83f3447414340e1ade83b087e416e91"
+  },
+  "crates/freeco-cli/src/launcher.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4425793,
+    "ast_hash": "4b99ffc2a2adf0b42ee6db8d6c689403",
+    "semantic_hash": "4b99ffc2a2adf0b42ee6db8d6c689403"
+  },
+  "crates/freeco-cli/src/main.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.442719,
+    "ast_hash": "ef399dfedb4abc227f86637571a0a8d2",
+    "semantic_hash": "ef399dfedb4abc227f86637571a0a8d2"
+  },
+  "crates/freeco-cli/src/mcp.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.442901,
+    "ast_hash": "ba482ba06189104714b8dfad5907e898",
+    "semantic_hash": "ba482ba06189104714b8dfad5907e898"
+  },
+  "crates/freeco-cli/src/progress.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4430552,
+    "ast_hash": "b35d23e191ec746dfb599944c6cd614f",
+    "semantic_hash": "b35d23e191ec746dfb599944c6cd614f"
+  },
+  "crates/freeco-cli/src/table.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4431891,
+    "ast_hash": "445e13f3ad6825e7e779e288cdbdeb41",
+    "semantic_hash": "445e13f3ad6825e7e779e288cdbdeb41"
+  },
+  "crates/freeco-cli/src/templates.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4433172,
+    "ast_hash": "73ed518e7e4a67c59a5ed6f67ec23c1e",
+    "semantic_hash": "73ed518e7e4a67c59a5ed6f67ec23c1e"
+  },
+  "crates/freeco-cli/src/tui/chat_runner.rs": {
+    "mtime": 1795040399.0201159,
+    "seen": 1795104956.4434855,
+    "ast_hash": "34249465dbacfa438a911e17e2d04ca2",
+    "semantic_hash": "34249465dbacfa438a911e17e2d04ca2"
+  },
+  "crates/freeco-cli/src/tui/event.rs": {
+    "mtime": 1795040399.0247889,
+    "seen": 1795104956.4436562,
+    "ast_hash": "2917262e42f3bcd6609f385f11362bfe",
+    "semantic_hash": "2917262e42f3bcd6609f385f11362bfe"
+  },
+  "crates/freeco-cli/src/tui/mod.rs": {
+    "mtime": 1795040399.0247889,
+    "seen": 1795104956.4438157,
+    "ast_hash": "3fb17cb4030c414807d55e90f4403ba7",
+    "semantic_hash": "3fb17cb4030c414807d55e90f4403ba7"
+  },
+  "crates/freeco-cli/src/tui/screens/agents.rs": {
+    "mtime": 1795040399.0247889,
+    "seen": 1795104956.4439685,
+    "ast_hash": "149d2df7c7c3f74c9dd3b15ec4234f9a",
+    "semantic_hash": "149d2df7c7c3f74c9dd3b15ec4234f9a"
+  },
+  "crates/freeco-cli/src/tui/screens/audit.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4442117,
+    "ast_hash": "37c837779878a264a7a24e05f80f38a2",
+    "semantic_hash": "37c837779878a264a7a24e05f80f38a2"
+  },
+  "crates/freeco-cli/src/tui/screens/channels.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4443831,
+    "ast_hash": "63ef6a10e7a9d08837deaae0bc7cd66b",
+    "semantic_hash": "63ef6a10e7a9d08837deaae0bc7cd66b"
+  },
+  "crates/freeco-cli/src/tui/screens/chat.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4445417,
+    "ast_hash": "6ebbf351cc637ecd19c0200b01878e90",
+    "semantic_hash": "6ebbf351cc637ecd19c0200b01878e90"
+  },
+  "crates/freeco-cli/src/tui/screens/comms.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.444699,
+    "ast_hash": "41cd894d83ed6e2b832308b1a9d44566",
+    "semantic_hash": "41cd894d83ed6e2b832308b1a9d44566"
+  },
+  "crates/freeco-cli/src/tui/screens/dashboard.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4448712,
+    "ast_hash": "5f1f6400d7f9e2d57ab2e0fe70da29b0",
+    "semantic_hash": "5f1f6400d7f9e2d57ab2e0fe70da29b0"
+  },
+  "crates/freeco-cli/src/tui/screens/extensions.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4450483,
+    "ast_hash": "92b3cdae72848af9c76346a02de76ad1",
+    "semantic_hash": "92b3cdae72848af9c76346a02de76ad1"
+  },
+  "crates/freeco-cli/src/tui/screens/hands.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4452221,
+    "ast_hash": "a1962847289ac98cc4886822080180ec",
+    "semantic_hash": "a1962847289ac98cc4886822080180ec"
+  },
+  "crates/freeco-cli/src/tui/screens/init_wizard.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4454038,
+    "ast_hash": "e2550e4a922019d84735bd6c6e109a0a",
+    "semantic_hash": "e2550e4a922019d84735bd6c6e109a0a"
+  },
+  "crates/freeco-cli/src/tui/screens/logs.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4459083,
+    "ast_hash": "1126b595afe2e492863f59d9f4770350",
+    "semantic_hash": "1126b595afe2e492863f59d9f4770350"
+  },
+  "crates/freeco-cli/src/tui/screens/memory.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.446166,
+    "ast_hash": "fcd6e902baa490056315df242ec61127",
+    "semantic_hash": "fcd6e902baa490056315df242ec61127"
+  },
+  "crates/freeco-cli/src/tui/screens/mod.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4463618,
+    "ast_hash": "e62c85799ebbb02770f084f9856dbee0",
+    "semantic_hash": "e62c85799ebbb02770f084f9856dbee0"
+  },
+  "crates/freeco-cli/src/tui/screens/peers.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.446577,
+    "ast_hash": "6b6ee4cc2ddd302db359ff41b9a9ac5b",
+    "semantic_hash": "6b6ee4cc2ddd302db359ff41b9a9ac5b"
+  },
+  "crates/freeco-cli/src/tui/screens/security.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4467494,
+    "ast_hash": "9c59cd887cd1310e2e20ebe6f28e41f8",
+    "semantic_hash": "9c59cd887cd1310e2e20ebe6f28e41f8"
+  },
+  "crates/freeco-cli/src/tui/screens/sessions.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4469478,
+    "ast_hash": "609a58179828efa2d02abff5599c14da",
+    "semantic_hash": "609a58179828efa2d02abff5599c14da"
+  },
+  "crates/freeco-cli/src/tui/screens/settings.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4472003,
+    "ast_hash": "e041e5a2036c869f5b7d4ee631d2bc05",
+    "semantic_hash": "e041e5a2036c869f5b7d4ee631d2bc05"
+  },
+  "crates/freeco-cli/src/tui/screens/skills.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4473734,
+    "ast_hash": "2d2560a3f50f6f0d63a06e8ad7f92d4c",
+    "semantic_hash": "2d2560a3f50f6f0d63a06e8ad7f92d4c"
+  },
+  "crates/freeco-cli/src/tui/screens/templates.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4475613,
+    "ast_hash": "50be4575c45ce3164a091e53f76d36a9",
+    "semantic_hash": "50be4575c45ce3164a091e53f76d36a9"
+  },
+  "crates/freeco-cli/src/tui/screens/triggers.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4477508,
+    "ast_hash": "62adf68985a7957e135d29316ea515f1",
+    "semantic_hash": "62adf68985a7957e135d29316ea515f1"
+  },
+  "crates/freeco-cli/src/tui/screens/usage.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4479198,
+    "ast_hash": "ba5f979d09e3d49c8de7433d9389fb46",
+    "semantic_hash": "ba5f979d09e3d49c8de7433d9389fb46"
+  },
+  "crates/freeco-cli/src/tui/screens/welcome.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4481268,
+    "ast_hash": "4d256d8398e0ee0d7462a2e6bc895652",
+    "semantic_hash": "4d256d8398e0ee0d7462a2e6bc895652"
+  },
+  "crates/freeco-cli/src/tui/screens/wizard.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.448398,
+    "ast_hash": "22f4884b0f3fd20f7063c53d765ef70f",
+    "semantic_hash": "22f4884b0f3fd20f7063c53d765ef70f"
+  },
+  "crates/freeco-cli/src/tui/screens/workflows.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4485743,
+    "ast_hash": "4f081e782cb3d44cd285bf9d794a8e6c",
+    "semantic_hash": "4f081e782cb3d44cd285bf9d794a8e6c"
+  },
+  "crates/freeco-cli/src/tui/theme.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4487422,
+    "ast_hash": "6a7b79dffa173045731d8ffe8642afb6",
+    "semantic_hash": "6a7b79dffa173045731d8ffe8642afb6"
+  },
+  "crates/freeco-cli/src/ui.rs": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.4489167,
+    "ast_hash": "0993a1c1538e04e94489045d6c7246ef",
+    "semantic_hash": "0993a1c1538e04e94489045d6c7246ef"
+  },
+  "crates/freeco-datagateway/Cargo.toml": {
+    "mtime": 1795040399.0271268,
+    "seen": 1795104956.449069,
+    "ast_hash": "9b3e647614509599d9939d29dbca8e15",
+    "semantic_hash": "9b3e647614509599d9939d29dbca8e15"
+  },
+  "crates/freeco-datagateway/src/detect.rs": {
+    "mtime": 1795051157.504132,
+    "seen": 1795104956.4492097,
+    "ast_hash": "ab0024b8b5563591de07d2ed5d5331c6",
+    "semantic_hash": "ab0024b8b5563591de07d2ed5d5331c6"
+  },
+  "crates/freeco-datagateway/src/lib.rs": {
+    "mtime": 1795040399.0332978,
+    "seen": 1795104956.4493523,
+    "ast_hash": "e8bda29455f6aad8e910057a4df3df4f",
+    "semantic_hash": "e8bda29455f6aad8e910057a4df3df4f"
+  },
+  "crates/freeco-desktop/Cargo.toml": {
+    "mtime": 1795040399.0332978,
+    "seen": 1795104956.449491,
+    "ast_hash": "ef2e7a932739ef1e6fa3e45bedf33f2b",
+    "semantic_hash": "ef2e7a932739ef1e6fa3e45bedf33f2b"
+  },
+  "crates/freeco-desktop/build.rs": {
+    "mtime": 1795040399.0339353,
+    "seen": 1795104956.4497244,
+    "ast_hash": "1be34a5c61c2c35365de3dab14298f0b",
+    "semantic_hash": "1be34a5c61c2c35365de3dab14298f0b"
+  },
+  "crates/freeco-desktop/capabilities/default.json": {
+    "mtime": 1795040399.0339353,
+    "seen": 1795104956.4498506,
+    "ast_hash": "e347b6fffdfc08e14ac6359ce482ebf8",
+    "semantic_hash": "e347b6fffdfc08e14ac6359ce482ebf8"
+  },
+  "crates/freeco-desktop/gen/schemas/acl-manifests.json": {
+    "mtime": 1795040399.034779,
+    "seen": 1795104956.4499936,
+    "ast_hash": "1f7134ac1d695eada3734b89c4d7a0ab",
+    "semantic_hash": "1f7134ac1d695eada3734b89c4d7a0ab",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/gen/schemas/capabilities.json": {
+    "mtime": 1795040399.0350862,
+    "seen": 1795104956.4500012,
+    "ast_hash": "7f0984e1f80e7b266841877d53c7cdce",
+    "semantic_hash": "7f0984e1f80e7b266841877d53c7cdce",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/gen/schemas/desktop-schema.json": {
+    "mtime": 1795040399.0350862,
+    "seen": 1795104956.4500067,
+    "ast_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "semantic_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/gen/schemas/linux-schema.json": {
+    "mtime": 1795040399.0350862,
+    "seen": 1795104956.4500113,
+    "ast_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "semantic_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/gen/schemas/macOS-schema.json": {
+    "mtime": 1795040399.0350862,
+    "seen": 1795104956.450016,
+    "ast_hash": "577a432b6dc479a57c8fcd3f35d69a98",
+    "semantic_hash": "577a432b6dc479a57c8fcd3f35d69a98",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/gen/schemas/windows-schema.json": {
+    "mtime": 1795040399.0350862,
+    "seen": 1795104956.4500198,
+    "ast_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "semantic_hash": "7e5cb1429fd53c649b3dd18d047f254f",
+    "ast_empty": true
+  },
+  "crates/freeco-desktop/src/commands.rs": {
+    "mtime": 1795040399.0367596,
+    "seen": 1795104956.4500241,
+    "ast_hash": "eb307c985fb749307fb2c7b80274a5d7",
+    "semantic_hash": "eb307c985fb749307fb2c7b80274a5d7"
+  },
+  "crates/freeco-desktop/src/lib.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4502726,
+    "ast_hash": "f27b8290b114f09d9ee53b3313bf7cdf",
+    "semantic_hash": "f27b8290b114f09d9ee53b3313bf7cdf"
+  },
+  "crates/freeco-desktop/src/main.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4504113,
+    "ast_hash": "0a5899982516b9a3b3612b051bf7d175",
+    "semantic_hash": "0a5899982516b9a3b3612b051bf7d175"
+  },
+  "crates/freeco-desktop/src/server.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.450545,
+    "ast_hash": "5e1cd48ba93381fc56d1b916ad6a7008",
+    "semantic_hash": "5e1cd48ba93381fc56d1b916ad6a7008"
+  },
+  "crates/freeco-desktop/src/shortcuts.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4506795,
+    "ast_hash": "6e8096d05b2e8baa29fc1b1ce75489ad",
+    "semantic_hash": "6e8096d05b2e8baa29fc1b1ce75489ad"
+  },
+  "crates/freeco-desktop/src/tray.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4508173,
+    "ast_hash": "268c38f0fb5ff067ca1fba172dcf1bf4",
+    "semantic_hash": "268c38f0fb5ff067ca1fba172dcf1bf4"
+  },
+  "crates/freeco-desktop/src/updater.rs": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4509497,
+    "ast_hash": "fdaed84630718b4c241cc95e6e801aa3",
+    "semantic_hash": "fdaed84630718b4c241cc95e6e801aa3"
+  },
+  "crates/freeco-desktop/tauri.conf.json": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4510736,
+    "ast_hash": "9bfaebb99539a8b1a6774e63c311aeb6",
+    "semantic_hash": "9bfaebb99539a8b1a6774e63c311aeb6"
+  },
+  "crates/freeco-extensions/Cargo.toml": {
+    "mtime": 1795040399.0383637,
+    "seen": 1795104956.4511824,
+    "ast_hash": "3bc59e8e9830218adbdd4f1aa3419bfc",
+    "semantic_hash": "3bc59e8e9830218adbdd4f1aa3419bfc"
+  },
+  "crates/freeco-extensions/src/bundled.rs": {
+    "mtime": 1795040399.039356,
+    "seen": 1795104956.4512923,
+    "ast_hash": "0bcb49da66696dd1fd3b8dda7297283e",
+    "semantic_hash": "0bcb49da66696dd1fd3b8dda7297283e"
+  },
+  "crates/freeco-extensions/src/credentials.rs": {
+    "mtime": 1795051157.508132,
+    "seen": 1795104956.4514408,
+    "ast_hash": "bddcff537b75de940a00bd98f3e339df",
+    "semantic_hash": "bddcff537b75de940a00bd98f3e339df"
+  },
+  "crates/freeco-extensions/src/health.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.4515822,
+    "ast_hash": "8d6d1aff9a1dc3dd238aaaafd1b06ac2",
+    "semantic_hash": "8d6d1aff9a1dc3dd238aaaafd1b06ac2"
+  },
+  "crates/freeco-extensions/src/installer.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.451739,
+    "ast_hash": "14a668e35d7717321b5d51af52839875",
+    "semantic_hash": "14a668e35d7717321b5d51af52839875"
+  },
+  "crates/freeco-extensions/src/lib.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.4518778,
+    "ast_hash": "3bf1b5957b22924aa0c55027b6c8fb81",
+    "semantic_hash": "3bf1b5957b22924aa0c55027b6c8fb81"
+  },
+  "crates/freeco-extensions/src/oauth.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.4519982,
+    "ast_hash": "2b0b32502e5a73230b6b8039c58cfb2b",
+    "semantic_hash": "2b0b32502e5a73230b6b8039c58cfb2b"
+  },
+  "crates/freeco-extensions/src/registry.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.4521143,
+    "ast_hash": "d72adc220542197ea7af33c8efd2ee11",
+    "semantic_hash": "d72adc220542197ea7af33c8efd2ee11"
+  },
+  "crates/freeco-extensions/src/vault.rs": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.452284,
+    "ast_hash": "3c3421d96c75a4982299fb328aca1a99",
+    "semantic_hash": "3c3421d96c75a4982299fb328aca1a99"
+  },
+  "crates/freeco-hands/Cargo.toml": {
+    "mtime": 1795040399.0411065,
+    "seen": 1795104956.4524295,
+    "ast_hash": "dac21d9935bf8805f057bc90769a31a5",
+    "semantic_hash": "dac21d9935bf8805f057bc90769a31a5"
+  },
+  "crates/freeco-hands/src/bundled.rs": {
+    "mtime": 1795103094.78497,
+    "seen": 1795104956.4525685,
+    "ast_hash": "1c1f21983b91fe7c89afa9e0ef124bba",
+    "semantic_hash": "1c1f21983b91fe7c89afa9e0ef124bba"
+  },
+  "crates/freeco-hands/src/container.rs": {
+    "mtime": 1795103094.80097,
+    "seen": 1795104956.4527183,
+    "ast_hash": "ffb61d54a446ef2455ee5f2083d45261",
+    "semantic_hash": "ffb61d54a446ef2455ee5f2083d45261"
+  },
+  "crates/freeco-hands/src/lib.rs": {
+    "mtime": 1795103094.8129702,
+    "seen": 1795104956.4528515,
+    "ast_hash": "b25ac6903528876625241213368cde5c",
+    "semantic_hash": "b25ac6903528876625241213368cde5c"
+  },
+  "crates/freeco-hands/src/registry.rs": {
+    "mtime": 1795040399.0490236,
+    "seen": 1795104956.452975,
+    "ast_hash": "2e2cc8ca834c86701be931aab541b936",
+    "semantic_hash": "2e2cc8ca834c86701be931aab541b936"
+  },
+  "crates/freeco-kernel-runtime/Cargo.toml": {
+    "mtime": 1795088746.7008247,
+    "seen": 1795104956.4530954,
+    "ast_hash": "d9ed814b11f81a8ac00b887292263586",
+    "semantic_hash": "d9ed814b11f81a8ac00b887292263586"
+  },
+  "crates/freeco-kernel-runtime/build.rs": {
+    "mtime": 1795051157.508132,
+    "seen": 1795104956.453213,
+    "ast_hash": "01cd89f82a35ce78843f6cf585b161ec",
+    "semantic_hash": "01cd89f82a35ce78843f6cf585b161ec"
+  },
+  "crates/freeco-kernel-runtime/src/a2a.rs": {
+    "mtime": 1795040399.05018,
+    "seen": 1795104956.4533236,
+    "ast_hash": "bb187c9465b07c50be7d24346aa93b44",
+    "semantic_hash": "bb187c9465b07c50be7d24346aa93b44"
+  },
+  "crates/freeco-kernel-runtime/src/accounting_tool.rs": {
+    "mtime": 1795050047.0001411,
+    "seen": 1795104956.4534461,
+    "ast_hash": "133827f9cbae688ec7557fee5236d3d9",
+    "semantic_hash": "133827f9cbae688ec7557fee5236d3d9"
+  },
+  "crates/freeco-kernel-runtime/src/activity.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.453616,
+    "ast_hash": "0258a3cdbed83a7cd5dfc55885371f19",
+    "semantic_hash": "0258a3cdbed83a7cd5dfc55885371f19"
+  },
+  "crates/freeco-kernel-runtime/src/agent_context.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4537566,
+    "ast_hash": "a433522e8e0bc56ef8cf8c804d335a94",
+    "semantic_hash": "a433522e8e0bc56ef8cf8c804d335a94"
+  },
+  "crates/freeco-kernel-runtime/src/agent_loop.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4538827,
+    "ast_hash": "b3b382d1d3468401fadbc5966ce3609e",
+    "semantic_hash": "b3b382d1d3468401fadbc5966ce3609e"
+  },
+  "crates/freeco-kernel-runtime/src/apply_patch.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4540086,
+    "ast_hash": "af6912a42e88094a8953afec267db172",
+    "semantic_hash": "af6912a42e88094a8953afec267db172"
+  },
+  "crates/freeco-kernel-runtime/src/audit.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.454134,
+    "ast_hash": "7241b483a0e60b3ef8908691a040c04a",
+    "semantic_hash": "7241b483a0e60b3ef8908691a040c04a"
+  },
+  "crates/freeco-kernel-runtime/src/auth_cooldown.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4543128,
+    "ast_hash": "4d5387febd309ead3ab57e1bc41dd7b0",
+    "semantic_hash": "4d5387febd309ead3ab57e1bc41dd7b0"
+  },
+  "crates/freeco-kernel-runtime/src/browser.rs": {
+    "mtime": 1795051157.508132,
+    "seen": 1795104956.4544435,
+    "ast_hash": "f96cfdfc4e95ca4af4f9aa39a9d2136a",
+    "semantic_hash": "f96cfdfc4e95ca4af4f9aa39a9d2136a"
+  },
+  "crates/freeco-kernel-runtime/src/build_info.rs": {
+    "mtime": 1795090832.5969691,
+    "seen": 1795104956.4545686,
+    "ast_hash": "9c97de3e6ef8273d5cf26fb827ecedee",
+    "semantic_hash": "9c97de3e6ef8273d5cf26fb827ecedee"
+  },
+  "crates/freeco-kernel-runtime/src/command_lane.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4546993,
+    "ast_hash": "ca23a9495e1aec20f6132bf47a489f62",
+    "semantic_hash": "ca23a9495e1aec20f6132bf47a489f62"
+  },
+  "crates/freeco-kernel-runtime/src/compactor.rs": {
+    "mtime": 1795049466.5121462,
+    "seen": 1795104956.4548204,
+    "ast_hash": "9accc6494557627d2202ca9136052bfa",
+    "semantic_hash": "9accc6494557627d2202ca9136052bfa"
+  },
+  "crates/freeco-kernel-runtime/src/container_admin.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4549415,
+    "ast_hash": "69dbb1768744325e6207168b31573d7e",
+    "semantic_hash": "69dbb1768744325e6207168b31573d7e"
+  },
+  "crates/freeco-kernel-runtime/src/container_policy.rs": {
+    "mtime": 1795087998.2105107,
+    "seen": 1795104956.4550662,
+    "ast_hash": "ed78658659e3f975535f14b022dc3362",
+    "semantic_hash": "ed78658659e3f975535f14b022dc3362"
+  },
+  "crates/freeco-kernel-runtime/src/context_budget.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4551969,
+    "ast_hash": "b43a6e2842730263882fad7b2ca678ea",
+    "semantic_hash": "b43a6e2842730263882fad7b2ca678ea"
+  },
+  "crates/freeco-kernel-runtime/src/context_overflow.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4553258,
+    "ast_hash": "bebbff1c6bf80cda0de86e3715cbcfce",
+    "semantic_hash": "bebbff1c6bf80cda0de86e3715cbcfce"
+  },
+  "crates/freeco-kernel-runtime/src/copilot_oauth.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.455463,
+    "ast_hash": "133d81599da362d2944fb413cac8ac74",
+    "semantic_hash": "133d81599da362d2944fb413cac8ac74"
+  },
+  "crates/freeco-kernel-runtime/src/crm_tool.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.4555957,
+    "ast_hash": "c82f332993a9dee86bb651cf71c14073",
+    "semantic_hash": "c82f332993a9dee86bb651cf71c14073"
+  },
+  "crates/freeco-kernel-runtime/src/docker_sandbox.rs": {
+    "mtime": 1795040399.0503519,
+    "seen": 1795104956.455737,
+    "ast_hash": "dafcc6481307b68363c5a7384db61a69",
+    "semantic_hash": "dafcc6481307b68363c5a7384db61a69"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/anthropic.rs": {
+    "mtime": 1795040399.0505488,
+    "seen": 1795104956.4558733,
+    "ast_hash": "a84cd6bc9e4d82910055ac58d34d2e76",
+    "semantic_hash": "a84cd6bc9e4d82910055ac58d34d2e76"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/bedrock.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4560175,
+    "ast_hash": "43c950a6b63694b4d614d39c5fc4adff",
+    "semantic_hash": "43c950a6b63694b4d614d39c5fc4adff"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/claude_code.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4561608,
+    "ast_hash": "a81061bc65581d30342b35135b3b5d35",
+    "semantic_hash": "a81061bc65581d30342b35135b3b5d35"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/copilot.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4563925,
+    "ast_hash": "9868c717e0a68d91cc9c5f06d525a4e3",
+    "semantic_hash": "9868c717e0a68d91cc9c5f06d525a4e3"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/fallback.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4565613,
+    "ast_hash": "ffc4f16e4fe0a040de7a5f8bc89314f3",
+    "semantic_hash": "ffc4f16e4fe0a040de7a5f8bc89314f3"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/gemini.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4566991,
+    "ast_hash": "ba44cb89bbf98e592ef51df4acac4c7b",
+    "semantic_hash": "ba44cb89bbf98e592ef51df4acac4c7b"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/mod.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4568353,
+    "ast_hash": "f6de02312398ff038c189dff2778ce0b",
+    "semantic_hash": "f6de02312398ff038c189dff2778ce0b"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/openai.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.456979,
+    "ast_hash": "94b7db6f1c1ee6ef8f451313c7e3db7a",
+    "semantic_hash": "94b7db6f1c1ee6ef8f451313c7e3db7a"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/qwen_code.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.457115,
+    "ast_hash": "dc484ed5a160c345645b6951d1f78286",
+    "semantic_hash": "dc484ed5a160c345645b6951d1f78286"
+  },
+  "crates/freeco-kernel-runtime/src/drivers/vertex.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4572518,
+    "ast_hash": "2d68a9751c3a4abfa656bd9ddbe3f3ab",
+    "semantic_hash": "2d68a9751c3a4abfa656bd9ddbe3f3ab"
+  },
+  "crates/freeco-kernel-runtime/src/earlier_conversation.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4573998,
+    "ast_hash": "2e6d79799b19565727256e115e947822",
+    "semantic_hash": "2e6d79799b19565727256e115e947822"
+  },
+  "crates/freeco-kernel-runtime/src/embedding.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4575813,
+    "ast_hash": "86c392a060f09316d8b026ace88ac646",
+    "semantic_hash": "86c392a060f09316d8b026ace88ac646"
+  },
+  "crates/freeco-kernel-runtime/src/graceful_shutdown.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4577482,
+    "ast_hash": "2d473569615245bfe30db8d94f9d492c",
+    "semantic_hash": "2d473569615245bfe30db8d94f9d492c"
+  },
+  "crates/freeco-kernel-runtime/src/hooks.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4578936,
+    "ast_hash": "dd15cccf56fc7d28607d546e472890bf",
+    "semantic_hash": "dd15cccf56fc7d28607d546e472890bf"
+  },
+  "crates/freeco-kernel-runtime/src/host_functions.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4580207,
+    "ast_hash": "04932e50470bb75bc44ecf4fe8d2aaa5",
+    "semantic_hash": "04932e50470bb75bc44ecf4fe8d2aaa5"
+  },
+  "crates/freeco-kernel-runtime/src/image_gen.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4581442,
+    "ast_hash": "f75a60f0d150860c6757eea80704bfa3",
+    "semantic_hash": "f75a60f0d150860c6757eea80704bfa3"
+  },
+  "crates/freeco-kernel-runtime/src/injection_guard.rs": {
+    "mtime": 1795049336.1601453,
+    "seen": 1795104956.4583077,
+    "ast_hash": "362399f48e2df6b51c1b7c2d152155b8",
+    "semantic_hash": "362399f48e2df6b51c1b7c2d152155b8"
+  },
+  "crates/freeco-kernel-runtime/src/js_guard.rs": {
+    "mtime": 1795051157.512132,
+    "seen": 1795104956.4584553,
+    "ast_hash": "f234ae74ca648c20bda7fd97edf9e7d4",
+    "semantic_hash": "f234ae74ca648c20bda7fd97edf9e7d4"
+  },
+  "crates/freeco-kernel-runtime/src/kernel_handle.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4585783,
+    "ast_hash": "7515398f38928ce57f86a492cb5900ab",
+    "semantic_hash": "7515398f38928ce57f86a492cb5900ab"
+  },
+  "crates/freeco-kernel-runtime/src/lib.rs": {
+    "mtime": 1795051176.3048112,
+    "seen": 1795104956.458701,
+    "ast_hash": "347a571fedf33448926a9d68eefaf0ee",
+    "semantic_hash": "347a571fedf33448926a9d68eefaf0ee"
+  },
+  "crates/freeco-kernel-runtime/src/link_understanding.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4588344,
+    "ast_hash": "2f9582d66927b727ebf91b43f16a7086",
+    "semantic_hash": "2f9582d66927b727ebf91b43f16a7086"
+  },
+  "crates/freeco-kernel-runtime/src/llm_driver.rs": {
+    "mtime": 1795040399.0543158,
+    "seen": 1795104956.4589741,
+    "ast_hash": "2467657f7a00f0407f05bfa16b7818a0",
+    "semantic_hash": "2467657f7a00f0407f05bfa16b7818a0"
+  },
+  "crates/freeco-kernel-runtime/src/llm_errors.rs": {
+    "mtime": 1795084742.792938,
+    "seen": 1795104956.4591157,
+    "ast_hash": "212579abe5100cc1dd89089e43f53741",
+    "semantic_hash": "212579abe5100cc1dd89089e43f53741"
+  },
+  "crates/freeco-kernel-runtime/src/loop_guard.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4592543,
+    "ast_hash": "d08d3149cfe2e3db42681d88f9279f7e",
+    "semantic_hash": "d08d3149cfe2e3db42681d88f9279f7e"
+  },
+  "crates/freeco-kernel-runtime/src/mcp.rs": {
+    "mtime": 1795084742.796938,
+    "seen": 1795104956.4593842,
+    "ast_hash": "316b9fc57dda30a46dc1be9aef686731",
+    "semantic_hash": "316b9fc57dda30a46dc1be9aef686731"
+  },
+  "crates/freeco-kernel-runtime/src/mcp_server.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4595253,
+    "ast_hash": "32d8dcf8129faebeda14f179bf791b84",
+    "semantic_hash": "32d8dcf8129faebeda14f179bf791b84"
+  },
+  "crates/freeco-kernel-runtime/src/media_understanding.rs": {
+    "mtime": 1795084742.796938,
+    "seen": 1795104956.4596717,
+    "ast_hash": "9bc99ec3dad5ba310615f0ae32639a61",
+    "semantic_hash": "9bc99ec3dad5ba310615f0ae32639a61"
+  },
+  "crates/freeco-kernel-runtime/src/model_catalog.rs": {
+    "mtime": 1795084742.796938,
+    "seen": 1795104956.4598145,
+    "ast_hash": "7fed0e9c8f657de3f2863188037ac5b9",
+    "semantic_hash": "7fed0e9c8f657de3f2863188037ac5b9"
+  },
+  "crates/freeco-kernel-runtime/src/process_manager.rs": {
+    "mtime": 1795088746.7002158,
+    "seen": 1795104956.4599395,
+    "ast_hash": "bd04cf8330806e452b514d45a35d77c2",
+    "semantic_hash": "bd04cf8330806e452b514d45a35d77c2"
+  },
+  "crates/freeco-kernel-runtime/src/prompt_builder.rs": {
+    "mtime": 1795084742.796938,
+    "seen": 1795104956.460062,
+    "ast_hash": "1773550d2a81e4bd753bed032bf95821",
+    "semantic_hash": "1773550d2a81e4bd753bed032bf95821"
+  },
+  "crates/freeco-kernel-runtime/src/provider_health.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4601822,
+    "ast_hash": "c40a547829445d5526007d294bc74b81",
+    "semantic_hash": "c40a547829445d5526007d294bc74b81"
+  },
+  "crates/freeco-kernel-runtime/src/python_runtime.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.460363,
+    "ast_hash": "75e8180396ee835da5021ee0b537381b",
+    "semantic_hash": "75e8180396ee835da5021ee0b537381b"
+  },
+  "crates/freeco-kernel-runtime/src/quiet_command.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4604926,
+    "ast_hash": "cde9fbd77d47e217e0d7e435c537ed25",
+    "semantic_hash": "cde9fbd77d47e217e0d7e435c537ed25"
+  },
+  "crates/freeco-kernel-runtime/src/reply_directives.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4606645,
+    "ast_hash": "9e296e23c5e0ef8ad7f1cd99d935557c",
+    "semantic_hash": "9e296e23c5e0ef8ad7f1cd99d935557c"
+  },
+  "crates/freeco-kernel-runtime/src/retry.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4607992,
+    "ast_hash": "60a49295037c436a5660a70f328b73b0",
+    "semantic_hash": "60a49295037c436a5660a70f328b73b0"
+  },
+  "crates/freeco-kernel-runtime/src/routing.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4609413,
+    "ast_hash": "8d4ca754b6d9d69ce05a4c58f4a33d2d",
+    "semantic_hash": "8d4ca754b6d9d69ce05a4c58f4a33d2d"
+  },
+  "crates/freeco-kernel-runtime/src/sandbox.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4610868,
+    "ast_hash": "e87d0b405b89bb95c3924c8e61365224",
+    "semantic_hash": "e87d0b405b89bb95c3924c8e61365224"
+  },
+  "crates/freeco-kernel-runtime/src/secret_redact.rs": {
+    "mtime": 1795051157.512132,
+    "seen": 1795104956.4612164,
+    "ast_hash": "20ee281dd6f2414a19209f046e6135b1",
+    "semantic_hash": "20ee281dd6f2414a19209f046e6135b1"
+  },
+  "crates/freeco-kernel-runtime/src/session_repair.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4614031,
+    "ast_hash": "044be6ce8b65bdda48a135a0fd2bdfe5",
+    "semantic_hash": "044be6ce8b65bdda48a135a0fd2bdfe5"
+  },
+  "crates/freeco-kernel-runtime/src/shell_bleed.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4615874,
+    "ast_hash": "0f8c8ed79baa9d8de2d619477ab44c0a",
+    "semantic_hash": "0f8c8ed79baa9d8de2d619477ab44c0a"
+  },
+  "crates/freeco-kernel-runtime/src/str_utils.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4617248,
+    "ast_hash": "8472c1c0f8b49b6b1bdcf5b7b7db9afe",
+    "semantic_hash": "8472c1c0f8b49b6b1bdcf5b7b7db9afe"
+  },
+  "crates/freeco-kernel-runtime/src/subprocess_sandbox.rs": {
+    "mtime": 1795088767.8689456,
+    "seen": 1795104956.4618642,
+    "ast_hash": "87408a30db496cbaee03bb69463ed71d",
+    "semantic_hash": "87408a30db496cbaee03bb69463ed71d"
+  },
+  "crates/freeco-kernel-runtime/src/think_filter.rs": {
+    "mtime": 1795040399.0545487,
+    "seen": 1795104956.4619896,
+    "ast_hash": "d5aea48fcf698bb3c915c0097772f86f",
+    "semantic_hash": "d5aea48fcf698bb3c915c0097772f86f"
+  },
+  "crates/freeco-kernel-runtime/src/tool_policy.rs": {
+    "mtime": 1795051157.512132,
+    "seen": 1795104956.4621172,
+    "ast_hash": "f557a0f93c9f80077d79481caebf40ef",
+    "semantic_hash": "f557a0f93c9f80077d79481caebf40ef"
+  },
+  "crates/freeco-kernel-runtime/src/tool_runner.rs": {
+    "mtime": 1795084742.796938,
+    "seen": 1795104956.4622421,
+    "ast_hash": "e7208e0311a221c8532f684e8b4f2aee",
+    "semantic_hash": "e7208e0311a221c8532f684e8b4f2aee"
+  },
+  "crates/freeco-kernel-runtime/src/tts.rs": {
+    "mtime": 1795050047.0001411,
+    "seen": 1795104956.4624226,
+    "ast_hash": "a7d92b54d63ea5b7ea2fe9c9b13c0a50",
+    "semantic_hash": "a7d92b54d63ea5b7ea2fe9c9b13c0a50"
+  },
+  "crates/freeco-kernel-runtime/src/web_cache.rs": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.46255,
+    "ast_hash": "05539920755d5b2adce317a5237882a0",
+    "semantic_hash": "05539920755d5b2adce317a5237882a0"
+  },
+  "crates/freeco-kernel-runtime/src/web_content.rs": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.4626813,
+    "ast_hash": "66a8be3b68879bda09f790c9eac50132",
+    "semantic_hash": "66a8be3b68879bda09f790c9eac50132"
+  },
+  "crates/freeco-kernel-runtime/src/web_fetch.rs": {
+    "mtime": 1795051157.512132,
+    "seen": 1795104956.4628103,
+    "ast_hash": "87fe733485ebb4f9d7f4d9c4300d7667",
+    "semantic_hash": "87fe733485ebb4f9d7f4d9c4300d7667"
+  },
+  "crates/freeco-kernel-runtime/src/web_search.rs": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.462943,
+    "ast_hash": "cc9d4c8f121c14595cd9f2326d2a585e",
+    "semantic_hash": "cc9d4c8f121c14595cd9f2326d2a585e"
+  },
+  "crates/freeco-kernel-runtime/src/workspace_context.rs": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.4630826,
+    "ast_hash": "5a1eb0076da5bd9f244c21d293eabdae",
+    "semantic_hash": "5a1eb0076da5bd9f244c21d293eabdae"
+  },
+  "crates/freeco-kernel-runtime/src/workspace_sandbox.rs": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.4632196,
+    "ast_hash": "658c5488172e137a98137b961957a4dd",
+    "semantic_hash": "658c5488172e137a98137b961957a4dd"
+  },
+  "crates/freeco-kernel/Cargo.toml": {
+    "mtime": 1795040399.0585487,
+    "seen": 1795104956.463355,
+    "ast_hash": "e4229267b68ad6b62ad0684fbb256fde",
+    "semantic_hash": "e4229267b68ad6b62ad0684fbb256fde"
+  },
+  "crates/freeco-kernel/src/approval.rs": {
+    "mtime": 1795051157.512132,
+    "seen": 1795104956.4634871,
+    "ast_hash": "4ad0d4d0114782c00ac860fe2f5a6273",
+    "semantic_hash": "4ad0d4d0114782c00ac860fe2f5a6273"
+  },
+  "crates/freeco-kernel/src/audit_trail.rs": {
+    "mtime": 1795103094.8889701,
+    "seen": 1795104956.4638455,
+    "ast_hash": "9eaa90c7f19f47fcc25db162fcf48283",
+    "semantic_hash": "9eaa90c7f19f47fcc25db162fcf48283"
+  },
+  "crates/freeco-kernel/src/auth.rs": {
+    "mtime": 1795050637.9041436,
+    "seen": 1795104956.4639947,
+    "ast_hash": "f9f4f1c307397bcf7e16509a03a2bf9a",
+    "semantic_hash": "f9f4f1c307397bcf7e16509a03a2bf9a"
+  },
+  "crates/freeco-kernel/src/auto_reply.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4641244,
+    "ast_hash": "4338c5424922ca5e7ea80869b9704474",
+    "semantic_hash": "4338c5424922ca5e7ea80869b9704474"
+  },
+  "crates/freeco-kernel/src/background.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4642475,
+    "ast_hash": "a390cff93c2656ad89b5483f1de5713f",
+    "semantic_hash": "a390cff93c2656ad89b5483f1de5713f"
+  },
+  "crates/freeco-kernel/src/capabilities.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4644308,
+    "ast_hash": "0d3dffe5b0d37c67b5314f63118399a0",
+    "semantic_hash": "0d3dffe5b0d37c67b5314f63118399a0"
+  },
+  "crates/freeco-kernel/src/config.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.464561,
+    "ast_hash": "58e0cc30f3b2e930cfd0ac894852f061",
+    "semantic_hash": "58e0cc30f3b2e930cfd0ac894852f061"
+  },
+  "crates/freeco-kernel/src/config_reload.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4646833,
+    "ast_hash": "b15c28cb707d47ebf876b15041012b1c",
+    "semantic_hash": "b15c28cb707d47ebf876b15041012b1c"
+  },
+  "crates/freeco-kernel/src/cron.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4648137,
+    "ast_hash": "8b101b12b97fa0e5dd37641c19a1d224",
+    "semantic_hash": "8b101b12b97fa0e5dd37641c19a1d224"
+  },
+  "crates/freeco-kernel/src/cron_delivery.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.465037,
+    "ast_hash": "cc7837bb5f9fd0c773e48be37e23e025",
+    "semantic_hash": "cc7837bb5f9fd0c773e48be37e23e025"
+  },
+  "crates/freeco-kernel/src/error.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4651859,
+    "ast_hash": "d3ba24f1872226c3d5cf2f211b585afc",
+    "semantic_hash": "d3ba24f1872226c3d5cf2f211b585afc"
+  },
+  "crates/freeco-kernel/src/event_bus.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4653225,
+    "ast_hash": "6f34fda415ec3dfa4f5b765ea2648c58",
+    "semantic_hash": "6f34fda415ec3dfa4f5b765ea2648c58"
+  },
+  "crates/freeco-kernel/src/freeco_agents.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4654646,
+    "ast_hash": "a0c542f16bd5ac75b8bbf2cb9c0748ae",
+    "semantic_hash": "a0c542f16bd5ac75b8bbf2cb9c0748ae"
+  },
+  "crates/freeco-kernel/src/guest.rs": {
+    "mtime": 1795050637.9041436,
+    "seen": 1795104956.4656668,
+    "ast_hash": "6756a5fa11a0ce0dfcbe90922c11e1f2",
+    "semantic_hash": "6756a5fa11a0ce0dfcbe90922c11e1f2"
+  },
+  "crates/freeco-kernel/src/heartbeat.rs": {
+    "mtime": 1795040399.065142,
+    "seen": 1795104956.4658298,
+    "ast_hash": "4bd43e8221f58c3a4ede8d53cf669739",
+    "semantic_hash": "4bd43e8221f58c3a4ede8d53cf669739"
+  },
+  "crates/freeco-kernel/src/hire_review.rs": {
+    "mtime": 1795103094.9409702,
+    "seen": 1795104956.4659889,
+    "ast_hash": "48749ac6412da975903b8d3b54923211",
+    "semantic_hash": "48749ac6412da975903b8d3b54923211"
+  },
+  "crates/freeco-kernel/src/kernel.rs": {
+    "mtime": 1795084742.800938,
+    "seen": 1795104956.4661343,
+    "ast_hash": "6bf878b5231df1f6e68f3fb0a5be7425",
+    "semantic_hash": "6bf878b5231df1f6e68f3fb0a5be7425"
+  },
+  "crates/freeco-kernel/src/lib.rs": {
+    "mtime": 1795049336.1681452,
+    "seen": 1795104956.466272,
+    "ast_hash": "09efb31d7eb4edfce962f02a39f41c82",
+    "semantic_hash": "09efb31d7eb4edfce962f02a39f41c82"
+  },
+  "crates/freeco-kernel/src/metering.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.466476,
+    "ast_hash": "53609f01f3a9427ace5c96ee6f7ead5a",
+    "semantic_hash": "53609f01f3a9427ace5c96ee6f7ead5a"
+  },
+  "crates/freeco-kernel/src/pairing.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.4666471,
+    "ast_hash": "12618e8e8aaaa60e3900977cfbd29d6e",
+    "semantic_hash": "12618e8e8aaaa60e3900977cfbd29d6e"
+  },
+  "crates/freeco-kernel/src/registry.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.4668317,
+    "ast_hash": "be06fd88e851f84c24e81f0b0997fa0d",
+    "semantic_hash": "be06fd88e851f84c24e81f0b0997fa0d"
+  },
+  "crates/freeco-kernel/src/scheduler.rs": {
+    "mtime": 1795049336.1681452,
+    "seen": 1795104956.466975,
+    "ast_hash": "d753c6553c3c24df4ab8d8b95441b30a",
+    "semantic_hash": "d753c6553c3c24df4ab8d8b95441b30a"
+  },
+  "crates/freeco-kernel/src/supervisor.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.4671218,
+    "ast_hash": "61e5d1d3bbc91936a3f24c2e12e39725",
+    "semantic_hash": "61e5d1d3bbc91936a3f24c2e12e39725"
+  },
+  "crates/freeco-kernel/src/triggers.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.467357,
+    "ast_hash": "262b143d69c3db783836f3434912d2bf",
+    "semantic_hash": "262b143d69c3db783836f3434912d2bf"
+  },
+  "crates/freeco-kernel/src/whatsapp_gateway.rs": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.4675002,
+    "ast_hash": "3989480c59f130eea6b3f2b4f87c347e",
+    "semantic_hash": "3989480c59f130eea6b3f2b4f87c347e"
+  },
+  "crates/freeco-kernel/src/wizard.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.4676573,
+    "ast_hash": "86c7cc1410dfe7d3e50d3283889c699a",
+    "semantic_hash": "86c7cc1410dfe7d3e50d3283889c699a"
+  },
+  "crates/freeco-kernel/src/workflow.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.467819,
+    "ast_hash": "ef94301f256edf249f505aa230887222",
+    "semantic_hash": "ef94301f256edf249f505aa230887222"
+  },
+  "crates/freeco-kernel/tests/conversations_kept_test.rs": {
+    "mtime": 1795049466.5161464,
+    "seen": 1795104956.4679823,
+    "ast_hash": "07b9c0d47a23f734518b881ee95b985c",
+    "semantic_hash": "07b9c0d47a23f734518b881ee95b985c"
+  },
+  "crates/freeco-kernel/tests/integration_test.rs": {
+    "mtime": 1795040399.0665486,
+    "seen": 1795104956.4681373,
+    "ast_hash": "6c3a397fa49d81dfedf8bebf6cbb1174",
+    "semantic_hash": "6c3a397fa49d81dfedf8bebf6cbb1174"
+  },
+  "crates/freeco-kernel/tests/multi_agent_test.rs": {
+    "mtime": 1795040399.0722027,
+    "seen": 1795104956.4682946,
+    "ast_hash": "fbe6318215fcaf22fe097bdeb06f7d51",
+    "semantic_hash": "fbe6318215fcaf22fe097bdeb06f7d51"
+  },
+  "crates/freeco-kernel/tests/parallel_conversations_test.rs": {
+    "mtime": 1795103095.2489703,
+    "seen": 1795104956.4685135,
+    "ast_hash": "9d244e3a9f12bd25e58b3d04ab1aa3b4",
+    "semantic_hash": "9d244e3a9f12bd25e58b3d04ab1aa3b4"
+  },
+  "crates/freeco-kernel/tests/spend_limit_test.rs": {
+    "mtime": 1795040399.0722027,
+    "seen": 1795104956.4686723,
+    "ast_hash": "1e1574119f4424f7f433fb68172339af",
+    "semantic_hash": "1e1574119f4424f7f433fb68172339af"
+  },
+  "crates/freeco-kernel/tests/wasm_agent_integration_test.rs": {
+    "mtime": 1795040399.0722027,
+    "seen": 1795104956.4688325,
+    "ast_hash": "443f1a22e0be057382cf8ecae1a4d894",
+    "semantic_hash": "443f1a22e0be057382cf8ecae1a4d894"
+  },
+  "crates/freeco-kernel/tests/workflow_integration_test.rs": {
+    "mtime": 1795040399.0722027,
+    "seen": 1795104956.4689856,
+    "ast_hash": "a03f3afe6a94ecd99bd02221be454123",
+    "semantic_hash": "a03f3afe6a94ecd99bd02221be454123"
+  },
+  "crates/freeco-memory/Cargo.toml": {
+    "mtime": 1795040399.0722027,
+    "seen": 1795104956.4691389,
+    "ast_hash": "3d60f314c5a90e350896ca674fdcfac4",
+    "semantic_hash": "3d60f314c5a90e350896ca674fdcfac4"
+  },
+  "crates/freeco-memory/src/board.rs": {
+    "mtime": 1795051554.9641294,
+    "seen": 1795104956.4692926,
+    "ast_hash": "d9a5055b1b8598487d948f62f6e7f46d",
+    "semantic_hash": "d9a5055b1b8598487d948f62f6e7f46d"
+  },
+  "crates/freeco-memory/src/consolidation.rs": {
+    "mtime": 1795040399.0733843,
+    "seen": 1795104956.4694452,
+    "ast_hash": "1ddb8c13a9d0888f1367a4156d82f175",
+    "semantic_hash": "1ddb8c13a9d0888f1367a4156d82f175"
+  },
+  "crates/freeco-memory/src/http_client.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.469671,
+    "ast_hash": "33cfd7b4c32061958d69534a021a99e4",
+    "semantic_hash": "33cfd7b4c32061958d69534a021a99e4"
+  },
+  "crates/freeco-memory/src/knowledge.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.4698355,
+    "ast_hash": "f51de6aede78e9f5a8e4ed0e9b9a4d1e",
+    "semantic_hash": "f51de6aede78e9f5a8e4ed0e9b9a4d1e"
+  },
+  "crates/freeco-memory/src/lib.rs": {
+    "mtime": 1795051554.9641294,
+    "seen": 1795104956.4699967,
+    "ast_hash": "894b48ec6c14812983588f6ec00ae7cd",
+    "semantic_hash": "894b48ec6c14812983588f6ec00ae7cd"
+  },
+  "crates/freeco-memory/src/migration.rs": {
+    "mtime": 1795051554.9641294,
+    "seen": 1795104956.4701583,
+    "ast_hash": "7b793cb9f6e91af97a56b293cae17bb8",
+    "semantic_hash": "7b793cb9f6e91af97a56b293cae17bb8"
+  },
+  "crates/freeco-memory/src/org.rs": {
+    "mtime": 1795051554.9641294,
+    "seen": 1795104956.4703183,
+    "ast_hash": "a2f92d7fcafe4e579fe391e1320bfcf6",
+    "semantic_hash": "a2f92d7fcafe4e579fe391e1320bfcf6"
+  },
+  "crates/freeco-memory/src/org/people.rs": {
+    "mtime": 1795103096.088971,
+    "seen": 1795104956.4705548,
+    "ast_hash": "dc05c75258ced923bd72f494ed61e436",
+    "semantic_hash": "dc05c75258ced923bd72f494ed61e436"
+  },
+  "crates/freeco-memory/src/semantic.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.4707325,
+    "ast_hash": "f76f886c4ae2e0e8369058451c23d355",
+    "semantic_hash": "f76f886c4ae2e0e8369058451c23d355"
+  },
+  "crates/freeco-memory/src/session.rs": {
+    "mtime": 1795085469.1769648,
+    "seen": 1795104956.470885,
+    "ast_hash": "7b01149934f9ba52255230c982896aa8",
+    "semantic_hash": "7b01149934f9ba52255230c982896aa8"
+  },
+  "crates/freeco-memory/src/structured.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.4710605,
+    "ast_hash": "cdf4f4faa53758063f76bb475f38e3cb",
+    "semantic_hash": "cdf4f4faa53758063f76bb475f38e3cb"
+  },
+  "crates/freeco-memory/src/substrate.rs": {
+    "mtime": 1795103096.160971,
+    "seen": 1795104956.4712234,
+    "ast_hash": "5f3206f4459d94e40cf5be842fbcc020",
+    "semantic_hash": "5f3206f4459d94e40cf5be842fbcc020"
+  },
+  "crates/freeco-memory/src/tenancy.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.471385,
+    "ast_hash": "97ebbb0a19d2706024f3c2371f3cce87",
+    "semantic_hash": "97ebbb0a19d2706024f3c2371f3cce87"
+  },
+  "crates/freeco-memory/src/usage.rs": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.471536,
+    "ast_hash": "8dcf6f99be4cece370655f4255cf0610",
+    "semantic_hash": "8dcf6f99be4cece370655f4255cf0610"
+  },
+  "crates/freeco-migrate/Cargo.toml": {
+    "mtime": 1795040399.073438,
+    "seen": 1795104956.471693,
+    "ast_hash": "4bea388f1e8cfc8a88373d489f16a00d",
+    "semantic_hash": "4bea388f1e8cfc8a88373d489f16a00d"
+  },
+  "crates/freeco-migrate/src/lib.rs": {
+    "mtime": 1795040399.0756435,
+    "seen": 1795104956.47196,
+    "ast_hash": "4f65384c4296cb1b768ce0c7b5a5f9e2",
+    "semantic_hash": "4f65384c4296cb1b768ce0c7b5a5f9e2"
+  },
+  "crates/freeco-migrate/src/openclaw.rs": {
+    "mtime": 1795040399.0757282,
+    "seen": 1795104956.472124,
+    "ast_hash": "e7066fad7cf45274ca51dbc34178f826",
+    "semantic_hash": "e7066fad7cf45274ca51dbc34178f826"
+  },
+  "crates/freeco-migrate/src/report.rs": {
+    "mtime": 1795040399.0757282,
+    "seen": 1795104956.4722807,
+    "ast_hash": "89b7d8162552325f594b941e79be6d04",
+    "semantic_hash": "89b7d8162552325f594b941e79be6d04"
+  },
+  "crates/freeco-migrate/tests/provider_json5_agents.rs": {
+    "mtime": 1795040399.0757282,
+    "seen": 1795104956.4724905,
+    "ast_hash": "fa16224a7815d1aef7cdb288691776f8",
+    "semantic_hash": "fa16224a7815d1aef7cdb288691776f8"
+  },
+  "crates/freeco-migrate/tests/provider_json5_default_model.rs": {
+    "mtime": 1795040399.0768254,
+    "seen": 1795104956.4726617,
+    "ast_hash": "e08bd90cb92c8ee3a1a0aa327dcabb76",
+    "semantic_hash": "e08bd90cb92c8ee3a1a0aa327dcabb76"
+  },
+  "crates/freeco-migrate/tests/provider_json5_provider_catalog.rs": {
+    "mtime": 1795040399.0768254,
+    "seen": 1795104956.472822,
+    "ast_hash": "0759aba729acd079f1b5c6f953c840eb",
+    "semantic_hash": "0759aba729acd079f1b5c6f953c840eb"
+  },
+  "crates/freeco-migrate/tests/provider_legacy_yaml.rs": {
+    "mtime": 1795040399.0768254,
+    "seen": 1795104956.4729826,
+    "ast_hash": "69049df030fe9f4a9978d6e04e549d54",
+    "semantic_hash": "69049df030fe9f4a9978d6e04e549d54"
+  },
+  "crates/freeco-skills/Cargo.toml": {
+    "mtime": 1795040399.0768254,
+    "seen": 1795104956.473143,
+    "ast_hash": "3f227f31fe40393fc051fcb707c8df93",
+    "semantic_hash": "3f227f31fe40393fc051fcb707c8df93"
+  },
+  "crates/freeco-skills/src/bundled.rs": {
+    "mtime": 1795040399.0945487,
+    "seen": 1795104956.4732957,
+    "ast_hash": "28da6b47db74ed2e3c5d1616177cfb1d",
+    "semantic_hash": "28da6b47db74ed2e3c5d1616177cfb1d"
+  },
+  "crates/freeco-skills/src/clawhub.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4734554,
+    "ast_hash": "dbceae2074254f8170ebf0547787899c",
+    "semantic_hash": "dbceae2074254f8170ebf0547787899c"
+  },
+  "crates/freeco-skills/src/config_injection.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4737272,
+    "ast_hash": "b78f1e915348565b2b7b395961ba6b43",
+    "semantic_hash": "b78f1e915348565b2b7b395961ba6b43"
+  },
+  "crates/freeco-skills/src/github.rs": {
+    "mtime": 1795199051.2462406,
+    "seen": 1795199525.3426785,
+    "ast_hash": "9596bc86d7da5e1ee5c22aafc51ac623",
+    "semantic_hash": "9596bc86d7da5e1ee5c22aafc51ac623"
+  },
+  "crates/freeco-skills/src/installer.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4740548,
+    "ast_hash": "2c9d15bd71a2af122bb6edce6d55c8cd",
+    "semantic_hash": "2c9d15bd71a2af122bb6edce6d55c8cd"
+  },
+  "crates/freeco-skills/src/lib.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.474213,
+    "ast_hash": "c2ec7f7afb22f507236236c4820bda71",
+    "semantic_hash": "c2ec7f7afb22f507236236c4820bda71"
+  },
+  "crates/freeco-skills/src/loader.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4743679,
+    "ast_hash": "0cbba6fc7c7994fdeb3fd33a39160601",
+    "semantic_hash": "0cbba6fc7c7994fdeb3fd33a39160601"
+  },
+  "crates/freeco-skills/src/marketplace.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4746222,
+    "ast_hash": "2bf35613f4430324bae1638fa15e4736",
+    "semantic_hash": "2bf35613f4430324bae1638fa15e4736"
+  },
+  "crates/freeco-skills/src/openclaw_compat.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.474778,
+    "ast_hash": "c9241bddbd42590e93715be9709d5ce3",
+    "semantic_hash": "c9241bddbd42590e93715be9709d5ce3"
+  },
+  "crates/freeco-skills/src/registry.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.474924,
+    "ast_hash": "ee7cd7bdac199fc3c66ca71c1b9fb429",
+    "semantic_hash": "ee7cd7bdac199fc3c66ca71c1b9fb429"
+  },
+  "crates/freeco-skills/src/verify.rs": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4751637,
+    "ast_hash": "f8cea73ed6f7fbcd25ed8a56d99fa5ad",
+    "semantic_hash": "f8cea73ed6f7fbcd25ed8a56d99fa5ad"
+  },
+  "crates/freeco-tool-gateway/Cargo.toml": {
+    "mtime": 1795040399.0993705,
+    "seen": 1795104956.4753098,
+    "ast_hash": "a04162b7e70b9037ff16577dbfb8dbd8",
+    "semantic_hash": "a04162b7e70b9037ff16577dbfb8dbd8"
+  },
+  "crates/freeco-tool-gateway/src/clients/google_places.rs": {
+    "mtime": 1795040399.1033063,
+    "seen": 1795104956.4754415,
+    "ast_hash": "64a5b350ba011372deced2a9434d751d",
+    "semantic_hash": "64a5b350ba011372deced2a9434d751d"
+  },
+  "crates/freeco-tool-gateway/src/clients/llm.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4755948,
+    "ast_hash": "6eb78650b210a40dbca9b0da6623a62d",
+    "semantic_hash": "6eb78650b210a40dbca9b0da6623a62d"
+  },
+  "crates/freeco-tool-gateway/src/clients/mod.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4757445,
+    "ast_hash": "5e92f5b908aab87e56a5cb26ee019f90",
+    "semantic_hash": "5e92f5b908aab87e56a5cb26ee019f90"
+  },
+  "crates/freeco-tool-gateway/src/clients/open_food_facts.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4758976,
+    "ast_hash": "63b8ea10a4c94273a63ae4f5ea5dec2c",
+    "semantic_hash": "63b8ea10a4c94273a63ae4f5ea5dec2c"
+  },
+  "crates/freeco-tool-gateway/src/clients/tavily.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4760551,
+    "ast_hash": "be54b9ba1a69fdc169992245f4333040",
+    "semantic_hash": "be54b9ba1a69fdc169992245f4333040"
+  },
+  "crates/freeco-tool-gateway/src/error.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4762063,
+    "ast_hash": "249a04fd2ef647778eacadbee207f0b4",
+    "semantic_hash": "249a04fd2ef647778eacadbee207f0b4"
+  },
+  "crates/freeco-tool-gateway/src/events.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4763513,
+    "ast_hash": "b45db8c70fdc31fd30de08a9e60e0084",
+    "semantic_hash": "b45db8c70fdc31fd30de08a9e60e0084"
+  },
+  "crates/freeco-tool-gateway/src/lib.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4765174,
+    "ast_hash": "68f175542bad461758c036fa4dde84ee",
+    "semantic_hash": "68f175542bad461758c036fa4dde84ee"
+  },
+  "crates/freeco-tool-gateway/src/manifest.rs": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.476671,
+    "ast_hash": "0b9384b4e2d51d6dc12b3433e35d53ea",
+    "semantic_hash": "0b9384b4e2d51d6dc12b3433e35d53ea"
+  },
+  "crates/freeco-types/Cargo.toml": {
+    "mtime": 1795040399.1037903,
+    "seen": 1795104956.4768078,
+    "ast_hash": "39f77913661518dfea1c08d1f050a697",
+    "semantic_hash": "39f77913661518dfea1c08d1f050a697"
+  },
+  "crates/freeco-types/src/agent.rs": {
+    "mtime": 1795049466.5161464,
+    "seen": 1795104956.4769373,
+    "ast_hash": "daf3904b54d5f46f1a3d346a80c8ce17",
+    "semantic_hash": "daf3904b54d5f46f1a3d346a80c8ce17"
+  },
+  "crates/freeco-types/src/approval.rs": {
+    "mtime": 1795051157.5161319,
+    "seen": 1795104956.477113,
+    "ast_hash": "2b52a7ccaccd828221c053b3cb79b9d3",
+    "semantic_hash": "2b52a7ccaccd828221c053b3cb79b9d3"
+  },
+  "crates/freeco-types/src/assistant_rights.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4772537,
+    "ast_hash": "9478e26c7d472ca80b3c6448ace6b37e",
+    "semantic_hash": "9478e26c7d472ca80b3c6448ace6b37e"
+  },
+  "crates/freeco-types/src/auth.rs": {
+    "mtime": 1795049242.8241444,
+    "seen": 1795104956.477395,
+    "ast_hash": "0b7019d013068c73f8d9028fdf80bf86",
+    "semantic_hash": "0b7019d013068c73f8d9028fdf80bf86"
+  },
+  "crates/freeco-types/src/capability.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.477528,
+    "ast_hash": "5ce8d7ecca106b95053768d6e8ebd824",
+    "semantic_hash": "5ce8d7ecca106b95053768d6e8ebd824"
+  },
+  "crates/freeco-types/src/commands.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.477716,
+    "ast_hash": "8f17ca0241c17273a1d5dd6f3f780e1a",
+    "semantic_hash": "8f17ca0241c17273a1d5dd6f3f780e1a"
+  },
+  "crates/freeco-types/src/comms.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4778683,
+    "ast_hash": "2eb26ec0406b6c5a2cd784c8e3086cf5",
+    "semantic_hash": "2eb26ec0406b6c5a2cd784c8e3086cf5"
+  },
+  "crates/freeco-types/src/config.rs": {
+    "mtime": 1795084742.8049378,
+    "seen": 1795104956.4780118,
+    "ast_hash": "3eb21af6857215aa088d93f17a07718e",
+    "semantic_hash": "3eb21af6857215aa088d93f17a07718e"
+  },
+  "crates/freeco-types/src/error.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4781306,
+    "ast_hash": "af276d33fa31d644c4584e2446b8ea66",
+    "semantic_hash": "af276d33fa31d644c4584e2446b8ea66"
+  },
+  "crates/freeco-types/src/event.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4782505,
+    "ast_hash": "03059a0513d72be31fc2b37a5ac08c9d",
+    "semantic_hash": "03059a0513d72be31fc2b37a5ac08c9d"
+  },
+  "crates/freeco-types/src/lib.rs": {
+    "mtime": 1795049242.8281446,
+    "seen": 1795104956.4783735,
+    "ast_hash": "715b0215e76eab6ab62ef0d105a5de38",
+    "semantic_hash": "715b0215e76eab6ab62ef0d105a5de38"
+  },
+  "crates/freeco-types/src/manifest_signing.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4785433,
+    "ast_hash": "050898a7d51fcee45d4b9994b0f303e1",
+    "semantic_hash": "050898a7d51fcee45d4b9994b0f303e1"
+  },
+  "crates/freeco-types/src/media.rs": {
+    "mtime": 1795103096.424971,
+    "seen": 1795104956.4787056,
+    "ast_hash": "61c6aaa3d8fd3a563f7fdf2acfc4551c",
+    "semantic_hash": "61c6aaa3d8fd3a563f7fdf2acfc4551c"
+  },
+  "crates/freeco-types/src/memory.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4788582,
+    "ast_hash": "d0344fcd3cec4a210496fe03b87e7173",
+    "semantic_hash": "d0344fcd3cec4a210496fe03b87e7173"
+  },
+  "crates/freeco-types/src/message.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479004,
+    "ast_hash": "c229ceffd99d821d21f9a41662153c96",
+    "semantic_hash": "c229ceffd99d821d21f9a41662153c96"
+  },
+  "crates/freeco-types/src/model_catalog.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479147,
+    "ast_hash": "89ee42d876e7378f34c3364a8d4f2fe5",
+    "semantic_hash": "89ee42d876e7378f34c3364a8d4f2fe5"
+  },
+  "crates/freeco-types/src/scheduler.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4792752,
+    "ast_hash": "72128217084db65198d5c9cf22c66213",
+    "semantic_hash": "72128217084db65198d5c9cf22c66213"
+  },
+  "crates/freeco-types/src/secrets.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479397,
+    "ast_hash": "cef1341353aae4be1912db17b66fcb14",
+    "semantic_hash": "cef1341353aae4be1912db17b66fcb14"
+  },
+  "crates/freeco-types/src/serde_compat.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479517,
+    "ast_hash": "dc5aefa58a5d0671d964cf168d72158c",
+    "semantic_hash": "dc5aefa58a5d0671d964cf168d72158c"
+  },
+  "crates/freeco-types/src/taint.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479651,
+    "ast_hash": "8436a7f8ceb7b4fc705489269330ec56",
+    "semantic_hash": "8436a7f8ceb7b4fc705489269330ec56"
+  },
+  "crates/freeco-types/src/tool.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.479788,
+    "ast_hash": "13a33ee0a32b2914adae229c76cf9484",
+    "semantic_hash": "13a33ee0a32b2914adae229c76cf9484"
+  },
+  "crates/freeco-types/src/tool_compat.rs": {
+    "mtime": 1795050047.008141,
+    "seen": 1795104956.479923,
+    "ast_hash": "10a5672f009fba1370d432d5d7e73c1b",
+    "semantic_hash": "10a5672f009fba1370d432d5d7e73c1b"
+  },
+  "crates/freeco-types/src/webhook.rs": {
+    "mtime": 1795040399.10561,
+    "seen": 1795104956.4800591,
+    "ast_hash": "de19d541f330714f7a77e1e8ac2f3361",
+    "semantic_hash": "de19d541f330714f7a77e1e8ac2f3361"
+  },
+  "crates/freeco-wire/Cargo.toml": {
+    "mtime": 1795040399.1065488,
+    "seen": 1795104956.4801815,
+    "ast_hash": "fcaf11b1aa509ced5b450c000aa6d17b",
+    "semantic_hash": "fcaf11b1aa509ced5b450c000aa6d17b"
+  },
+  "crates/freeco-wire/src/lib.rs": {
+    "mtime": 1795040399.1107366,
+    "seen": 1795104956.4803023,
+    "ast_hash": "3ea5c7a3385405b57f03dba0824211d3",
+    "semantic_hash": "3ea5c7a3385405b57f03dba0824211d3"
+  },
+  "crates/freeco-wire/src/message.rs": {
+    "mtime": 1795040399.1109324,
+    "seen": 1795104956.480434,
+    "ast_hash": "0e72657314273d97e263a13a60914e90",
+    "semantic_hash": "0e72657314273d97e263a13a60914e90"
+  },
+  "crates/freeco-wire/src/peer.rs": {
+    "mtime": 1795040399.1109324,
+    "seen": 1795104956.4806223,
+    "ast_hash": "0868e5ac51e8f17cd0dcec66c2ba59d2",
+    "semantic_hash": "0868e5ac51e8f17cd0dcec66c2ba59d2"
+  },
+  "crates/freeco-wire/src/registry.rs": {
+    "mtime": 1795040399.1109324,
+    "seen": 1795104956.480781,
+    "ast_hash": "d406285c351b475fa21870d69e6ab86f",
+    "semantic_hash": "d406285c351b475fa21870d69e6ab86f"
+  },
+  "deploy/daemon/Start-FreEco.ps1": {
+    "mtime": 1795049336.1704504,
+    "seen": 1795104956.4809349,
+    "ast_hash": "feb275ec4ad162f22ebe7a78420d8bad",
+    "semantic_hash": "feb275ec4ad162f22ebe7a78420d8bad"
+  },
+  "deploy/daemon/check.sh": {
+    "mtime": 1795049336.1704504,
+    "seen": 1795104956.481066,
+    "ast_hash": "cd8766b932a4c8cb84e8361a20ca4f11",
+    "semantic_hash": "cd8766b932a4c8cb84e8361a20ca4f11"
+  },
+  "deploy/daemon/checks-inner.sh": {
+    "mtime": 1795049336.1704504,
+    "seen": 1795104956.4811802,
+    "ast_hash": "bf6550761fb6534ad30e731c280b24db",
+    "semantic_hash": "bf6550761fb6534ad30e731c280b24db"
+  },
+  "deploy/daemon/migrate-from-windows.ps1": {
+    "mtime": 1795049336.1704504,
+    "seen": 1795104956.481292,
+    "ast_hash": "da4ef201bea920f14a81717f22879821",
+    "semantic_hash": "da4ef201bea920f14a81717f22879821"
+  },
+  "deploy/daemon/run.sh": {
+    "mtime": 1795049336.1704504,
+    "seen": 1795104956.481403,
+    "ast_hash": "e65907e8c3ab76cf1f8f7843ad5fd8e3",
+    "semantic_hash": "e65907e8c3ab76cf1f8f7843ad5fd8e3"
+  },
+  "deploy/demo/docker-compose.yml": {
+    "mtime": 1795040399.1127179,
+    "seen": 1795104956.481514,
+    "ast_hash": "8fe471d926db446a262356aa4ae8e630",
+    "semantic_hash": "8fe471d926db446a262356aa4ae8e630"
+  },
+  "deploy/sandbox/freeco-screen": {
+    "mtime": 1795040399.1132233,
+    "seen": 1795104956.4816766,
+    "ast_hash": "24400f809b591b976c16a550606320e3",
+    "semantic_hash": "24400f809b591b976c16a550606320e3"
+  },
+  "docker-compose.yml": {
+    "mtime": 1795040399.1132233,
+    "seen": 1795104956.4817908,
+    "ast_hash": "b10f0a7caf5d58f7a6ca675d0fa61107",
+    "semantic_hash": "b10f0a7caf5d58f7a6ca675d0fa61107"
+  },
+  "docs/openapi.yaml": {
+    "mtime": 1795040399.1158822,
+    "seen": 1795104956.4818828,
+    "ast_hash": "f898276540a8ac27ff4c0072a458a036",
+    "semantic_hash": "f898276540a8ac27ff4c0072a458a036",
+    "ast_empty": true
+  },
+  "integrations/claude-code-plugin/.claude-plugin/marketplace.json": {
+    "mtime": 1795040399.1255662,
+    "seen": 1795104956.4818895,
+    "ast_hash": "3bb173ae4ff5f62e04293d9c4b7e0a8c",
+    "semantic_hash": "3bb173ae4ff5f62e04293d9c4b7e0a8c",
+    "ast_empty": true
+  },
+  "integrations/claude-code-plugin/.claude-plugin/plugin.json": {
+    "mtime": 1795040399.1262057,
+    "seen": 1795104956.4818964,
+    "ast_hash": "73eccd02184c1023a003cd799e5a8c28",
+    "semantic_hash": "73eccd02184c1023a003cd799e5a8c28",
+    "ast_empty": true
+  },
+  "integrations/claude-code-plugin/.mcp.json": {
+    "mtime": 1795040399.1262057,
+    "seen": 1795104956.4819024,
+    "ast_hash": "afc7e2a4d35818104eb8a3bfc678b238",
+    "semantic_hash": "afc7e2a4d35818104eb8a3bfc678b238"
+  },
+  "packages/whatsapp-gateway/allowlist.js": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.482035,
+    "ast_hash": "e91dbf3c701737c3c2fc5db98b7a2458",
+    "semantic_hash": "e91dbf3c701737c3c2fc5db98b7a2458"
+  },
+  "packages/whatsapp-gateway/index.js": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.4822264,
+    "ast_hash": "617140722bd05f77b40d756f4f6bc0fd",
+    "semantic_hash": "617140722bd05f77b40d756f4f6bc0fd"
+  },
+  "packages/whatsapp-gateway/package.json": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.4823458,
+    "ast_hash": "f2bb97e23816e65b0697b6317a6b741d",
+    "semantic_hash": "f2bb97e23816e65b0697b6317a6b741d"
+  },
+  "packages/whatsapp-gateway/test/allowlist.test.js": {
+    "mtime": 1795050360.8961368,
+    "seen": 1795104956.482459,
+    "ast_hash": "d35969d917b0ee8fbcc57d334d04dc53",
+    "semantic_hash": "d35969d917b0ee8fbcc57d334d04dc53"
+  },
+  "scripts/build-portable.sh": {
+    "mtime": 1795040399.1705487,
+    "seen": 1795104956.482646,
+    "ast_hash": "e8f4f0275a53b3266934ff5cc3e869d2",
+    "semantic_hash": "e8f4f0275a53b3266934ff5cc3e869d2"
+  },
+  "scripts/bundle-local-ai.ps1": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.482757,
+    "ast_hash": "d3a6f14b805e55ea3ee76580853a6fda",
+    "semantic_hash": "d3a6f14b805e55ea3ee76580853a6fda"
+  },
+  "scripts/dev-build.ps1": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.482861,
+    "ast_hash": "c956e957c0ea12954d85edc18d76d33f",
+    "semantic_hash": "c956e957c0ea12954d85edc18d76d33f"
+  },
+  "scripts/dev-build.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4829614,
+    "ast_hash": "af0f720c2caf27d80818f2abc257778d",
+    "semantic_hash": "af0f720c2caf27d80818f2abc257778d"
+  },
+  "scripts/fetch-iso.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4830613,
+    "ast_hash": "198fa1176383d24e3bf4a366e50822d2",
+    "semantic_hash": "198fa1176383d24e3bf4a366e50822d2"
+  },
+  "scripts/fetch-model.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4831603,
+    "ast_hash": "e581064c60b6ca6bb59c77f2bd76f86b",
+    "semantic_hash": "e581064c60b6ca6bb59c77f2bd76f86b"
+  },
+  "scripts/install.ps1": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4832592,
+    "ast_hash": "45f7518000da03a06f5aa74769f0eb58",
+    "semantic_hash": "45f7518000da03a06f5aa74769f0eb58"
+  },
+  "scripts/install.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.483358,
+    "ast_hash": "0fcd7316562e5ca62d1819645d4d9106",
+    "semantic_hash": "0fcd7316562e5ca62d1819645d4d9106"
+  },
+  "scripts/kubuntu-usb.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4834566,
+    "ast_hash": "8acc9cb870a0ae991defbd5f1cf68c1e",
+    "semantic_hash": "8acc9cb870a0ae991defbd5f1cf68c1e"
+  },
+  "scripts/make-kubuntu-installer.ps1": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4835548,
+    "ast_hash": "a0e76c2ca925dd7aa1c73607670e573e",
+    "semantic_hash": "a0e76c2ca925dd7aa1c73607670e573e"
+  },
+  "scripts/make-usb-bootable.ps1": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4836566,
+    "ast_hash": "cfd82adf241c95235e1839ee08090e00",
+    "semantic_hash": "cfd82adf241c95235e1839ee08090e00"
+  },
+  "scripts/omniroute.sh": {
+    "mtime": 1795040399.1755788,
+    "seen": 1795104956.4837554,
+    "ast_hash": "e98d956923a91f67091486be5f2d85ee",
+    "semantic_hash": "e98d956923a91f67091486be5f2d85ee"
+  },
+  "scripts/portable/run-linux.sh": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.4838567,
+    "ast_hash": "545f82b1facb646e65f3e468eb0ae2f8",
+    "semantic_hash": "545f82b1facb646e65f3e468eb0ae2f8"
+  },
+  "scripts/portable/run.sh": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.4839725,
+    "ast_hash": "d2c2c15ec38ddd7c2ad4fe9687a0dab9",
+    "semantic_hash": "d2c2c15ec38ddd7c2ad4fe9687a0dab9"
+  },
+  "scripts/prepare-freeco-usb.ps1": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.4841077,
+    "ast_hash": "4f38d5035f87b559fe12ca2eadf3fc15",
+    "semantic_hash": "4f38d5035f87b559fe12ca2eadf3fc15"
+  },
+  "scripts/prepare_release_metadata.py": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.484226,
+    "ast_hash": "cf74149d4dbcbcb84cfdbe1826017208",
+    "semantic_hash": "cf74149d4dbcbcb84cfdbe1826017208"
+  },
+  "scripts/refresh_model_catalog.py": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.4843402,
+    "ast_hash": "4a53b9b95ab42e430b9f223623b90d5c",
+    "semantic_hash": "4a53b9b95ab42e430b9f223623b90d5c"
+  },
+  "scripts/test_prepare_release_metadata.py": {
+    "mtime": 1795040399.178322,
+    "seen": 1795104956.4844544,
+    "ast_hash": "01b736ac4a802f9597d4a1c51f49efd2",
+    "semantic_hash": "01b736ac4a802f9597d4a1c51f49efd2"
+  },
+  "sdk/javascript/examples/basic.js": {
+    "mtime": 1795040399.1798854,
+    "seen": 1795104956.484634,
+    "ast_hash": "0b9708ccd8e121ce4b09145f23f3ee87",
+    "semantic_hash": "0b9708ccd8e121ce4b09145f23f3ee87"
+  },
+  "sdk/javascript/examples/streaming.js": {
+    "mtime": 1795040399.180354,
+    "seen": 1795104956.4847913,
+    "ast_hash": "14ed54454cf7fb6f69e7187f59cbf1ba",
+    "semantic_hash": "14ed54454cf7fb6f69e7187f59cbf1ba"
+  },
+  "sdk/javascript/index.d.ts": {
+    "mtime": 1795040399.180354,
+    "seen": 1795104956.484932,
+    "ast_hash": "9a4eb5d51ea06d162d4878e84a5cda93",
+    "semantic_hash": "9a4eb5d51ea06d162d4878e84a5cda93"
+  },
+  "sdk/javascript/index.js": {
+    "mtime": 1795040399.180354,
+    "seen": 1795104956.4850583,
+    "ast_hash": "9e4cd0bb3863dd60994fcfa4bba2eef7",
+    "semantic_hash": "9e4cd0bb3863dd60994fcfa4bba2eef7"
+  },
+  "sdk/javascript/package.json": {
+    "mtime": 1795040399.180354,
+    "seen": 1795104956.4851847,
+    "ast_hash": "ba95725990b91a39daa6fff0142675e9",
+    "semantic_hash": "ba95725990b91a39daa6fff0142675e9"
+  },
+  "sdk/python/examples/client_basic.py": {
+    "mtime": 1795040399.181012,
+    "seen": 1795104956.4853115,
+    "ast_hash": "ef80e68d4de531bca8e993db1d548de7",
+    "semantic_hash": "ef80e68d4de531bca8e993db1d548de7"
+  },
+  "sdk/python/examples/client_streaming.py": {
+    "mtime": 1795040399.1811738,
+    "seen": 1795104956.4854522,
+    "ast_hash": "3ef34d1258d870a2584b9acb79638b3c",
+    "semantic_hash": "3ef34d1258d870a2584b9acb79638b3c"
+  },
+  "sdk/python/examples/echo_agent.py": {
+    "mtime": 1795040399.1811738,
+    "seen": 1795104956.485645,
+    "ast_hash": "514187ca5d2e08118d73407e8f35fd8c",
+    "semantic_hash": "514187ca5d2e08118d73407e8f35fd8c"
+  },
+  "sdk/python/freeco_ai_client.py": {
+    "mtime": 1795040399.1811738,
+    "seen": 1795104956.4857886,
+    "ast_hash": "d3a4b12e521efa254f87f8c51ddbd5bb",
+    "semantic_hash": "d3a4b12e521efa254f87f8c51ddbd5bb"
+  },
+  "sdk/python/freeco_ai_sdk.py": {
+    "mtime": 1795040399.1811738,
+    "seen": 1795104956.4859197,
+    "ast_hash": "d26fa30e3756bd642d6b690498c83848",
+    "semantic_hash": "d26fa30e3756bd642d6b690498c83848"
+  },
+  "sdk/python/setup.py": {
+    "mtime": 1795040399.1811738,
+    "seen": 1795104956.486056,
+    "ast_hash": "7bf34da7a2402d028646dca883f48350",
+    "semantic_hash": "7bf34da7a2402d028646dca883f48350"
+  },
+  "test_vertex_e2e.py": {
+    "mtime": 1795040399.1826646,
+    "seen": 1795104956.4861853,
+    "ast_hash": "161802b0edeaf5b6acbaa0589866af2e",
+    "semantic_hash": "161802b0edeaf5b6acbaa0589866af2e"
+  },
+  "xtask/Cargo.toml": {
+    "mtime": 1795040399.1853795,
+    "seen": 1795104956.4862967,
+    "ast_hash": "bf6b223de96c4fa8982751821d35701d",
+    "semantic_hash": "bf6b223de96c4fa8982751821d35701d"
+  },
+  "xtask/src/main.rs": {
+    "mtime": 1795040399.1872234,
+    "seen": 1795104956.486413,
+    "ast_hash": "2717488d92e58a87700fb8df2198f00d",
+    "semantic_hash": "2717488d92e58a87700fb8df2198f00d"
+  }
+}

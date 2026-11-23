@@ -596,3 +596,14 @@ format = "number"
 label = "Published to WhatsApp"
 memory_key = "clip_hand_clips_published_whatsapp"
 format = "number"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This one needs "full": its curl calls read
+# API keys from the environment ($GROQ_API_KEY, $OPENAI_API_KEY, ...) and
+# ffmpeg/yt-dlp/whisper jobs run long.
+# Full runs the command through sh, so $VAR is expanded from the hand's
+# allowed env vars; shell metacharacters (; | > & $() {}) are still refused.
+[exec_policy]
+mode = "full"
+timeout_secs = 300
+no_output_timeout_secs = 120

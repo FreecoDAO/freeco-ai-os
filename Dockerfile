@@ -11,8 +11,18 @@ COPY packages ./packages
 # Example: docker build --build-arg LTO=false --build-arg CODEGEN_UNITS=16 .
 ARG LTO=true
 ARG CODEGEN_UNITS=1
+# Build identity for /api/version and the system_info tool. The build context
+# has no .git, so these are passed in instead of being discovered; build.rs
+# falls back to "unknown" when they are not set.
+# Example: docker build --build-arg FREECO_GIT_SHA=$(git rev-parse HEAD) .
+ARG FREECO_GIT_SHA=""
+ARG FREECO_GIT_BRANCH=""
+ARG FREECO_BUILD_DATE=""
 ENV CARGO_PROFILE_RELEASE_LTO=${LTO} \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CODEGEN_UNITS}
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CODEGEN_UNITS} \
+    FREECO_GIT_SHA=${FREECO_GIT_SHA} \
+    FREECO_GIT_BRANCH=${FREECO_GIT_BRANCH} \
+    FREECO_BUILD_DATE=${FREECO_BUILD_DATE}
 RUN cargo build --release --bin freeco-ai
 
 FROM rust:1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3

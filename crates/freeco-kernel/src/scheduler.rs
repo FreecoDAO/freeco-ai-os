@@ -90,9 +90,18 @@ impl AgentScheduler {
 
         if quota.max_llm_tokens_per_hour > 0 && tracker.total_tokens > quota.max_llm_tokens_per_hour
         {
+            // Say which limit, when it lifts and how to change it. The bare
+            // numbers used to reach the chat as "Token quota exceeded. Try
+            // /compact", which reads like a full context window and points
+            // at a fix that does not lift this limit.
+            let left =
+                std::time::Duration::from_secs(3600).saturating_sub(tracker.window_start.elapsed());
+            let mins = left.as_secs().div_ceil(60).max(1);
             return Err(FreecoError::QuotaExceeded(format!(
-                "Token limit exceeded: {} / {}",
-                tracker.total_tokens, quota.max_llm_tokens_per_hour
+                "Token limit exceeded: this agent has used {} of its {} tokens for this hour. \
+                 It resets in {} min. To raise it, change max_llm_tokens_per_hour under \
+                 [resources] in the agent's settings (0 means no limit).",
+                tracker.total_tokens, quota.max_llm_tokens_per_hour, mins
             )));
         }
 
@@ -187,5 +196,31 @@ mod tests {
             },
         );
         assert!(scheduler.check_quota(id).is_err());
+    }
+
+    /// The refusal names the hourly limit, when it lifts and where to change
+    /// it, rather than reading like a full context window.
+    #[test]
+    fn the_hourly_quota_message_says_when_it_resets_and_how_to_raise_it() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(
+            id,
+            ResourceQuota {
+                max_llm_tokens_per_hour: 100,
+                ..Default::default()
+            },
+        );
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 150,
+                output_tokens: 0,
+            },
+        );
+        let msg = scheduler.check_quota(id).unwrap_err().to_string();
+        assert!(msg.contains("150 of its 100 tokens for this hour"), "{msg}");
+        assert!(msg.contains("resets in 60 min"), "{msg}");
+        assert!(msg.contains("max_llm_tokens_per_hour"), "{msg}");
     }
 }

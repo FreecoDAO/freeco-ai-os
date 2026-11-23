@@ -79,7 +79,7 @@ fn env_timeout_secs_with_legacy(current: &str, legacy: &str) -> Option<u64> {
 /// say that, and say what to do instead of waiting again.
 fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
     match tool_name {
-        "agent_send" | "agent_spawn" => format!(
+        "agent_send" | "agent_delegate" | "agent_spawn" => format!(
             "Tool '{tool_name}' timed out after {timeout_secs}s: the other agent did not \
              reply in time. The usual cause is that its model is not answering - an \
              exhausted provider balance, or a fallback model that does not exist. Do not \
@@ -92,7 +92,7 @@ fn timeout_message(tool_name: &str, timeout_secs: u64) -> String {
 
 fn tool_timeout_for(tool_name: &str) -> Option<Duration> {
     let secs = match tool_name {
-        "agent_send" | "agent_spawn" => env_timeout_secs_with_legacy(
+        "agent_send" | "agent_delegate" | "agent_spawn" => env_timeout_secs_with_legacy(
             "FREECO_AI_AGENT_TOOL_TIMEOUT_SECS",
             "OPENFANG_AGENT_TOOL_TIMEOUT_SECS",
         )
@@ -118,6 +118,32 @@ const MAX_CONTINUATIONS: u32 = 5;
 /// Per-agent overrides come from `AgentManifest::max_history_messages` (issue #871).
 #[allow(dead_code)]
 const MAX_HISTORY_MESSAGES: usize = freeco_types::agent::DEFAULT_MAX_HISTORY_MESSAGES;
+
+/// Manifest metadata key, set by the kernel: the index in the session where
+/// the last compaction ended. History before it reaches the model as the
+/// compaction summary instead of verbatim.
+pub const HISTORY_FROM_KEY: &str = "history_from";
+
+/// The stored conversation as it is sent: from the compaction point on,
+/// starting at a request, without system messages.
+fn history_for_model(session_messages: &[Message], manifest: &AgentManifest) -> Vec<Message> {
+    let from = manifest
+        .metadata
+        .get(HISTORY_FROM_KEY)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .filter(|&v| v < session_messages.len())
+        .unwrap_or(0);
+    // Start at a request, so no tool result arrives without its call.
+    let from = (from..session_messages.len())
+        .find(|&i| is_user_turn(&session_messages[i]))
+        .unwrap_or(from);
+    session_messages[from..]
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect()
+}
 
 /// Detect when the LLM claims to have performed an action (sent, posted, emailed)
 /// without actually calling any tools. Prevents hallucinated completions.
@@ -304,6 +330,16 @@ pub fn strip_provider_prefix_known(
     model.to_string()
 }
 
+/// Whether the kernel marked this run as a guest's (someone other than the
+/// agent's owner): `metadata.guest = true` on the run's copy of the manifest.
+fn is_guest_run(manifest: &AgentManifest) -> bool {
+    manifest
+        .metadata
+        .get("guest")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod strip_provider_prefix_tests {
     use super::{should_try_fallback, strip_provider_prefix};
@@ -488,8 +524,15 @@ pub async fn run_agent_loop(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (dims={})", query_vec.len());
@@ -573,12 +616,7 @@ pub async fn run_agent_loop(
     // System prompt goes into the separate `system` field.
     // NOTE: We build llm_messages BEFORE stripping images so the LLM
     // sees the full image data for the current turn.
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let llm_messages: Vec<Message> = history_for_model(&session.messages, manifest);
 
     // Strip Image blocks from session to prevent base64 bloat.
     // The LLM already received them via llm_messages above.
@@ -599,20 +637,16 @@ pub async fn run_agent_loop(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -640,17 +674,31 @@ pub async fn run_agent_loop(
     // The full compaction system handles sophisticated summarization, but this prevents
     // the catastrophic case where 200+ messages cause instant context overflow.
     // Per-agent cap: manifest override -> runtime default (issue #871).
+    // The cap counts turns (what the user said plus everything that
+    // followed), never raw messages, and is off by default: the whole
+    // conversation is sent, and compaction near the context window keeps it
+    // in size.
     let max_history = manifest.effective_max_history_messages();
-    if messages.len() > max_history {
-        let trim_count = messages.len() - max_history;
+    let trim_count = turn_trim_count(&messages, max_history);
+    if trim_count > 0 {
         warn!(
             agent = %manifest.name,
             total_messages = messages.len(),
             trimming = trim_count,
-            max_history = max_history,
+            max_turns = max_history,
             "Trimming old messages to prevent context overflow"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -659,6 +707,22 @@ pub async fn run_agent_loop(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default
@@ -774,6 +838,13 @@ pub async fn run_agent_loop(
         if let Some(gw) = gateway.as_ref() {
             restore_response(gw, &mut response);
         }
+        // After the restore, which can put a real secret back into the text:
+        // the reply is stored, shown and sent to channels from here on.
+        let known_secrets = kernel
+            .as_ref()
+            .map(|k| k.known_secrets())
+            .unwrap_or_default();
+        redact_response_text(&mut response, &known_secrets);
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -946,7 +1017,9 @@ pub async fn run_agent_loop(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
@@ -1144,31 +1217,48 @@ pub async fn run_agent_loop(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -1182,7 +1272,7 @@ pub async fn run_agent_loop(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook
@@ -1361,6 +1451,49 @@ pub async fn run_agent_loop(
     Err(FreecoError::MaxIterationsExceeded(max_iterations))
 }
 
+/// Is this message something the user said, as opposed to a tool result
+/// (which also travels with the user role)?
+pub(crate) fn is_user_turn(m: &Message) -> bool {
+    if m.role != Role::User {
+        return false;
+    }
+    match &m.content {
+        MessageContent::Text(t) => !t.trim().is_empty(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text, .. } if !text.trim().is_empty())),
+    }
+}
+
+/// How many leading messages to drop so that only the last `max_turns`
+/// turns reach the model. `0` means keep everything.
+///
+/// A turn is one thing the user said plus everything that followed it: the
+/// agent's tool calls, their results, its reply. The cap counted raw messages,
+/// and every tool call is two of them, so a single answer with nine tool
+/// calls pushed the request it answered out of the window -- the next message
+/// ("build it and test") arrived without the conversation it referred to, and
+/// the agent said, truthfully, that it had no context. Cutting only where the
+/// user spoke keeps a request and its steps together.
+///
+/// This shapes what is sent, not what is stored: the saved conversation keeps
+/// every message.
+pub(crate) fn turn_trim_count(messages: &[Message], max_turns: usize) -> usize {
+    if max_turns == 0 {
+        return 0;
+    }
+    let starts: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_user_turn(m))
+        .map(|(i, _)| i)
+        .collect();
+    if starts.len() <= max_turns {
+        return 0;
+    }
+    starts[starts.len() - max_turns]
+}
+
 /// Run every message in a request through the gateway.
 ///
 /// Returns the masked request, or the reason it was refused. Tool definitions
@@ -1474,6 +1607,24 @@ fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut Complet
     }
 }
 
+/// Replace known secrets and key patterns in the reply's text blocks
+/// (`secret_redact`). Tool-call arguments are left alone: a tool may need a
+/// real value, and file writes that would store one are refused by the tool
+/// runner instead.
+fn redact_response_text(response: &mut CompletionResponse, known: &[(String, String)]) {
+    for block in &mut response.content {
+        if let ContentBlock::Text { text, .. } = block {
+            let clean = match crate::secret_redact::redact(text, known) {
+                std::borrow::Cow::Owned(clean) => Some(clean),
+                std::borrow::Cow::Borrowed(_) => None,
+            };
+            if let Some(clean) = clean {
+                *text = clean;
+            }
+        }
+    }
+}
+
 /// Is this the kind of failure another model could plausibly succeed at?
 ///
 /// A rate limit or a used-up allowance (RateLimit, Billing) moves down the
@@ -1488,6 +1639,18 @@ fn restore_response(gw: &freeco_datagateway::DataGateway, response: &mut Complet
 ///
 /// Shared by the streaming and non-streaming paths so they cannot drift apart
 /// again -- they had, and the streaming one is the path the dashboard uses.
+/// Seconds before the one retry of a request that never reached the provider.
+const CONNECT_RETRY_DELAY_SECS: u64 = 2;
+
+/// The request never reached the provider: no connection, no DNS. Nothing
+/// was sent or streamed, so trying again cannot duplicate anything.
+fn is_connect_failure(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("dns error")
+        || lower.contains("connection refused")
+}
+
 pub fn should_try_fallback(category: llm_errors::LlmErrorCategory) -> bool {
     matches!(
         category,
@@ -1600,6 +1763,18 @@ async fn call_with_retry(
                     "LLM error classified: {}",
                     classified.sanitized_message
                 );
+
+                // The connection itself failed (network down for a moment, DNS
+                // gone): nothing reached the provider, so trying the same model
+                // once more cannot duplicate anything. A brief blip used to end
+                // the turn with "error sending request".
+                if attempt == 0 && is_connect_failure(&raw_error) {
+                    warn!("Could not reach the model provider, retrying once in 2s");
+                    tokio::time::sleep(std::time::Duration::from_secs(CONNECT_RETRY_DELAY_SECS))
+                        .await;
+                    last_error = Some(raw_error);
+                    continue;
+                }
 
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_failure(provider, classified.is_billing);
@@ -1794,6 +1969,18 @@ async fn stream_with_retry(
                     classified.sanitized_message
                 );
 
+                // The connection itself failed (network down for a moment, DNS
+                // gone): nothing reached the provider, so trying the same model
+                // once more cannot duplicate anything. A brief blip used to end
+                // the turn with "error sending request".
+                if attempt == 0 && is_connect_failure(&raw_error) {
+                    warn!("Could not reach the model provider, retrying once in 2s");
+                    tokio::time::sleep(std::time::Duration::from_secs(CONNECT_RETRY_DELAY_SECS))
+                        .await;
+                    last_error = Some(raw_error);
+                    continue;
+                }
+
                 if let (Some(provider), Some(cooldown)) = (provider, cooldown) {
                     cooldown.record_failure(provider, classified.is_billing);
                 }
@@ -1920,8 +2107,15 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    // A guest's run (see the kernel's `guest` module) neither reads nor adds
+    // to the agent's long-term memory: it holds the owner's and every other
+    // person's conversations.
+    let guest_run = is_guest_run(manifest);
+
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
-    let memories = if let Some(emb) = embedding_driver {
+    let memories = if guest_run {
+        Vec::new()
+    } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
             Ok(query_vec) => {
                 debug!("Using vector recall (streaming, dims={})", query_vec.len());
@@ -2001,12 +2195,7 @@ pub async fn run_agent_loop_streaming(
         .messages
         .push(build_user_turn_message(user_message, user_content_blocks));
 
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let llm_messages: Vec<Message> = history_for_model(&session.messages, manifest);
 
     // Strip Image blocks from session to prevent base64 bloat.
     // The LLM already received them via llm_messages above.
@@ -2027,20 +2216,16 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
+    // Keep the message before anything can fail. The conversation was saved
+    // only once a reply was done, so a provider error, a refused request or
+    // a pressed Stop took the user's message with it: it showed while typed,
+    // was gone on reload, and the agent never knew it had been asked.
+    if let Err(e) = memory.save_session_async(session).await {
+        warn!(agent = %manifest.name, "Could not save the incoming message: {e}");
+    }
+
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
-
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
 
     let mut total_usage = TokenUsage::default();
     let final_response;
@@ -2048,17 +2233,31 @@ pub async fn run_agent_loop_streaming(
 
     // Safety valve: trim excessively long message histories to prevent context overflow.
     // Per-agent cap: manifest override -> runtime default (issue #871).
+    // The cap counts turns (what the user said plus everything that
+    // followed), never raw messages, and is off by default: the whole
+    // conversation is sent, and compaction near the context window keeps it
+    // in size.
     let max_history = manifest.effective_max_history_messages();
-    if messages.len() > max_history {
-        let trim_count = messages.len() - max_history;
+    let trim_count = turn_trim_count(&messages, max_history);
+    if trim_count > 0 {
         warn!(
             agent = %manifest.name,
             total_messages = messages.len(),
             trimming = trim_count,
-            max_history = max_history,
+            max_turns = max_history,
             "Trimming old messages to prevent context overflow (streaming)"
         );
-        messages.drain(..trim_count);
+        // What the trim drops is carried in the system prompt instead: the
+        // user's words verbatim, the agent's replies in short. Dropping it
+        // outright made a long chat forget its own start.
+        let dropped: Vec<Message> = messages.drain(..trim_count).collect();
+        if let Some(note) = crate::earlier_conversation::render(
+            &dropped,
+            context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        ) {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&note);
+        }
         // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
         // pair across the cut boundary, leaving orphaned blocks that cause the LLM
         // to return empty responses (input_tokens=0).
@@ -2067,6 +2266,22 @@ pub async fn run_agent_loop_streaming(
         // assistant turn at position 0, which strict providers (e.g. Gemini)
         // reject with INVALID_ARGUMENT on function-call turns.
         messages = crate::session_repair::ensure_starts_with_user(messages);
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    //
+    // After the trim, not before it: inserted first, it was the oldest message
+    // and so the first one the trim removed, which meant it reached the model
+    // only in conversations short enough not to need it.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
+        }
     }
 
     // Use autonomous config max_iterations if set, else default
@@ -2201,6 +2416,13 @@ pub async fn run_agent_loop_streaming(
         if let Some(gw) = gateway.as_ref() {
             restore_response(gw, &mut response);
         }
+        // After the restore, which can put a real secret back into the text:
+        // the reply is stored, shown and sent to channels from here on.
+        let known_secrets = kernel
+            .as_ref()
+            .map(|k| k.known_secrets())
+            .unwrap_or_default();
+        redact_response_text(&mut response, &known_secrets);
 
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
@@ -2345,7 +2567,9 @@ pub async fn run_agent_loop_streaming(
                     "User asked: {}\nI responded: {}",
                     user_message, final_response
                 );
-                if let Some(emb) = embedding_driver {
+                if guest_run {
+                    // Nothing kept: see `guest_run`.
+                } else if let Some(emb) = embedding_driver {
                     match emb.embed_one(&interaction_text).await {
                         Ok(vec) => {
                             let _ = memory
@@ -2536,31 +2760,48 @@ pub async fn run_agent_loop_streaming(
                     // Timeout-wrapped execution. `tool_timeout_for` returns None
                     // when the operator disabled the timeout (issue #1125).
                     let timeout_opt = tool_timeout_for(&tool_call.name);
-                    let exec_fut = tool_runner::execute_tool(
+                    // Any human approval is asked for first, outside the
+                    // deadline: a person may take longer to answer than the
+                    // tool is allowed to run.
+                    let refused = tool_runner::approve_before_deadline(
                         &tool_call.id,
                         &tool_call.name,
                         &tool_call.input,
                         kernel.as_ref(),
                         Some(&allowed_tool_names),
                         Some(&caller_id_str),
-                        skill_registry,
-                        mcp_connections,
-                        web_ctx,
-                        browser_ctx,
-                        if hand_allowed_env.is_empty() {
-                            None
-                        } else {
-                            Some(&hand_allowed_env)
-                        },
-                        workspace_root,
-                        media_engine,
                         effective_exec_policy,
-                        tts_engine,
-                        docker_config,
-                        process_manager,
+                    )
+                    .await;
+                    let exec_fut = tool_runner::run_approved(
+                        &tool_call.id,
+                        tool_runner::execute_tool(
+                            &tool_call.id,
+                            &tool_call.name,
+                            &tool_call.input,
+                            kernel.as_ref(),
+                            Some(&allowed_tool_names),
+                            Some(&caller_id_str),
+                            skill_registry,
+                            mcp_connections,
+                            web_ctx,
+                            browser_ctx,
+                            if hand_allowed_env.is_empty() {
+                                None
+                            } else {
+                                Some(&hand_allowed_env)
+                            },
+                            workspace_root,
+                            media_engine,
+                            effective_exec_policy,
+                            tts_engine,
+                            docker_config,
+                            process_manager,
+                        ),
                     );
-                    let result = match timeout_opt {
-                        Some(timeout) => {
+                    let result = match (refused, timeout_opt) {
+                        (Some(refused), _) => refused,
+                        (None, Some(timeout)) => {
                             let timeout_secs = timeout.as_secs();
                             match tokio::time::timeout(timeout, exec_fut).await {
                                 Ok(result) => result,
@@ -2574,7 +2815,7 @@ pub async fn run_agent_loop_streaming(
                                 }
                             }
                         }
-                        None => exec_fut.await,
+                        (None, None) => exec_fut.await,
                     };
 
                     // Fire AfterToolCall hook
@@ -3938,7 +4179,9 @@ mod tests {
 
     #[test]
     fn test_max_history_messages() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        // No cap by default: the whole conversation is sent, and compaction
+        // near the context window keeps it in size.
+        assert_eq!(MAX_HISTORY_MESSAGES, 0);
         assert_eq!(
             freeco_types::agent::DEFAULT_MAX_HISTORY_MESSAGES,
             MAX_HISTORY_MESSAGES
@@ -4615,7 +4858,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_messages_constant() {
-        assert_eq!(MAX_HISTORY_MESSAGES, 20);
+        assert_eq!(MAX_HISTORY_MESSAGES, 0);
     }
 
     #[tokio::test]
@@ -5959,5 +6202,241 @@ mod gateway_wiring_tests {
             panic!("expected text");
         };
         assert!(!sent.contains("4242 4242"), "card still present: {sent}");
+    }
+
+    fn tool_round(id: &str) -> Vec<Message> {
+        vec![
+            Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "file_write".to_string(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_string(),
+                tool_name: "file_write".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+            }]),
+        ]
+    }
+
+    /// The case that lost a conversation: one answer with nine tool calls is
+    /// eighteen messages, and a 20-message cap then dropped the request that
+    /// answer belonged to. Counting turns keeps the request with its steps.
+    #[test]
+    fn a_tool_heavy_answer_does_not_push_its_request_out_of_view() {
+        let mut history = vec![
+            Message::user("What can you do?"),
+            Message::assistant("Plenty."),
+            Message::user("A quick dev setup for a local WhatsApp gateway"),
+        ];
+        for i in 0..9 {
+            history.extend(tool_round(&format!("t{i}")));
+        }
+        history.push(Message::assistant("Files created in whatsapp-gateway/."));
+        history.push(Message::user("build it and test"));
+
+        let mut kept = history;
+        let cut = turn_trim_count(&kept, 2);
+        kept.drain(..cut);
+        let said: Vec<String> = kept
+            .iter()
+            .filter(|m| is_user_turn(m))
+            .map(|m| m.content.text_content())
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                "A quick dev setup for a local WhatsApp gateway".to_string(),
+                "build it and test".to_string()
+            ],
+            "the request the tool calls answered must survive the trim"
+        );
+        // Every tool call kept still has its result.
+        let uses = kept
+            .iter()
+            .filter(|m| matches!(&m.content, MessageContent::Blocks(b) if b.iter().any(|x| matches!(x, ContentBlock::ToolUse { .. }))))
+            .count();
+        assert_eq!(uses, 9);
+    }
+
+    /// After compaction the model gets the summary plus what follows the
+    /// compaction point -- never the whole stored history again, and never a
+    /// tool result whose call was left behind the cut.
+    #[test]
+    fn history_starts_at_the_compaction_point_on_a_request() {
+        let mut stored = vec![
+            Message::user("old request"),
+            Message::assistant("old answer"),
+        ];
+        stored.push(Message::user(
+            "A quick dev setup for a local WhatsApp gateway",
+        ));
+        stored.extend(tool_round("t0"));
+        stored.push(Message::assistant("Files created."));
+        stored.push(Message::user("build it and test"));
+
+        let mut manifest = AgentManifest::default();
+        assert_eq!(history_for_model(&stored, &manifest).len(), stored.len());
+
+        // A cursor inside the WhatsApp request's tool calls moves on to the
+        // next request rather than starting on an orphaned tool result.
+        manifest
+            .metadata
+            .insert(HISTORY_FROM_KEY.to_string(), serde_json::json!(4));
+        let sent = history_for_model(&stored, &manifest);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].content.text_content(), "build it and test");
+
+        manifest
+            .metadata
+            .insert(HISTORY_FROM_KEY.to_string(), serde_json::json!(2));
+        let sent = history_for_model(&stored, &manifest);
+        assert_eq!(
+            sent[0].content.text_content(),
+            "A quick dev setup for a local WhatsApp gateway"
+        );
+        assert_eq!(sent.len(), stored.len() - 2);
+    }
+
+    #[test]
+    fn a_short_conversation_is_left_alone() {
+        let history = vec![Message::user("hi"), Message::assistant("hello")];
+        assert_eq!(turn_trim_count(&history, 12), 0);
+        assert_eq!(turn_trim_count(&history, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod connect_retry_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Fails to connect `failures` times, then answers.
+    struct FlakyNetwork {
+        failures: u32,
+        calls: AtomicU32,
+    }
+
+    #[async_trait]
+    impl LlmDriver for FlakyNetwork {
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.failures {
+                return Err(LlmError::Http(
+                    "error sending request for url (https://api.example/v1): dns error".to_string(),
+                ));
+            }
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "back online".to_string(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            })
+        }
+    }
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            model: "test".to_string(),
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        }
+    }
+
+    #[test]
+    fn connect_failures_are_told_apart_from_other_errors() {
+        assert!(is_connect_failure(
+            "error sending request for url (https://api.groq.com)"
+        ));
+        assert!(is_connect_failure("DNS error: failed to lookup address"));
+        assert!(!is_connect_failure("HTTP 401: invalid api key"));
+    }
+
+    #[tokio::test]
+    async fn a_connect_failure_is_retried_once_on_the_same_model() {
+        let driver = FlakyNetwork {
+            failures: 1,
+            calls: AtomicU32::new(0),
+        };
+        let mut served_by = None;
+        let response = call_with_retry(&driver, request(), None, None, &[], &mut served_by)
+            .await
+            .expect("the retry answers");
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            served_by.is_none(),
+            "the same model answered, not a fallback"
+        );
+        assert!(
+            matches!(&response.content[0], ContentBlock::Text { text, .. } if text == "back online")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lasting_outage_is_retried_only_once() {
+        let driver = FlakyNetwork {
+            failures: u32::MAX,
+            calls: AtomicU32::new(0),
+        };
+        let mut served_by = None;
+        let result = call_with_retry(&driver, request(), None, None, &[], &mut served_by).await;
+        assert!(result.is_err());
+        assert_eq!(driver.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A reply that echoes a secret (one the gateway just restored, or one the
+    /// model saw in a file) is stored and sent with the secret replaced.
+    #[test]
+    fn reply_text_is_redacted_but_tool_arguments_are_not() {
+        let known = vec![(
+            "CRM_API_KEY".to_string(),
+            "crm-7f3k9QzLmP2wXa8B".to_string(),
+        )];
+        let mut response = CompletionResponse {
+            content: vec![
+                ContentBlock::Text {
+                    text: "Your key is crm-7f3k9QzLmP2wXa8B and gsk_7Hd82kLmN3pQ9rStUv4wXyZ1"
+                        .into(),
+                    provider_metadata: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "crm_api".into(),
+                    input: serde_json::json!({"key": "crm-7f3k9QzLmP2wXa8B"}),
+                    provider_metadata: None,
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: Vec::new(),
+            usage: TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+        };
+        redact_response_text(&mut response, &known);
+        assert_eq!(
+            response.text(),
+            "Your key is [REDACTED:CRM_API_KEY] and [REDACTED:groq_key]"
+        );
+        let ContentBlock::ToolUse { input, .. } = &response.content[1] else {
+            panic!("expected tool use");
+        };
+        assert_eq!(input["key"], "crm-7f3k9QzLmP2wXa8B");
     }
 }

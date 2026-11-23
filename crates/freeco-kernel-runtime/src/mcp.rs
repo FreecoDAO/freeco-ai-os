@@ -9,7 +9,7 @@
 
 use freeco_types::tool::ToolDefinition;
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation};
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ pub struct McpConnection {
     original_names: HashMap<String, String>,
     /// The rmcp client handle — type-erased because the concrete type
     /// depends on which transport was used (stdio vs HTTP).
-    client: RunningService<RoleClient, ClientInfo>,
+    client: RunningService<RoleClient, ClientConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ pub struct McpConnection {
 impl McpConnection {
     /// Connect to an MCP server, perform handshake, and discover tools.
     pub async fn connect(config: McpServerConfig) -> Result<Self, String> {
-        let client_info = ClientInfo::new(
+        let client_info = ClientConfig::new(
             ClientCapabilities::default(),
             Implementation::new("freeco", env!("CARGO_PKG_VERSION")),
         );
@@ -218,8 +218,8 @@ impl McpConnection {
         command: &str,
         args: &[String],
         env_whitelist: &[String],
-        client_info: ClientInfo,
-    ) -> Result<RunningService<RoleClient, ClientInfo>, String> {
+        client_info: ClientConfig,
+    ) -> Result<RunningService<RoleClient, ClientConfig>, String> {
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use tokio::process::Command;
 
@@ -288,8 +288,8 @@ impl McpConnection {
     async fn connect_http(
         url: &str,
         headers: &[String],
-        client_info: ClientInfo,
-    ) -> Result<RunningService<RoleClient, ClientInfo>, String> {
+        client_info: ClientConfig,
+    ) -> Result<RunningService<RoleClient, ClientConfig>, String> {
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
         use rmcp::transport::StreamableHttpClientTransport;
 
@@ -333,6 +333,59 @@ impl McpConnection {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Header variable expansion
+// ---------------------------------------------------------------------------
+
+/// Expand `${VAR}` references in `"Header-Name: value"` entries.
+///
+/// Lets config.toml say `headers = ["Authorization: Bearer ${OMNIROUTE_MCP_KEY}"]`
+/// instead of holding the key in plain text. `lookup` supplies the value (the
+/// kernel passes the process environment, then the vault / `.env`).
+///
+/// Any reference that cannot be resolved -- unknown variable, empty name,
+/// missing `}` -- is an error, so a literal `${...}` is never sent to a server.
+/// Error messages name the header and the variable, never a resolved value.
+pub fn expand_header_vars<F>(headers: &[String], lookup: F) -> Result<Vec<String>, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    headers
+        .iter()
+        .map(|header| {
+            let header_name = header.split_once(':').map(|(n, _)| n.trim()).unwrap_or("");
+            let mut out = String::with_capacity(header.len());
+            let mut rest = header.as_str();
+            while let Some(start) = rest.find("${") {
+                out.push_str(&rest[..start]);
+                let after = &rest[start + 2..];
+                let end = after.find('}').ok_or_else(|| {
+                    format!("header '{header_name}' has an unterminated '${{' reference")
+                })?;
+                let var = &after[..end];
+                let valid = !var.is_empty()
+                    && !var.starts_with(|c: char| c.is_ascii_digit())
+                    && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    return Err(format!(
+                        "header '{header_name}' has an invalid variable reference '${{{var}}}'"
+                    ));
+                }
+                let value = lookup(var).filter(|v| !v.is_empty()).ok_or_else(|| {
+                    format!(
+                        "header '{header_name}' uses ${{{var}}}, which is not set in the \
+                         environment or the vault"
+                    )
+                })?;
+                out.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            out.push_str(rest);
+            Ok(out)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +453,57 @@ pub fn normalize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_env(name: &str) -> Option<String> {
+        match name {
+            "OMNIROUTE_MCP_KEY" => Some("sk-test-value".to_string()),
+            "A" => Some("1".to_string()),
+            "EMPTY" => Some(String::new()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn header_vars_expand_from_lookup() {
+        let h = vec![
+            "Authorization: Bearer ${OMNIROUTE_MCP_KEY}".to_string(),
+            "X-Two: ${A}-${A}".to_string(),
+            "X-Plain: no vars, a lone $ and {braces}".to_string(),
+        ];
+        let out = expand_header_vars(&h, fake_env).unwrap();
+        assert_eq!(out[0], "Authorization: Bearer sk-test-value");
+        assert_eq!(out[1], "X-Two: 1-1");
+        assert_eq!(out[2], h[2]);
+    }
+
+    #[test]
+    fn unresolved_header_var_is_an_error_without_the_value() {
+        let h = vec![
+            "X-A: ${A}".to_string(),
+            "Authorization: Bearer ${MISSING_KEY}".to_string(),
+        ];
+        let err = expand_header_vars(&h, fake_env).unwrap_err();
+        assert!(err.contains("Authorization"));
+        assert!(err.contains("MISSING_KEY"));
+        assert!(!err.contains("sk-test-value"));
+        // An empty value counts as unset: "Bearer " alone would just fail auth.
+        assert!(expand_header_vars(&["X: ${EMPTY}".to_string()], fake_env).is_err());
+    }
+
+    #[test]
+    fn malformed_header_var_is_an_error() {
+        for bad in [
+            "X: ${OMNIROUTE_MCP_KEY",
+            "X: ${}",
+            "X: ${BAD-NAME}",
+            "X: ${1A}",
+        ] {
+            assert!(
+                expand_header_vars(&[bad.to_string()], fake_env).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn test_mcp_tool_namespacing() {

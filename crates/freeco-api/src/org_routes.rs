@@ -39,6 +39,10 @@ pub struct CreateProject {
 pub struct CreateTeam {
     pub name: String,
     pub project_id: Option<String>,
+    /// The company the team belongs to, when it is not (only) through a
+    /// project.
+    #[serde(default)]
+    pub company_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +54,19 @@ pub struct AssignSession {
 #[derive(Deserialize)]
 pub struct StateFlag {
     pub value: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProject {
+    pub name: Option<String>,
+    /// The project's brief, read by every agent working in it.
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct StartConversation {
+    pub agent_id: String,
+    pub label: Option<String>,
 }
 
 fn fail(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
@@ -73,15 +90,28 @@ pub async fn overview(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }
 }
 
+/// GET /api/org/companies — owners and admins see every company; anyone
+/// else the companies of the teams they are on.
 pub async fn list_companies(
     State(state): State<Arc<AppState>>,
+    caller: crate::middleware::Caller,
     Query(q): Query<ArchivedFlag>,
 ) -> impl IntoResponse {
-    match state.kernel.memory.org().list_companies(q.archived) {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "companies": rows })),
-        ),
+    let org = state.kernel.memory.org();
+    let visible = match crate::team_access::companies_visible_to(org, &caller) {
+        Ok(v) => v,
+        Err(e) => return fail(e),
+    };
+    match org.list_companies(q.archived) {
+        Ok(mut rows) => {
+            if let Some(visible) = visible {
+                rows.retain(|c| visible.contains(&c.id));
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "companies": rows })),
+            )
+        }
         Err(e) => fail(e),
     }
 }
@@ -102,7 +132,12 @@ pub async fn create_company(
         .org()
         .create_company(body.name.trim(), body.description.as_deref())
     {
-        Ok(c) => (StatusCode::OK, Json(serde_json::json!(c))),
+        Ok(c) => {
+            state
+                .kernel
+                .record_org_change("owner", format!("created company \"{}\"", c.name));
+            (StatusCode::OK, Json(serde_json::json!(c)))
+        }
         Err(e) => fail(e),
     }
 }
@@ -125,12 +160,35 @@ pub async fn list_projects(
 /// The route accepted POST only, so a team could be created and never listed:
 /// the dashboard had no way to show one and an agent had no way to find the id
 /// its own team memory is keyed by.
+///
+/// Each team names its company (`company_id`: its own, else its project's).
+/// Owners and admins see every team; anyone else only the teams they are on.
 pub async fn list_teams(
     State(state): State<Arc<AppState>>,
+    caller: crate::middleware::Caller,
     Query(q): Query<ArchivedFlag>,
 ) -> impl IntoResponse {
-    match state.kernel.memory.org().list_teams(q.archived) {
-        Ok(rows) => (StatusCode::OK, Json(serde_json::json!({ "teams": rows }))),
+    let org = state.kernel.memory.org();
+    let (visible, companies) = match (
+        crate::team_access::teams_visible_to(org, &caller),
+        org.team_companies(),
+    ) {
+        (Ok(v), Ok(c)) => (v, c),
+        (Err(e), _) | (_, Err(e)) => return fail(e),
+    };
+    match org.list_teams(q.archived) {
+        Ok(mut rows) => {
+            rows.retain(|t| {
+                t["id"]
+                    .as_str()
+                    .is_some_and(|id| visible.iter().any(|v| v == id))
+            });
+            for t in &mut rows {
+                let company = t["id"].as_str().and_then(|id| companies.get(id)).cloned();
+                t["company_id"] = serde_json::json!(company);
+            }
+            (StatusCode::OK, Json(serde_json::json!({ "teams": rows })))
+        }
         Err(e) => fail(e),
     }
 }
@@ -163,10 +221,15 @@ pub async fn create_project(
             body.company_id.as_deref(),
             body.description.as_deref(),
         ) {
-            Ok(p) => (
-                StatusCode::OK,
-                Json(serde_json::json!({ "project": p, "reused": false })),
-            ),
+            Ok(p) => {
+                state
+                    .kernel
+                    .record_org_change("owner", format!("created project \"{}\"", p.name));
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "project": p, "reused": false })),
+                )
+            }
             Err(e) => fail(e),
         },
         Err(e) => fail(e),
@@ -183,28 +246,378 @@ pub async fn create_team(
             Json(serde_json::json!({ "error": "A team needs a name." })),
         );
     }
-    match state
-        .kernel
-        .memory
-        .org()
-        .create_team(body.name.trim(), body.project_id.as_deref())
-    {
-        Ok(t) => (StatusCode::OK, Json(serde_json::json!(t))),
+    let org = state.kernel.memory.org();
+    let company = body
+        .company_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    if let Some(c) = company {
+        match org.get_company(c) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "No such company" })),
+                )
+            }
+            Err(e) => return fail(e),
+        }
+    }
+    match org.create_team(body.name.trim(), body.project_id.as_deref()) {
+        Ok(t) => {
+            if let Some(c) = company {
+                if let Err(e) = org.set_team_company(&t.id, Some(c)) {
+                    return fail(e);
+                }
+            }
+            state
+                .kernel
+                .record_org_change("owner", format!("created team \"{}\"", t.name));
+            let mut v = serde_json::json!(t);
+            v["company_id"] = serde_json::json!(company);
+            (StatusCode::OK, Json(v))
+        }
         Err(e) => fail(e),
     }
 }
 
 /// GET /api/org/projects/:id/sessions — a project's own history.
+///
+/// Each conversation carries its agent's name and whether a run is working in
+/// it right now, so the page shows a project's parallel work as it happens.
 pub async fn project_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.memory.org().sessions_for_project(&id) {
-        Ok(rows) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "sessions": rows })),
+        Ok(mut rows) => {
+            for row in &mut rows {
+                let busy = row["id"]
+                    .as_str()
+                    .and_then(|sid| uuid::Uuid::parse_str(sid).ok())
+                    .is_some_and(|u| {
+                        state
+                            .kernel
+                            .is_conversation_busy(freeco_types::agent::SessionId(u))
+                    });
+                let agent_name = row["agent_id"]
+                    .as_str()
+                    .and_then(|a| a.parse::<freeco_types::agent::AgentId>().ok())
+                    .and_then(|a| state.kernel.registry.get(a))
+                    .map(|e| e.name);
+                row["busy"] = serde_json::Value::Bool(busy);
+                row["agent_name"] = serde_json::json!(agent_name);
+            }
+            let working = rows.iter().filter(|r| r["busy"] == true).count();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "sessions": rows, "working": working })),
+            )
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// GET /api/org/projects/:id — one project, with its brief.
+pub async fn get_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().get_project(&id) {
+        Ok(Some(p)) => (StatusCode::OK, Json(serde_json::json!({ "project": p }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such project" })),
         ),
         Err(e) => fail(e),
+    }
+}
+
+/// PUT /api/org/projects/:id — rename a project or rewrite its brief.
+pub async fn update_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateProject>,
+) -> impl IntoResponse {
+    let name = body.name.as_deref().map(str::trim);
+    if name.is_some_and(str::is_empty) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "A project needs a name." })),
+        );
+    }
+    match state
+        .kernel
+        .memory
+        .org()
+        .update_project(&id, name, body.description.as_deref())
+    {
+        Ok(Some(p)) => (StatusCode::OK, Json(serde_json::json!({ "project": p }))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such project" })),
+        ),
+        Err(e) => fail(e),
+    }
+}
+
+/// POST /api/org/projects/:id/conversations — start a conversation in a project.
+///
+/// A new conversation of the chosen agent, filed under the project. It does
+/// not become the agent's current conversation, so starting one never pulls
+/// the agent out of a chat already in progress: any number run side by side.
+pub async fn start_project_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<StartConversation>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    let project = match org.get_project(&id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such project" })),
+            )
+        }
+        Err(e) => return fail(e),
+    };
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("{} — {}", project.name, entry.name));
+    let session = match state
+        .kernel
+        .memory
+        .create_session_with_label(entry.id, Some(&label))
+    {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let session_id = session.id.0.to_string();
+    if let Err(e) = org.assign_session(&session_id, Some(&project.id), None) {
+        return fail(e);
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "agent_id": entry.id.to_string(),
+            "agent_name": entry.name,
+            "label": label,
+            "project_id": project.id,
+        })),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddTeamMember {
+    pub agent_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// POST /api/org/teams/:id/members — put an agent on a team.
+///
+/// Members are what a team run hands work to, and the dashboard had no way
+/// to add one: a team could be created and never staffed.
+pub async fn add_team_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AddTeamMember>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    match org.get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let role = body
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    if let Err(e) = org.add_team_member(&id, &entry.id.to_string(), role) {
+        return fail(e);
+    }
+    state.kernel.record_org_change(
+        "owner",
+        format!(
+            "added {} to team {}{}",
+            entry.name,
+            team_label(org, &id),
+            role.map(|r| format!(" as {r}")).unwrap_or_default()
+        ),
+    );
+    match org.get_team(&id) {
+        Ok(team) => (StatusCode::OK, Json(serde_json::json!({ "team": team }))),
+        Err(e) => fail(e),
+    }
+}
+
+/// A team's name for the change log, its id when it has none.
+pub(crate) fn team_label(org: &freeco_memory::org::OrgStore, team_id: &str) -> String {
+    org.get_team(team_id)
+        .ok()
+        .flatten()
+        .and_then(|t| t["name"].as_str().map(|n| format!("\"{n}\"")))
+        .unwrap_or_else(|| team_id.to_string())
+}
+
+/// The role that makes a member the team's lead. `supervisor` is accepted as
+/// another word for it: a team has one lead, whatever it is called.
+fn is_lead_role(role: &str) -> bool {
+    let r = role.trim().to_lowercase();
+    r == "lead" || r == "supervisor"
+}
+
+/// PUT /api/org/teams/{id}/members — set a member's role on a team, adding
+/// the agent if it is not on it yet.
+///
+/// Appointing the lead (`lead`, or `supervisor`) makes whoever led before a
+/// plain member, so a team never has two: a team run hands the goal to one
+/// lead, and two would leave which one to chance. POST adds a member with a
+/// role as given; this is the edit.
+pub async fn set_team_member(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AddTeamMember>,
+) -> impl IntoResponse {
+    let org = state.kernel.memory.org();
+    let team = match org.get_team(&id) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    };
+    let Some(entry) = body
+        .agent_id
+        .parse::<freeco_types::agent::AgentId>()
+        .ok()
+        .and_then(|a| state.kernel.registry.get(a))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "No such agent" })),
+        );
+    };
+    let agent_id = entry.id.to_string();
+    let role = match body
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        Some(r) if is_lead_role(r) => "lead".to_string(),
+        Some(r) => r.to_string(),
+        None => "member".to_string(),
+    };
+    if role == "lead" {
+        let others = team["members"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m["role"].as_str().is_some_and(is_lead_role))
+            .filter_map(|m| m["agent_id"].as_str().map(str::to_string))
+            .filter(|other| other != &agent_id);
+        for other in others {
+            if let Err(e) = org.add_team_member(&id, &other, Some("member")) {
+                return fail(e);
+            }
+        }
+    }
+    if let Err(e) = org.add_team_member(&id, &agent_id, Some(role.as_str())) {
+        return fail(e);
+    }
+    state.kernel.record_org_change(
+        "owner",
+        format!(
+            "set {} in team {} as {role}",
+            entry.name,
+            team_label(org, &id)
+        ),
+    );
+    match org.get_team(&id) {
+        Ok(team) => (StatusCode::OK, Json(serde_json::json!({ "team": team }))),
+        Err(e) => fail(e),
+    }
+}
+
+/// GET /api/org/changes — the organisation change log, newest first:
+/// structure created, members set or taken off, hires made or held for the
+/// owner, by the owner or by agents.
+pub async fn changes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({ "changes": state.kernel.org_changes(100) }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunTeam {
+    pub goal: String,
+}
+
+/// POST /api/org/teams/:id/run — give a team a goal.
+///
+/// Its lead gets a new conversation filed under the team, with the goal as
+/// its first message, and hands parts to the other members, who work at the
+/// same time. Returns at once with the lead's conversation; the work shows
+/// on the project page as it happens.
+pub async fn run_team(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RunTeam>,
+) -> impl IntoResponse {
+    match state.kernel.memory.org().get_team(&id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "No such team" })),
+            )
+        }
+        Err(e) => return fail(e),
+    }
+    match state.kernel.start_team_run(&id, &body.goal) {
+        Ok(run) => (StatusCode::OK, Json(run)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

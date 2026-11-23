@@ -91,6 +91,7 @@ pub fn is_known_freeco_tool(name: &str) -> bool {
             | "location_get"
             | "sandbox_exec"
             | "crm_api"
+            | "accounting_api"
     )
 }
 

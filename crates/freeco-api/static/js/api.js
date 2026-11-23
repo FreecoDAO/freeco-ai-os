@@ -241,11 +241,18 @@ var FreecoAPI = (function() {
       };
 
       socket.onmessage = function(e) {
+        // Guard: a socket left behind by switching chats can still deliver a
+        // frame or two while it closes. Without this, the end of one agent's
+        // reply was drawn into the next agent's chat.
+        if (_ws !== socket) return;
         try {
           var data = JSON.parse(e.data);
         } catch(parseErr) {
           return; // Ignore malformed JSON frames
         }
+        // The server closes a socket nobody has used for 30 minutes. That is
+        // housekeeping, not a failure: reconnect quietly instead of showing it.
+        if (data && data.type === 'idle_timeout') { socket._idle = true; return; }
         // Dispatch outside try/catch so handler errors are not swallowed
         if (_wsCallbacks.onMessage) _wsCallbacks.onMessage(data);
       };
@@ -256,6 +263,11 @@ var FreecoAPI = (function() {
         if (_ws !== socket) return;
         _wsConnected = false;
         _ws = null;
+        if (socket._idle && _wsAgentId) {
+          _reconnectAttempts = 0;
+          _doConnect(_wsAgentId);
+          return;
+        }
         if (_wsAgentId && _reconnectAttempts < MAX_RECONNECT && e.code !== 1000) {
           _reconnectAttempts++;
           _reconnectAttempt = _reconnectAttempts;
@@ -303,6 +315,78 @@ var FreecoAPI = (function() {
 
   function isWsConnected() { return _wsConnected; }
 
+  // A connection of its own, for a window that talks to an agent alongside
+  // the main chat.
+  //
+  // The page used to have one shared socket. The assistant popup and the main
+  // chat both sent over it, so whichever connected last took every reply, and
+  // a message typed in one window went to the other window's agent. Each
+  // caller of this gets a separate socket, bound to one agent for its life.
+  function agentSocket(agentId, callbacks) {
+    var cbs = callbacks || {};
+    var sock = null;
+    var closed = false;
+    var attempts = 0;
+    var timer = null;
+    var queue = [];
+
+    function open() {
+      if (closed) return;
+      var url = WS_BASE + '/api/agents/' + agentId + '/ws';
+      if (_authToken) url += '?token=' + encodeURIComponent(_authToken);
+      var s;
+      try { s = new WebSocket(url); } catch (e) { return; }
+      sock = s;
+      s.onopen = function() {
+        if (sock !== s) return;
+        attempts = 0;
+        while (queue.length) s.send(queue.shift());
+        if (cbs.onOpen) cbs.onOpen();
+      };
+      s.onmessage = function(e) {
+        if (sock !== s) return;
+        var data;
+        try { data = JSON.parse(e.data); } catch (err) { return; }
+        if (data && data.type === 'idle_timeout') { s._idle = true; return; }
+        if (cbs.onMessage) cbs.onMessage(data);
+      };
+      s.onclose = function(e) {
+        if (sock !== s) return;
+        sock = null;
+        if (closed) return;
+        if (s._idle) { attempts = 0; open(); return; }
+        if (e.code !== 1000 && attempts < MAX_RECONNECT) {
+          attempts++;
+          timer = setTimeout(open, Math.min(1000 * Math.pow(2, attempts - 1), 10000));
+          return;
+        }
+        if (cbs.onClose) cbs.onClose();
+      };
+    }
+
+    open();
+    return {
+      agentId: agentId,
+      // Sent now if open, or as soon as the socket opens. False only once
+      // this handle is closed, so the caller can fall back to HTTP.
+      send: function(data) {
+        if (closed) return false;
+        var text = JSON.stringify(data);
+        if (sock && sock.readyState === WebSocket.OPEN) { sock.send(text); return true; }
+        queue.push(text);
+        if (!sock) open();
+        return true;
+      },
+      isOpen: function() { return !!sock && sock.readyState === WebSocket.OPEN; },
+      close: function() {
+        closed = true;
+        queue = [];
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (sock) { var s = sock; sock = null; s.close(1000); }
+      }
+    };
+  }
+
   function getConnectionState() { return _connectionState; }
 
   function getToken() { return _authToken; }
@@ -337,6 +421,7 @@ var FreecoAPI = (function() {
     wsDisconnect: wsDisconnect,
     wsSend: wsSend,
     isWsConnected: isWsConnected,
+    agentSocket: agentSocket,
     getConnectionState: getConnectionState,
     onConnectionChange: onConnectionChange
   };

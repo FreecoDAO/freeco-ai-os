@@ -161,6 +161,14 @@ impl MemorySubstrate {
         self.structured.remove_agent(agent_id)
     }
 
+    /// Remove an agent from persistent storage, leaving its conversations.
+    ///
+    /// For an agent replaced under the same id (a hand reactivated at boot):
+    /// what it talked about belongs to the replacement.
+    pub fn remove_agent_keeping_sessions(&self, agent_id: AgentId) -> FreecoResult<()> {
+        self.structured.remove_agent(agent_id)
+    }
+
     /// Load all agent entries from persistent storage.
     pub fn load_all_agents(&self) -> FreecoResult<Vec<AgentEntry>> {
         self.structured.load_all_agents()
@@ -245,6 +253,14 @@ impl MemorySubstrate {
         self.sessions.list_sessions()
     }
 
+    /// Every conversation not in the trash, without its messages, newest
+    /// first.
+    pub fn list_conversation_summaries(
+        &self,
+    ) -> FreecoResult<Vec<crate::session::ConversationSummary>> {
+        self.sessions.list_conversation_summaries()
+    }
+
     /// List agent conversations (the canonical store) with their names.
     pub fn list_canonical_sessions(&self) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_canonical_sessions()
@@ -301,6 +317,15 @@ impl MemorySubstrate {
     /// List all sessions for a specific agent.
     pub fn list_agent_sessions(&self, agent_id: AgentId) -> FreecoResult<Vec<serde_json::Value>> {
         self.sessions.list_agent_sessions(agent_id)
+    }
+
+    /// An agent's most recent conversations with label and last request.
+    pub fn recent_session_topics(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
+        self.sessions.recent_session_topics(agent_id, limit)
     }
 
     /// Create a new session with an optional label.
@@ -550,20 +575,62 @@ impl MemorySubstrate {
         assigned_to: Option<&str>,
         created_by: Option<&str>,
     ) -> FreecoResult<String> {
+        self.task_post_on_board(title, description, assigned_to, created_by, None, &[])
+            .await
+    }
+
+    /// Post a task, optionally onto a team's board and waiting on other
+    /// tasks. Returns the task ID.
+    ///
+    /// Every task named in `blocked_by` must exist: a dependency on a task
+    /// that is not there would keep this one waiting forever, with nothing
+    /// on the board to say why.
+    pub async fn task_post_on_board(
+        &self,
+        title: &str,
+        description: &str,
+        assigned_to: Option<&str>,
+        created_by: Option<&str>,
+        team_id: Option<&str>,
+        blocked_by: &[String],
+    ) -> FreecoResult<String> {
         let conn = Arc::clone(&self.conn);
         let title = title.to_string();
         let description = description.to_string();
         let assigned_to = assigned_to.unwrap_or("").to_string();
         let created_by = created_by.unwrap_or("").to_string();
+        let team_id = team_id.unwrap_or("").to_string();
+        let mut blocked_by: Vec<String> = blocked_by
+            .iter()
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .collect();
+        blocked_by.dedup();
 
         tokio::task::spawn_blocking(move || {
             let id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            for dep in &blocked_by {
+                let found: i64 = db
+                    .query_row(
+                        "SELECT COUNT(*) FROM task_queue WHERE id = ?1",
+                        [dep],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| FreecoError::Memory(e.to_string()))?;
+                if found == 0 {
+                    return Err(FreecoError::InvalidInput(format!(
+                        "No task with id {dep} to wait on"
+                    )));
+                }
+            }
+            let deps = serde_json::to_string(&blocked_by)
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
             db.execute(
-                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by)
-                 VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by],
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, priority, created_at, title, description, assigned_to, created_by, team_id, blocked_by)
+                 VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by, team_id, deps],
             )
             .map_err(|e| FreecoError::Memory(e.to_string()))?;
             Ok(id)
@@ -572,54 +639,82 @@ impl MemorySubstrate {
         .map_err(|e| FreecoError::Internal(e.to_string()))?
     }
 
-    /// Claim the next pending task (optionally for a specific assignee). Returns task JSON or None.
+    /// Claim the next task this agent may work on. Returns task JSON or None.
+    ///
+    /// A task is claimable when it is pending, assigned to this agent or to
+    /// nobody, every task it is blocked by is completed, and -- when it sits on
+    /// a team's board -- the agent is on that team. The check and the claim
+    /// run under one lock on the database, so two agents asking at once can
+    /// never both get the same task.
     pub async fn task_claim(&self, agent_id: &str) -> FreecoResult<Option<serde_json::Value>> {
         let conn = Arc::clone(&self.conn);
         let agent_id = agent_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
-            // Find first pending task assigned to this agent, or any unassigned pending task
-            let mut stmt = db.prepare(
-                "SELECT id, title, description, assigned_to, created_by, created_at
-                 FROM task_queue
-                 WHERE status = 'pending' AND (assigned_to = ?1 OR assigned_to = '')
-                 ORDER BY priority DESC, created_at ASC
-                 LIMIT 1"
-            ).map_err(|e| FreecoError::Memory(e.to_string()))?;
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let teams: Vec<String> = {
+                let mut stmt = db
+                    .prepare("SELECT team_id FROM team_members WHERE agent_id = ?1")
+                    .map_err(|e| FreecoError::Memory(e.to_string()))?;
+                let rows = stmt
+                    .query_map([&agent_id], |r| r.get::<_, String>(0))
+                    .map_err(|e| FreecoError::Memory(e.to_string()))?;
+                rows.filter_map(Result::ok).collect()
+            };
 
-            let result = stmt.query_row(rusqlite::params![agent_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            });
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, title, description, assigned_to, created_by, created_at,
+                            COALESCE(team_id, ''), COALESCE(blocked_by, '[]')
+                     FROM task_queue
+                     WHERE status = 'pending' AND (assigned_to = ?1 OR assigned_to = '')
+                     ORDER BY priority DESC, created_at ASC",
+                )
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            let candidates: Vec<ClaimCandidate> = stmt
+                .query_map(rusqlite::params![agent_id], |row| {
+                    Ok(ClaimCandidate {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        description: row.get(2)?,
+                        assigned: row.get(3)?,
+                        created_by: row.get(4)?,
+                        created_at: row.get(5)?,
+                        team_id: row.get(6)?,
+                        blocked_by: row.get(7)?,
+                    })
+                })
+                .map_err(|e| FreecoError::Memory(e.to_string()))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            drop(stmt);
 
-            match result {
-                Ok((id, title, description, assigned, created_by, created_at)) => {
-                    // Update status to in_progress
-                    db.execute(
-                        "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2 WHERE id = ?1",
-                        rusqlite::params![id, agent_id],
-                    ).map_err(|e| FreecoError::Memory(e.to_string()))?;
-
-                    Ok(Some(serde_json::json!({
-                        "id": id,
-                        "title": title,
-                        "description": description,
-                        "status": "in_progress",
-                        "assigned_to": if assigned.is_empty() { &agent_id } else { &assigned },
-                        "created_by": created_by,
-                        "created_at": created_at,
-                    })))
+            for c in candidates {
+                if !c.team_id.is_empty() && !teams.contains(&c.team_id) {
+                    continue;
                 }
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(FreecoError::Memory(e.to_string())),
+                if !open_blockers(&db, &c.blocked_by)?.is_empty() {
+                    continue;
+                }
+                db.execute(
+                    "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2 WHERE id = ?1",
+                    rusqlite::params![c.id, agent_id],
+                )
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+                return Ok(Some(serde_json::json!({
+                    "id": c.id,
+                    "title": c.title,
+                    "description": c.description,
+                    "status": "in_progress",
+                    "assigned_to": if c.assigned.is_empty() { &agent_id } else { &c.assigned },
+                    "created_by": c.created_by,
+                    "created_at": c.created_at,
+                    "team_id": c.team_id,
+                })));
             }
+            Ok(None)
         })
         .await
         .map_err(|e| FreecoError::Internal(e.to_string()))?
@@ -627,21 +722,91 @@ impl MemorySubstrate {
 
     /// Mark a task as completed with a result string.
     pub async fn task_complete(&self, task_id: &str, result: &str) -> FreecoResult<()> {
+        self.task_complete_by(task_id, result, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Complete a task, checking who is completing it, and report which
+    /// waiting tasks this unblocked.
+    ///
+    /// With `by` set, only the agent that holds the task or the one that
+    /// posted it may complete it: otherwise any agent could close a
+    /// teammate's work, and the board would say "done" about work nobody did.
+    pub async fn task_complete_by(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> FreecoResult<Vec<String>> {
         let conn = Arc::clone(&self.conn);
         let task_id = task_id.to_string();
         let result = result.to_string();
+        let by = by.map(str::to_string);
 
         tokio::task::spawn_blocking(move || {
             let now = chrono::Utc::now().to_rfc3339();
             let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
-            let rows = db.execute(
+            let row = db.query_row(
+                "SELECT status, COALESCE(assigned_to, ''), COALESCE(created_by, '')
+                 FROM task_queue WHERE id = ?1",
+                [&task_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            let (status, holder, poster) = match row {
+                Ok(r) => r,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(FreecoError::Internal(format!("Task not found: {task_id}")))
+                }
+                Err(e) => return Err(FreecoError::Memory(e.to_string())),
+            };
+            if status == "completed" {
+                return Err(FreecoError::InvalidInput(format!(
+                    "Task {task_id} is already completed"
+                )));
+            }
+            if let Some(by) = by.as_deref() {
+                if by != holder && by != poster {
+                    return Err(FreecoError::InvalidInput(format!(
+                        "Task {task_id} is not yours to complete: only the agent working on it \
+                         or the one that posted it can"
+                    )));
+                }
+            }
+            db.execute(
                 "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3 WHERE id = ?1",
                 rusqlite::params![task_id, result, now],
-            ).map_err(|e| FreecoError::Memory(e.to_string()))?;
-            if rows == 0 {
-                return Err(FreecoError::Internal(format!("Task not found: {task_id}")));
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+
+            // The waiting tasks this one held up that now have nothing left
+            // to wait for.
+            let pattern = format!("%\"{task_id}\"%");
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, COALESCE(blocked_by, '[]') FROM task_queue
+                     WHERE status = 'pending' AND blocked_by LIKE ?1",
+                )
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            let waiting: Vec<(String, String)> = stmt
+                .query_map([&pattern], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| FreecoError::Memory(e.to_string()))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            drop(stmt);
+            let mut ready = Vec::new();
+            for (id, deps) in waiting {
+                if open_blockers(&db, &deps)?.is_empty() {
+                    ready.push(id);
+                }
             }
-            Ok(())
+            Ok(ready)
         })
         .await
         .map_err(|e| FreecoError::Internal(e.to_string()))?
@@ -649,47 +814,359 @@ impl MemorySubstrate {
 
     /// List tasks, optionally filtered by status.
     pub async fn task_list(&self, status: Option<&str>) -> FreecoResult<Vec<serde_json::Value>> {
+        self.task_board(status, None).await
+    }
+
+    /// List tasks, optionally filtered by status and by team, newest first.
+    ///
+    /// Each task says what it waits on (`blocked_by`), whether it is still
+    /// waiting (`blocked`: pending with at least one of those not completed),
+    /// which board column it shows in (`column`, see [`crate::board`]) and
+    /// when it last changed (`updated_at`).
+    pub async fn task_board(
+        &self,
+        status: Option<&str>,
+        team_id: Option<&str>,
+    ) -> FreecoResult<Vec<serde_json::Value>> {
         let conn = Arc::clone(&self.conn);
         let status = status.map(|s| s.to_string());
+        let team_id = team_id.map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
-            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
-            let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match &status {
-                Some(s) => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue WHERE status = ?1 ORDER BY created_at DESC",
-                    vec![Box::new(s.clone())],
-                ),
-                None => (
-                    "SELECT id, title, description, status, assigned_to, created_by, created_at, completed_at, result FROM task_queue ORDER BY created_at DESC",
-                    vec![],
-                ),
-            };
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let mut sql = format!("SELECT {TASK_COLUMNS} FROM task_queue WHERE 1 = 1");
+            let mut params: Vec<String> = Vec::new();
+            if let Some(s) = &status {
+                params.push(s.clone());
+                sql.push_str(&format!(" AND status = ?{}", params.len()));
+            }
+            if let Some(t) = &team_id {
+                params.push(t.clone());
+                sql.push_str(&format!(" AND team_id = ?{}", params.len()));
+            }
+            sql.push_str(" ORDER BY created_at DESC");
 
-            let mut stmt = db.prepare(sql).map_err(|e| FreecoError::Memory(e.to_string()))?;
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-            let rows = stmt.query_map(params_refs.as_slice(), |row| {
-                Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "title": row.get::<_, String>(1).unwrap_or_default(),
-                    "description": row.get::<_, String>(2).unwrap_or_default(),
-                    "status": row.get::<_, String>(3)?,
-                    "assigned_to": row.get::<_, String>(4).unwrap_or_default(),
-                    "created_by": row.get::<_, String>(5).unwrap_or_default(),
-                    "created_at": row.get::<_, String>(6).unwrap_or_default(),
-                    "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
-                    "result": row.get::<_, Option<String>>(8).unwrap_or(None),
-                }))
-            }).map_err(|e| FreecoError::Memory(e.to_string()))?;
+            let mut stmt = db
+                .prepare(&sql)
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            let rows: Vec<(serde_json::Value, String)> = stmt
+                .query_map(rusqlite::params_from_iter(params.iter()), task_row)
+                .map_err(|e| FreecoError::Memory(e.to_string()))?
+                .collect::<Result<_, _>>()
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            drop(stmt);
 
-            let mut tasks = Vec::new();
-            for row in rows {
-                tasks.push(row.map_err(|e| FreecoError::Memory(e.to_string()))?);
+            let mut tasks = Vec::with_capacity(rows.len());
+            for (task, deps) in rows {
+                tasks.push(finish_task(&db, task, &deps)?);
             }
             Ok(tasks)
         })
         .await
         .map_err(|e| FreecoError::Internal(e.to_string()))?
     }
+
+    /// One task as the board shows it, or `None` when there is no such task.
+    pub async fn task_get(&self, task_id: &str) -> FreecoResult<Option<serde_json::Value>> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            task_get_locked(&db, &task_id)
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+
+    /// Move, reassign or edit a card; see [`crate::board::TaskChange`].
+    /// Returns the task as it is now, or `None` when there is no such task.
+    ///
+    /// Moving a card into `done` stamps `completed_at`; moving it out clears
+    /// it, so a reopened task does not claim to have been finished. Moving it
+    /// back to `todo` makes it claimable again by its assignee (or by anyone
+    /// on the team when it has none).
+    pub async fn task_update(
+        &self,
+        task_id: &str,
+        change: crate::board::TaskChange,
+    ) -> FreecoResult<Option<serde_json::Value>> {
+        let status = match change.status.as_deref() {
+            None => None,
+            Some(s) => Some(crate::board::board_status(s).ok_or_else(|| {
+                FreecoError::InvalidInput(format!(
+                    "\"{s}\" is not a board column: use todo, doing, review or done"
+                ))
+            })?),
+        };
+        let title = change.title.map(|t| t.trim().to_string());
+        if title.as_deref() == Some("") {
+            return Err(FreecoError::InvalidInput("A task needs a title.".into()));
+        }
+        let description = change.description;
+        let assigned = change.assigned_to.map(|a| a.trim().to_string());
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let now = chrono::Utc::now().to_rfc3339();
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let current: Option<String> = db
+                .query_row(
+                    "SELECT status FROM task_queue WHERE id = ?1",
+                    [&task_id],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(FreecoError::Memory(e.to_string())),
+                })?;
+            let Some(current) = current else {
+                return Ok(None);
+            };
+            // completed_at follows the status: set on entering done, cleared
+            // on leaving it, untouched otherwise.
+            let completed_at: Option<Option<String>> = match status {
+                Some("completed") if current != "completed" => Some(Some(now.clone())),
+                Some(s) if s != "completed" && current == "completed" => Some(None),
+                _ => None,
+            };
+            let set_completed = completed_at.is_some() as i64;
+            let completed_value = completed_at.flatten();
+            db.execute(
+                "UPDATE task_queue SET
+                    title = COALESCE(?2, title),
+                    description = COALESCE(?3, description),
+                    assigned_to = COALESCE(?4, assigned_to),
+                    status = COALESCE(?5, status),
+                    completed_at = CASE WHEN ?6 = 1 THEN ?7 ELSE completed_at END,
+                    updated_at = ?8
+                 WHERE id = ?1",
+                rusqlite::params![
+                    task_id,
+                    title,
+                    description,
+                    assigned,
+                    status,
+                    set_completed,
+                    completed_value,
+                    now,
+                ],
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            task_get_locked(&db, &task_id)
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+
+    /// Hand a task in for review: it moves to the `review` column with its
+    /// result, and waits there for someone to accept it (move it to done) or
+    /// send it back. Only the agent working on it or the one that posted it
+    /// may, the same rule as [`Self::task_complete_by`].
+    pub async fn task_hand_in(
+        &self,
+        task_id: &str,
+        result: &str,
+        by: Option<&str>,
+    ) -> FreecoResult<()> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+        let result = result.to_string();
+        let by = by.map(str::to_string);
+        tokio::task::spawn_blocking(move || {
+            let now = chrono::Utc::now().to_rfc3339();
+            let db = conn.lock().map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let row = db.query_row(
+                "SELECT status, COALESCE(assigned_to, ''), COALESCE(created_by, '')
+                 FROM task_queue WHERE id = ?1",
+                [&task_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            let (status, holder, poster) = match row {
+                Ok(r) => r,
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    return Err(FreecoError::InvalidInput(format!(
+                        "Task not found: {task_id}"
+                    )))
+                }
+                Err(e) => return Err(FreecoError::Memory(e.to_string())),
+            };
+            if status == "completed" {
+                return Err(FreecoError::InvalidInput(format!(
+                    "Task {task_id} is already completed"
+                )));
+            }
+            if let Some(by) = by.as_deref() {
+                if by != holder && by != poster {
+                    return Err(FreecoError::InvalidInput(format!(
+                        "Task {task_id} is not yours to hand in: only the agent working on it \
+                         or the one that posted it can"
+                    )));
+                }
+            }
+            db.execute(
+                "UPDATE task_queue SET status = 'review', result = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![task_id, result, now],
+            )
+            .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+
+    /// Delete a card. `false` when there was no such task.
+    ///
+    /// Refused while an unfinished task waits on it: a deleted prerequisite
+    /// counts as never done, so that task would wait forever with nothing on
+    /// the board to say why.
+    pub async fn task_delete(&self, task_id: &str) -> FreecoResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| FreecoError::Internal(e.to_string()))?;
+            let pattern = format!("%\"{task_id}\"%");
+            let waiting: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM task_queue
+                     WHERE status != 'completed' AND blocked_by LIKE ?1",
+                    [&pattern],
+                    |r| r.get(0),
+                )
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            if waiting > 0 {
+                return Err(FreecoError::InvalidInput(format!(
+                    "{waiting} unfinished task{} wait{} on this one: finish or change {} first",
+                    if waiting == 1 { "" } else { "s" },
+                    if waiting == 1 { "s" } else { "" },
+                    if waiting == 1 { "it" } else { "them" },
+                )));
+            }
+            let n = db
+                .execute("DELETE FROM task_queue WHERE id = ?1", [&task_id])
+                .map_err(|e| FreecoError::Memory(e.to_string()))?;
+            Ok(n > 0)
+        })
+        .await
+        .map_err(|e| FreecoError::Internal(e.to_string()))?
+    }
+}
+
+/// The columns [`task_row`] reads, in its order.
+const TASK_COLUMNS: &str = "id, title, description, status, assigned_to, created_by, created_at, \
+     completed_at, result, COALESCE(team_id, ''), COALESCE(blocked_by, '[]'), COALESCE(updated_at, '')";
+
+/// One `task_queue` row as board JSON, with its raw `blocked_by` list.
+fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(serde_json::Value, String)> {
+    Ok((
+        serde_json::json!({
+            "id": row.get::<_, String>(0)?,
+            "title": row.get::<_, String>(1).unwrap_or_default(),
+            "description": row.get::<_, String>(2).unwrap_or_default(),
+            "status": row.get::<_, String>(3)?,
+            "assigned_to": row.get::<_, String>(4).unwrap_or_default(),
+            "created_by": row.get::<_, String>(5).unwrap_or_default(),
+            "created_at": row.get::<_, String>(6).unwrap_or_default(),
+            "completed_at": row.get::<_, Option<String>>(7).unwrap_or(None),
+            "result": row.get::<_, Option<String>>(8).unwrap_or(None),
+            "team_id": row.get::<_, String>(9).unwrap_or_default(),
+            "updated_at": row.get::<_, String>(11).unwrap_or_default(),
+        }),
+        row.get::<_, String>(10).unwrap_or_else(|_| "[]".into()),
+    ))
+}
+
+/// Add what the board derives: `blocked_by`, `blocked`, `column`, and an
+/// `updated_at` for rows written before cards kept one.
+fn finish_task(
+    db: &Connection,
+    mut task: serde_json::Value,
+    deps: &str,
+) -> FreecoResult<serde_json::Value> {
+    let list: Vec<String> = serde_json::from_str(deps).unwrap_or_default();
+    let blocked = task["status"] == "pending" && !open_blockers(db, deps)?.is_empty();
+    let column = crate::board::board_column(task["status"].as_str().unwrap_or_default());
+    let updated = match task["updated_at"].as_str() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => task["completed_at"]
+            .as_str()
+            .or(task["created_at"].as_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if let Some(obj) = task.as_object_mut() {
+        obj.insert("blocked_by".into(), serde_json::json!(list));
+        obj.insert("blocked".into(), serde_json::json!(blocked));
+        obj.insert("column".into(), serde_json::json!(column));
+        obj.insert("updated_at".into(), serde_json::json!(updated));
+    }
+    Ok(task)
+}
+
+/// [`MemorySubstrate::task_get`] under a lock already held.
+fn task_get_locked(db: &Connection, task_id: &str) -> FreecoResult<Option<serde_json::Value>> {
+    let row = db.query_row(
+        &format!("SELECT {TASK_COLUMNS} FROM task_queue WHERE id = ?1"),
+        [task_id],
+        task_row,
+    );
+    match row {
+        Ok((task, deps)) => finish_task(db, task, &deps).map(Some),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(FreecoError::Memory(e.to_string())),
+    }
+}
+
+/// A pending task `task_claim` may hand out, as read from the board.
+struct ClaimCandidate {
+    id: String,
+    title: String,
+    description: String,
+    assigned: String,
+    created_by: String,
+    created_at: String,
+    team_id: String,
+    blocked_by: String,
+}
+
+/// The tasks in a `blocked_by` JSON list that are not completed yet.
+///
+/// A dependency that no longer exists counts as open: a deleted prerequisite
+/// is not the same as a finished one, and treating it as done would start
+/// work whose input never arrived.
+fn open_blockers(db: &Connection, deps_json: &str) -> FreecoResult<Vec<String>> {
+    let deps: Vec<String> = serde_json::from_str(deps_json).unwrap_or_default();
+    let mut open = Vec::new();
+    for dep in deps {
+        let status: Option<String> = db
+            .query_row("SELECT status FROM task_queue WHERE id = ?1", [&dep], |r| {
+                r.get(0)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(FreecoError::Memory(e.to_string())),
+            })?;
+        if status.as_deref() != Some("completed") {
+            open.push(dep);
+        }
+    }
+    Ok(open)
 }
 
 #[async_trait]
@@ -896,5 +1373,222 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let claimed = substrate.task_claim("nobody").await.unwrap();
         assert!(claimed.is_none());
+    }
+
+    /// The rules the Teams board shows: a task waits until what it is
+    /// blocked by is done, a team's task goes only to the team, and only the
+    /// holder or the poster closes it.
+    #[tokio::test]
+    async fn team_board_respects_blockers_membership_and_holder() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let team = substrate.org().create_team("Concierge", None).unwrap();
+        substrate
+            .org()
+            .add_team_member(&team.id, "booker", None)
+            .unwrap();
+
+        let research = substrate
+            .task_post_on_board("Find hotels", "", None, Some("lead"), Some(&team.id), &[])
+            .await
+            .unwrap();
+        let book = substrate
+            .task_post_on_board(
+                "Book the best one",
+                "",
+                None,
+                Some("lead"),
+                Some(&team.id),
+                std::slice::from_ref(&research),
+            )
+            .await
+            .unwrap();
+        assert!(substrate
+            .task_post_on_board("Bad", "", None, None, None, &["no-such-task".into()])
+            .await
+            .is_err());
+
+        let board = substrate.task_board(None, Some(&team.id)).await.unwrap();
+        assert_eq!(board.len(), 2);
+        let waiting = board.iter().find(|t| t["id"] == book.as_str()).unwrap();
+        assert_eq!(waiting["blocked"], true);
+        assert_eq!(waiting["blocked_by"], serde_json::json!([research]));
+
+        // Not on the team: nothing to claim.
+        assert!(substrate.task_claim("outsider").await.unwrap().is_none());
+        // On the team: the open task, never the blocked one.
+        let first = substrate.task_claim("booker").await.unwrap().unwrap();
+        assert_eq!(first["id"], research.as_str());
+        assert!(substrate.task_claim("booker").await.unwrap().is_none());
+
+        // Someone else cannot close it; the holder can, and that frees the next.
+        assert!(substrate
+            .task_complete_by(&research, "three found", Some("outsider"))
+            .await
+            .is_err());
+        let ready = substrate
+            .task_complete_by(&research, "three found", Some("booker"))
+            .await
+            .unwrap();
+        assert_eq!(ready, vec![book.clone()]);
+        assert!(substrate
+            .task_complete_by(&research, "again", Some("booker"))
+            .await
+            .is_err());
+        let next = substrate.task_claim("booker").await.unwrap().unwrap();
+        assert_eq!(next["id"], book.as_str());
+        assert_eq!(next["team_id"], team.id.as_str());
+    }
+
+    /// The kanban: a card moves todo -> doing -> review -> done and back,
+    /// can be reassigned to a person or an agent, and `done` is stamped only
+    /// while the card is in it.
+    #[tokio::test]
+    async fn a_board_card_moves_through_the_columns() {
+        use crate::board::TaskChange;
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let team = substrate.org().create_team("Web", None).unwrap();
+        let id = substrate
+            .task_post_on_board("Ship it", "", None, Some("user:uma"), Some(&team.id), &[])
+            .await
+            .unwrap();
+        let card = substrate.task_get(&id).await.unwrap().unwrap();
+        assert_eq!(card["column"], "todo");
+        assert_eq!(card["created_by"], "user:uma");
+        assert!(!card["updated_at"].as_str().unwrap().is_empty());
+
+        let moved = |status: &str| TaskChange {
+            status: Some(status.to_string()),
+            ..Default::default()
+        };
+        let doing = substrate
+            .task_update(&id, moved("doing"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doing["status"], "in_progress");
+        assert_eq!(doing["column"], "doing");
+        let review = substrate
+            .task_update(&id, moved("review"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(review["column"], "review");
+        let done = substrate
+            .task_update(&id, moved("done"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done["status"], "completed");
+        assert!(done["completed_at"].is_string());
+        let reopened = substrate
+            .task_update(&id, moved("todo"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened["status"], "pending");
+        assert!(reopened["completed_at"].is_null(), "reopened is not done");
+
+        assert!(substrate.task_update(&id, moved("archived")).await.is_err());
+        assert!(substrate
+            .task_update("missing", moved("todo"))
+            .await
+            .unwrap()
+            .is_none());
+
+        let assigned = substrate
+            .task_update(
+                &id,
+                TaskChange {
+                    assigned_to: Some("user:kim".into()),
+                    title: Some(" Ship it today ".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(assigned["assigned_to"], "user:kim");
+        assert_eq!(assigned["title"], "Ship it today");
+        assert_eq!(assigned["status"], "pending", "status is kept");
+        assert!(substrate
+            .task_update(
+                &id,
+                TaskChange {
+                    title: Some("  ".into()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err());
+        // A card assigned to a person is never claimed by an agent.
+        substrate
+            .org()
+            .add_team_member(&team.id, "bot", None)
+            .unwrap();
+        assert!(substrate.task_claim("bot").await.unwrap().is_none());
+    }
+
+    /// An agent hands work in for review; nothing claims it there, and the
+    /// lead accepts it by moving it to done.
+    #[tokio::test]
+    async fn handed_in_work_waits_in_review() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let team = substrate.org().create_team("Docs", None).unwrap();
+        substrate
+            .org()
+            .add_team_member(&team.id, "writer", None)
+            .unwrap();
+        let id = substrate
+            .task_post_on_board(
+                "Write the guide",
+                "",
+                None,
+                Some("lead"),
+                Some(&team.id),
+                &[],
+            )
+            .await
+            .unwrap();
+        substrate.task_claim("writer").await.unwrap().unwrap();
+        assert!(substrate
+            .task_hand_in(&id, "draft", Some("someone-else"))
+            .await
+            .is_err());
+        substrate
+            .task_hand_in(&id, "draft", Some("writer"))
+            .await
+            .unwrap();
+        let card = substrate.task_get(&id).await.unwrap().unwrap();
+        assert_eq!(card["column"], "review");
+        assert_eq!(card["result"], "draft");
+        assert!(substrate.task_claim("writer").await.unwrap().is_none());
+        substrate
+            .task_complete_by(&id, "accepted", Some("lead"))
+            .await
+            .unwrap();
+        assert_eq!(
+            substrate.task_get(&id).await.unwrap().unwrap()["column"],
+            "done"
+        );
+        assert!(substrate.task_hand_in(&id, "again", None).await.is_err());
+    }
+
+    /// A card another unfinished card waits on cannot be deleted.
+    #[tokio::test]
+    async fn a_card_others_wait_on_is_not_deleted() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let first = substrate
+            .task_post_on_board("First", "", None, None, None, &[])
+            .await
+            .unwrap();
+        let second = substrate
+            .task_post_on_board("Second", "", None, None, None, std::slice::from_ref(&first))
+            .await
+            .unwrap();
+        assert!(substrate.task_delete(&first).await.is_err());
+        assert!(substrate.task_delete(&second).await.unwrap());
+        assert!(substrate.task_delete(&first).await.unwrap());
+        assert!(!substrate.task_delete(&first).await.unwrap());
+        assert!(substrate.task_get(&first).await.unwrap().is_none());
     }
 }

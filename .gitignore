@@ -56,3 +56,7 @@ dist/
 
 # Windows reserved device name; a stray redirect creates it and git cannot index it
 NUL
+
+# Founder skill output (business plans, buyer panel answers)
+/founder/
+graphify-out/

@@ -7,7 +7,7 @@ use rusqlite::Connection;
 /// Current schema version.
 // Must be bumped whenever a migration is added, or the new migration
 // never runs on an existing database.
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 16;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -74,6 +74,14 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 14 {
         migrate_v14(conn)?;
+    }
+
+    if current_version < 15 {
+        migrate_v15(conn)?;
+    }
+
+    if current_version < 16 {
+        migrate_v16(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -873,6 +881,91 @@ fn migrate_v14(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 15: team task boards.
+///
+/// A task can sit on one team's board, and can wait on other tasks: it is
+/// not offered to anyone until every task it is blocked by is completed.
+/// Both columns default to "no team" and "waits on nothing", so every task
+/// written before this keeps behaving as it did.
+fn migrate_v15(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (name, typedef) in [
+        ("team_id", "TEXT DEFAULT ''"),
+        ("blocked_by", "TEXT DEFAULT '[]'"),
+    ] {
+        if !column_exists(conn, "task_queue", name) {
+            conn.execute(
+                &format!("ALTER TABLE task_queue ADD COLUMN {name} {typedef}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_task_team_status ON task_queue(team_id, status);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (15, datetime('now'), 'Team task boards: team_id and blocked_by on task_queue')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 16: companies own teams, people sit on teams, and a board card
+/// remembers when it last changed.
+///
+/// - `teams.company_id`: a team can belong to a company directly. A team
+///   inside a project still belongs to that project's company; the direct
+///   column is for a team that has no project, which before this belonged to
+///   no company at all.
+/// - `team_people`: signed-in people (`[[users]]` accounts) on a team, with a
+///   team role of `lead`, `member` or `viewer`. Kept apart from
+///   `team_members`, which holds agents: an agent on a team is handed work by
+///   team runs and claims tasks, a person is not, and mixing the two in one
+///   table would put people into every agent query.
+/// - `task_queue.updated_at`: set whenever a card is moved, reassigned or
+///   edited, so the board can say when anything last happened to it.
+///
+/// Every step is guarded, so re-running it is harmless.
+fn migrate_v16(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (table, column, ddl) in [
+        (
+            "teams",
+            "company_id",
+            "ALTER TABLE teams ADD COLUMN company_id TEXT",
+        ),
+        (
+            "task_queue",
+            "updated_at",
+            "ALTER TABLE task_queue ADD COLUMN updated_at TEXT DEFAULT ''",
+        ),
+    ] {
+        if !column_exists(conn, table, column) {
+            conn.execute(ddl, [])?;
+        }
+    }
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS team_people (
+            team_id    TEXT NOT NULL,
+            username   TEXT NOT NULL,
+            role       TEXT NOT NULL DEFAULT 'member',
+            created_at TEXT NOT NULL,
+            tenant_id  TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+            PRIMARY KEY (team_id, username),
+            FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_team_people_user ON team_people(username);
+        CREATE INDEX IF NOT EXISTS idx_teams_company ON teams(company_id);
+        ",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (16, datetime('now'), 'Teams in companies, people on teams, board card updated_at')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// The tenant every pre-existing row belongs to.
 ///
 /// A local install has exactly one, and it keeps the same id across upgrades
@@ -912,6 +1005,19 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION, "version must reach the latest");
+    }
+
+    /// v16 adds what team boards with people need, and an install that was
+    /// already at v15 gets it too.
+    #[test]
+    fn v16_adds_team_company_people_and_card_timestamps() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 15).unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "teams", "company_id"));
+        assert!(column_exists(&conn, "task_queue", "updated_at"));
+        assert!(column_exists(&conn, "team_people", "role"));
     }
 
     /// Running migrations twice must not fail. Without this, the fix above

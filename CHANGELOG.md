@@ -7,6 +7,462 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-21
+
+### Added
+
+- Agents can be put to sleep. `agent_sleep` stops an agent's background loop
+  and scheduled work, so it uses no tokens, until a message or
+  `agent_activate` wakes it; the flag survives a restart. Any agent allowed
+  `agent_activate` may use it, and the CEO role brings it.
+- `agent_delegate` without an `agent` hands the task to a worker copy of the
+  caller -- same model, tools and workspace, its own private state -- at most
+  four per agent, reused when idle and put to sleep when done. With every
+  worker busy the task runs in a fresh conversation of the caller, as before.
+  A worker never runs its parent's schedule: a CEO worker used to repeat the
+  CEO's two-minute heartbeat around the clock.
+- Team leads are appointed from the Projects page (`PUT
+  /api/org/teams/{id}/members`): making one member lead makes the previous
+  lead a member. `supervisor` is accepted as another word for lead. Members
+  can be taken off from the same card.
+- An organisation change log. Companies, projects and teams created, members
+  set or taken off, hires made or held -- by the owner or by agents -- are
+  listed under Recent changes on the Projects page (`GET /api/org/changes`,
+  last 300), and the CEO sees the latest in `org_overview`.
+- Hires pass a security review. An agent's hire that runs shell commands,
+  uses host tools, may hire again or carries injection wording in its
+  instructions is held for the owner, and the agent is told why. A hire the
+  owner makes is reviewed too: the findings come back in the response
+  (`security_review`) and in the change log.
+- Outside content is checked for prompt injection. Web pages, files, search
+  results, browser and MCP tool results, and messages from chat channels
+  (Telegram and the rest, and the WhatsApp gateway) that read like an
+  injection reach the agent with a security note in front. Nothing is
+  blocked.
+- Run History lists every unattended run: scheduled jobs, trigger fires and
+  background ticks, with status, error, duration and tokens (`GET
+  /api/runs/history`, last 500). It used to show one line per job at most,
+  nothing for background loops and never a failure.
+- Claude Code models by version and effort: `claude-code/<model>@<effort>`
+  (Opus 5.5, Fable 5.1, Sonnet 5.5 at low to max, and Haiku 4.5) becomes
+  `--model <model> --effort <effort>`.
+- WhatsApp voice notes, images and documents reach the agent. A voice note
+  arrives as its transcript; images and documents are attached. What cannot
+  be passed on (too big, unsupported) is named to the agent rather than
+  replaced with a placeholder.
+- Running the daemon as a Podman container: `deploy/daemon/` (image,
+  `run.sh`, a Windows starter and a migration script) and
+  `docs/operations/podman-runbook.md`. Agent paths under an old FreEco home
+  (Windows to container) are re-rooted into the new home at start.
+
+### Security
+
+- An agent could bypass `web_fetch`'s SSRF protection with `browser_run_js`:
+  the expression was passed to the page untouched, so `fetch()` with an
+  `Authorization` header could reach internal or metadata addresses.
+  Expressions are now screened for network APIs (`fetch`, `XMLHttpRequest`,
+  `WebSocket`, `EventSource`, `sendBeacon`, `import()`, `new Request`/`Image`,
+  workers), dynamic code, escapes and global-object obfuscation, and refused
+  with an error pointing to `web_fetch`; every page request is additionally
+  paused over CDP and failed if it targets a private, loopback, link-local or
+  metadata address (same `check_ssrf`). `browser_run_js` now requires human
+  approval by default, next to `shell_exec`.
+- Secrets no longer reach stored replies, channels, the dashboard or
+  agent-written files. Known secret values (vault entries, provider keys and
+  channel tokens from env/`.env`, MCP header credentials) and well-known key
+  patterns are replaced with `[REDACTED:<name|kind>]` in assistant text and
+  tool results, and `file_write` / `apply_patch` refuse content containing
+  one, telling the agent to read it from env or the vault at runtime.
+
+### Added
+
+- A read-only `system_info` agent tool, available to every agent: version,
+  commit SHA, branch, UTC build time, rustc version, OS/architecture and
+  process uptime. A build script now stamps the build identity into the
+  binary (from `FREECO_GIT_SHA` / `FREECO_GIT_BRANCH` / `FREECO_BUILD_DATE`
+  or `git`), and `/api/version` reports the same values instead of the
+  permanent `"dev"` / `"unknown"`. The Dockerfile accepts them as build args
+  and the release workflow passes them.
+
+### Fixed
+
+- A request that never reached the model provider (no connection, DNS gone)
+  is tried once more on the same model before anything else, and "error
+  sending request" and "dns error" count as timeouts, so they fall back to
+  another model when one is configured.
+- The hourly token quota message says how much of the limit was used, when
+  it resets and where to change it, rather than pointing at `/compact`.
+- Claude Code: "Not logged in", which the CLI reports as JSON on stdout, is
+  shown with how to sign in in its container; a CLI that cannot start never
+  advises installing it on the host. The CLI's container connects over IPv4
+  first, which fixes "api.anthropic.com timed out" over a VPN.
+- The WhatsApp gateway keeps itself running: up to ten restarts with backoff
+  (a run of ten minutes or more starts the count again), an alert to the
+  owner and the CEO after three crashes in a row and when it gives up. An
+  interrupted `npm install` no longer leaves it crashing on every start. One
+  socket at a time, an immediate reconnect after pairing, replies to the
+  chat's own id (privacy ids included), and messages addressed by the agent's
+  id rather than its name. Baileys is pinned to 6.7.24; Node 20 or later.
+- `[channels.whatsapp] allowed_users` in config.toml is the gateway's one
+  allowlist, passed to it as `WHATSAPP_ALLOWED_NUMBERS` and
+  `WHATSAPP_ALLOWED_GROUPS` (entries ending `@g.us` are groups).
+- Service backups keep three runs and at most 12 GB; the newest run always
+  stays. A failed volume export no longer leaves a truncated archive that
+  counted as a backup.
+- WhatsApp settings in the dashboard show the gateway's state (connected,
+  QR scan needed, restarting, stopped after repeated crashes, Node.js
+  missing) and the allowed numbers and groups, which can be edited there
+  (`GET /api/channels/whatsapp/status`). `[channels.whatsapp] owner_number`
+  is the owner's own number, always allowed.
+- **Chamber**: one window with every communication channel — agent chats and
+  each person's conversation on WhatsApp, Telegram, email and every other
+  channel FreEco has. `GET /api/chamber/conversations` lists them (filters
+  for channel, agent and unread), `.../{id}/messages` opens one,
+  `.../{id}/reply` writes in it (a channel reply goes through the existing
+  channel send path), and `/api/chamber/stream` streams changes per caller.
+  The dashboard has a Chamber page with channel icons, filters and a thread
+  view, in the day/night design.
+- **One access policy for all of it**, `crates/freeco-api/src/access.rs`:
+  owners and admins see everything; other accounts see what `[[users]]`
+  grants them — the new optional `agents = [...]` and `channels = [...]`
+  (`"*"` for all); a kid sees only granted agents and no external channels;
+  a viewer reads granted items but cannot write. A signed-in caller never
+  sees another tenant's conversations, and a channel conversation with an
+  owner- or admin-bound peer stays with admins. Anything hidden answers 404.
+  The proposed defaults and the open questions are in `docs/chamber-access.md`.
+- Read marks per account: opening a conversation in the Chamber clears its
+  unread count, kept in `<data_dir>/chamber_read.json`.
+
+### Fixed
+
+- **The WebSocket chat had no role check**: a viewer could chat over the
+  socket although HTTP refused them. The upgrade now resolves the caller's
+  role like the HTTP middleware, an agent the caller may not see answers 404,
+  sending needs at least a kid and a granted agent, switching the model needs
+  an admin, a named conversation must be one the caller may write in, and the
+  agent list pushed over the socket shows only the caller's agents.
+
+
+- Spending limits hold in the chat. The agent's cost quota was checked only
+  on the non-streaming path, which background ticks use; the dashboard chat,
+  the popup and the OpenAI-compatible API stream, so they kept calling the
+  provider after an agent's quota was used up. The global `[budget]` cap was
+  checked on the non-streaming path only. Both paths now refuse the call once
+  either limit is reached.
+- A saved key can no longer add lines to `secrets.env`. A value containing a
+  line break was written as is, and `secrets.env` is loaded into the
+  environment at start, so one key could define other variables (such as
+  `LD_PRELOAD`) that every child process inherits. Every writer -- the
+  provider-key and channel endpoints, the agents' key tool and the vault --
+  now refuses line breaks and NUL in values and anything but letters, digits
+  and `_` in names; the API answers 400.
+- Windows ARM64 and macOS Intel builds work again. `rust-toolchain.toml`
+  pins the compiler, but the release workflow added each target to the
+  stable toolchain, so in v0.9.8 the installer and CLI for both failed with
+  "can't find crate for `core`".
+- An MCP server reached over HTTP can no longer crash the daemon by sending
+  an endless response. rmcp before 3.9 read the whole body into memory, even
+  during the first handshake (RUSTSEC-2026-0462); rmcp 3.9 caps it.
+- The bundled SQLite is 3.54.1 (rusqlite 0.41). Older versions could return
+  stale memory when opening a database with a `-wal` file someone else wrote
+  (RUSTSEC-2026-0459).
+- Conversations no longer disappear. `/new` -- in the chat, over the
+  WebSocket, or typed on Telegram or WhatsApp -- deleted the conversation the
+  dashboard was showing; it now starts a new one and keeps the old one under
+  History. Only an explicit delete removes a conversation.
+- A hand's agent keeps its conversation across restarts. Every boot
+  reactivated the hand, which deleted all of its agent's conversations and
+  gave it a fresh empty one.
+- Switching conversation is saved at once. It was saved only at a clean
+  shutdown, so after a crash the agent came back on the conversation it had
+  before.
+- The assistant popup reopens the conversation it was in after a reload, and
+  "new chat" and "open from History" switch the conversation on the server,
+  not only on screen: messages went to whichever conversation the CEO was in,
+  and a new task's title renamed that one.
+- The popup always talks to the same CEO. Two bundled agents carry the `ceo`
+  tag and the first one found won, so the popup could change agents, and
+  histories, between restarts. The bundled `freeco-ceo` wins, then the oldest.
+- An agent sees the whole conversation. History sent to the model was capped
+  at 20 raw messages, and one answer with nine tool calls is eighteen, so the
+  request it answered fell out of view. There is no cap by default; an agent
+  that sets `max_history_messages` now gets that many turns, never half a
+  turn.
+- Compaction waits until the conversation nears 80% of the model's own
+  context window, and keeps the last four requests whole. It fired at 30
+  messages and kept the last ten. The stored conversation stays complete; the
+  model is sent the summary plus what follows it.
+- An idle WebSocket closed after 30 minutes no longer shows as an error; the
+  dashboard reconnects quietly.
+- Pasting a key into the vault dialog's name box says the box is for the name
+  only, instead of quoting the naming rule.
+- WhatsApp talks to allowed chats only, both ways and in both layers. The
+  gateway drops a message from a chat off the list before reading,
+  downloading or forwarding it (it never sends read receipts), and the daemon
+  refuses it again on receipt (403). An agent's `channel_send`, a cron
+  delivery or a reply to a chat off the list is refused with an error naming
+  the chat, by the daemon and by the gateway. Numbers match however they are
+  written (`+41 79 123 45 67`, `0041…`, `…@s.whatsapp.net`); a national number
+  with one leading zero is rejected rather than guessed.
+- WhatsApp set up from the dashboard works without a daemon restart: saving
+  it starts the gateway, and an edited allowlist restarts it with the new
+  list. In QR mode `channel_send` no longer fails with "Channel 'whatsapp' not
+  found" when the gateway took longer to install than the channels took to
+  start. A daemon listening on `0.0.0.0` is reached by its gateway on
+  `127.0.0.1`.
+
+### Changed
+
+- The WhatsApp allowlist is `[channels.whatsapp] allowed_users` (numbers and
+  `…@g.us` groups) plus `owner_number`, and nothing else: the daemon passes it
+  to the gateway as `WHATSAPP_ALLOWED_NUMBERS` / `WHATSAPP_ALLOWED_GROUPS`
+  and ignores those variables in its own environment. An empty list now
+  answers nobody but `owner_number`, and nobody at all without one; it used
+  to answer every direct chat. `*` is no longer a wildcard for groups. List
+  each chat you want answered.
+- Release images go to their own private package,
+  `ghcr.io/freecodao/freeco-ai-os`. The `freeco-ai` package is public, and the
+  release refused to push into it, so v0.9.8 shipped no image. Nothing built
+  from this repository lands in a public image.
+
+### Added
+
+- Messages and uploads up to 16 MB (were 64 KB and 10 MB). A message over
+  32 KB is saved in the agent's workspace as `pasted/…md`; the model gets its
+  start, its end and the file's name, and reads the rest with its file tools.
+- `POST /api/transcribe`: the words in a piece of audio, nothing stored.
+  Dictation in the chat and the popup types into the box while you speak and
+  no longer attaches the recording to the message.
+- `POST /api/dispatch`: the popup asks the CEO's own model which of the CEO's
+  conversations a new message belongs in -- this one, an existing one, a new
+  one, or a new project, company, team or hand (asked first). Every message
+  runs on its own connection, side by side. Contacts' channel conversations
+  are never offered.
+- The WebSocket accepts `new_session` and `title` to start a named
+  conversation and send there; a `session` frame reports its id.
+- Unsent drafts are kept per chat and in the popup, across chat switches and
+  reloads.
+- Pages an agent builds open as pages (an "Open" button in the chat's files
+  and artifacts), sandboxed: scripts run, but on an opaque origin and with
+  only `https:` connections.
+- Agents are told to link workspace files they hand you, to answer every
+  question in a message, and to use the conversation above.
+
+- A Starnet page in the dashboard: your teams at work as a pixel-art
+  station. Each team is a room and each agent has a desk; an agent sits and
+  blinks when idle, bobs while thinking, gestures while running a tool, and
+  shows a red "!" when it waits for your yes or an error after a failure. A
+  speech bubble carries its current task. Click an agent to open its chat.
+  It follows the day and night themes and fetches everything from the
+  daemon: one new read-only endpoint, `GET /api/starnet/state`, and 40
+  sprites from StarNet (MIT, about 72 KB) compiled into the binary. The
+  renderer is FreEco's own; no StarNet code is included.
+- Speech can be kept on this machine: `[media] local_only`. With it on,
+  dictation and spoken replies use only the local endpoint (`audio_base_url`,
+  `tts_openai_base_url`, or Parakeet MLX). Groq, OpenAI and ElevenLabs are
+  never picked from their keys and never used as a fallback. If the local
+  service is down, you get an error naming its URL and what failed, and the
+  daemon logs it as an error. When the setting is absent, it is on if the
+  configured speech URLs are all local, for example Speaches at
+  `http://127.0.0.1:8010`. Set it to `false` to allow cloud speech.
+- Agents can read the books. A new read-only `accounting_api` tool reads
+  transactions, invoices, accounts, contacts and reports from the local
+  Akaunting. It sends GET only and cannot record, edit, e-mail or pay. Connect
+  it under Services -> Akaunting with the login from Akaunting's first-run
+  wizard. The login goes to the vault, not into a chat. The accounting hand
+  uses the tool. Before this, its prompt referred to "accounting tools" that
+  did not exist.
+- The Speaches and voice hands now explain how to point dograh's transcriber
+  and voice at the local Speaches. dograh keeps those settings in its own
+  database, and its defaults are cloud providers.
+- Container commands now have enforced limits. `[exec_policy.containers]`
+  (`name_prefixes`, `images`, `allow_host_network`), in an agent's manifest
+  or a HAND.toml, makes the kernel parse every `podman`/`docker` command from
+  `shell_exec` and `process_start` and refuse container names outside the
+  prefix, images outside the allowlist, `--privileged`, `--cap-add`,
+  `--device`, host-path mounts, host network/PID/IPC namespaces, ports
+  published on every interface, and subcommands it cannot check. FreEco's own
+  container stays readable but cannot be stopped, removed or committed. The
+  bundled `containers` agent uses it.
+- Hands declare their shell policy. HAND.toml takes the same `[exec_policy]`
+  as agent.toml and `activate_hand` uses it, instead of granting every hand
+  that lists `shell_exec` unrestricted shell. A shell hand without a policy
+  gets shell denied; every bundled hand declares what it needs.
+- `capabilities.shell` is enforced for the builtin tools, not only in the WASM
+  sandbox: the command must match one of the globs before an approval is
+  requested. An empty list leaves `exec_policy` to decide, as before.
+- The dashboard Approvals page shows content held by the Security Agent
+  (`GET /api/security/pending`, with the manifest's name and capabilities)
+  and approves it with `POST /api/security/approve/{content_hash}`. Until now
+  that route had no caller, so a held manifest could not be approved by
+  clicking.
+- MCP servers reconnect on their own. Every configured server has a health
+  entry, and a failed one is retried after 5 s, 15 s, 60 s and then every
+  5 minutes until it connects or its config is removed, so a daemon that
+  started before its gateway no longer needs a manual reload.
+- `hand_status` also probes the service's `health_path` over loopback HTTP
+  and reports its status code, latency and error, next to the container state.
+
+### Added
+
+- Teams and companies. A company owns teams, directly or through a project:
+  companies can be read, renamed, archived and deleted, and teams can be
+  created into one and moved between them. People -- the signed-in `[[users]]`
+  accounts -- join a team next to its agents, with a team role of lead, member
+  or viewer. Owners and admins manage every team; a lead manages their team, a
+  member works on its board, a viewer reads it, and someone on no team sees no
+  team. The dashboard Teams page has a company switcher, a members tab and a
+  four-column board (to do, doing, review, done) where cards are dragged or
+  moved, assigned to an agent or a person on the team, and deleted. Agents
+  read their own team's board with `task_list { team }` and hand work in for
+  review with `task_complete { review: true }`.
+
+### Added
+
+- Skills install straight from GitHub. The Skills page has a GitHub tab:
+  paste `owner/repo/skills` or a link, preview, tick the skills, install.
+  Every install is pinned to the commit that was previewed, and every skill
+  folder is scanned first (prompt injection, scripts that download and run
+  code, hidden Unicode, compiled binaries); a Critical finding blocks it.
+  Installed skills show their repo and commit on the Installed tab.
+- Two agent tools for the same thing: `skill_github_preview`, which only
+  reads, and `skill_install_github`, which always asks you first, even for
+  hand agents and even with approvals turned off. An agent working for
+  another agent cannot use it.
+
+### Fixed
+
+- A tool that needs your approval no longer fails when you take longer than
+  the tool time limit (two minutes by default) to answer. The approval is
+  asked for first and the time limit starts once you approve.
+
+### Added
+
+- The CEO can run the installation. Whichever agent holds the CEO role (the
+  one the dashboard opens as the main chat) now gets the tools for it, whatever
+  its manifest lists: containers, agents, skills, models and providers. The
+  owner can still take any of them away with the agent's tool blocklist. Only
+  the owner gives the role: an agent spawning a child with the `ceo` tag is
+  refused.
+- Containers can be managed without a shell. `container_list` shows every
+  container on the machine, whatever started it; `container_logs` reads why
+  one fails; `container_start`, `container_stop` and `container_restart` act
+  on one and report the state it reaches. Agents could not do this before:
+  `podman` is refused by the shell policy and the sandbox has no podman.
+  FreEco's own container (`freeco-daemon`, plus any named in
+  `FREECO_PROTECTED_CONTAINERS`) cannot be stopped or restarted from a chat.
+- `agent_skills_set` switches skills on or off for any agent, through the same
+  path as the dashboard. `skill_reload` picks up skill folders added on disk.
+- `agent_describe` shows an agent's model, the tools it really has and its
+  skills, so the CEO can check its own abilities. `model_list` shows which
+  models agents can be switched to, with price and context size.
+- Agents holding these tools get a short "Running FreEco" section in their
+  prompt that says how to use them.
+
+### Changed
+
+- The shipped `freeco-ceo` template is now a model-backed agent with a job
+  description and the management tools. It was a keyword matcher that never
+  called a model, so it could not use a tool. Agents already created from the
+  old template keep it until recreated.
+
+### Added
+
+- Agents work in parallel. Each conversation has its own queue, so one agent
+  can answer a WhatsApp guest, a dashboard chat and a delegated task at the
+  same time, and different agents never wait for each other.
+- `agent_delegate`: a lead agent hands several tasks to several agents at once
+  (or to fresh conversations of itself) and gets every result back together.
+  Each task runs in a conversation of its own, filed under the lead's project,
+  where the user can open and follow it. Any agent allowed `agent_send` may use
+  it.
+- Projects you can work in. A project's brief is read by every agent working
+  in one of its conversations; the Projects page edits the brief, starts a
+  conversation with any agent inside the project, shows which conversations are
+  working right now, and opens each one.
+- Teams you can run. Give a team a goal on the Projects page: its lead gets it
+  in a conversation of its own, hands parts to the other members, who work at
+  the same time, and combines what comes back. Every member's prompt names the
+  team, who leads it and who else is on it. Members are added on the same page,
+  with a role; the member whose role says lead leads, otherwise the first to
+  join.
+- The Teams page. Every team is a room with its members' seats: a seat is lit
+  only while a run is working for that agent, and a line between two seats is a
+  hand-off the kernel recorded, drawn moving only while it runs. Below it, the
+  selected team's board in four columns: ready, waiting on other tasks, in
+  progress and done. Tasks and members are added there, and a team is given a
+  goal. `GET /api/teams/floor`, `GET`/`POST /api/org/teams/{id}/tasks` and
+  `DELETE /api/org/teams/{id}/members/{agent_id}` serve it.
+- Team task boards. `task_post` takes a `team` and `blocked_by`: a team's task
+  can be claimed only by the team's members, and a task waiting on others is
+  not offered to anyone until they are all completed. Completing a task says
+  which waiting tasks it made ready.
+- `POST /api/agents/{id}/sessions` takes `"switch": false` to open a
+  conversation without moving the agent's chat to it.
+
+### Changed
+
+- The WhatsApp gateway answers only where it is meant to: listed groups and
+  listed numbers (`[channels.whatsapp] allowed_users`, see above). Each
+  contact and each group has a conversation of its own, and the agent is told
+  who is writing.
+
+### Security
+
+- A message from another agent is marked as such in the recipient's chat, with
+  the note that it cannot approve anything on the user's behalf. It used to
+  arrive looking exactly like the user typing.
+- `web_fetch` runs its address check on every redirect, not only the first URL,
+  so a public page can no longer redirect an agent to the cloud metadata
+  endpoint or the local network. The fallback fetch used without the web tools
+  had no check at all; it has the same one now.
+
+### Fixed
+
+- Only the agent working on a task, or the one that posted it, can mark it
+  completed, and a completed task cannot be completed again.
+- A task assigned by name can be claimed by that agent. It was stored as the
+  name and matched against the id, so it waited forever.
+
+- Messages no longer vanish when two things talk to one agent at once. The
+  streaming path (dashboard chat and popup) took no lock, so a reply running
+  while a channel message or a second window arrived saved over the other's
+  messages. The agent's shared history had the same race.
+- Switching chats no longer stalls or drops messages. The dashboard had one
+  "sending" flag and one queue for every chat, so a reply running in one chat
+  queued every message typed into any other behind it, and leaving a chat
+  mid-reply could strand its queue for good. Each chat now keeps its own; what
+  was queued is still delivered after switching away, and a chat opened while
+  its agent is still working says so and shows the reply when it lands.
+- A reply can no longer be drawn into the wrong chat. Frames from the socket of
+  the chat just left were still rendered into the next one.
+- A message lands in the conversation it was typed in, even after another
+  window switched the agent to a different conversation.
+- A message waiting behind a reply goes to the new conversation when the old
+  one is reset meanwhile, instead of bringing the reset one back. A streamed
+  message in that spot is refused with a note to send it again.
+- An agent asked a question by an agent it is itself waiting on is told so,
+  instead of both waiting for each other forever.
+- Long chats no longer forget their start. The model is sent only the newest
+  messages of a conversation (20 by default, tool calls included), and what
+  dropped out was simply gone: the only summary meant to cover it was shared by
+  all of an agent's chats, cut to 500 characters, and the first thing the trim
+  removed. What drops out is now carried in the prompt instead: everything the
+  user said, word for word, and the agent's own replies in short with the tools
+  they used. It needs no extra model call.
+- A failed or stopped reply no longer takes the user's message with it. The
+  conversation was saved only once a reply finished, so a provider error, a
+  blocked request or a pressed Stop erased the message, and any tool results of
+  that turn. The message is now saved before the model is called, and what a
+  failed run did is kept.
+- Long chats no longer make a summarising call before every reply. Once a chat
+  passed 30 messages, every message waited on one, for a summary of the agent's
+  current chat rather than the one being answered.
+- `project_create` stored the description as the company id.
+- Opening an agent's chat from a link (a project's Open button, the assistant's
+  "open the chat" links) while another chat was open landed on the agent list
+  instead of the chat.
+
 ## [0.9.8] - 2026-10-28
 
 ### Fixed

@@ -175,8 +175,9 @@ system_prompt = """You are Lead Hand — an autonomous lead generation engine th
 
 Before running any command, detect the operating system:
 ```
-python -c "import platform; print(platform.system())"
+uname -s
 ```
+If `uname` is not found, you are on Windows.
 Then set your approach:
 - **Windows**: paths use forward slashes in Python, `del` for cleanup
 - **macOS / Linux**: standard Unix paths, `rm` for cleanup
@@ -333,3 +334,11 @@ format = "text"
 label = "Unique Companies"
 memory_key = "lead_hand_unique_companies"
 format = "number"
+
+# Shell policy for this hand's agent. A hand that lists shell_exec without
+# [exec_policy] gets shell denied. This hand only uses the shell to detect
+# the operating system, so it gets the read-only safe_bins plus `uname`.
+[exec_policy]
+mode = "allowlist"
+allowed_commands = ["uname"]
+timeout_secs = 60

@@ -1,0 +1,14 @@
+# Keep build output and history out of image build contexts. Without this a
+# build uploaded the whole target/ tree (gigabytes) before compiling anything.
+target/
+.git/
+**/node_modules/
+*.log
+# Secrets never enter a build context, so no image layer can hold one. The
+# daemon reads them at run time from its data directory, which is mounted
+# (deploy/daemon/run.sh) and never copied into the image.
+**/.env
+**/*.env
+**/.keyring
+**/vault.enc
+**/auth_store/

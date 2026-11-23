@@ -7,7 +7,34 @@ icon = "\U0001F500"
 tools = [
     "web_fetch",
     "memory_store", "memory_recall",
+    "agent_send",
+    # OmniRoute's own MCP tools. They exist only once an `omniroute` entry is in
+    # [[mcp_servers]] in config.toml (see docs/configuration.md); until then the
+    # agent simply does not get them. Read-only:
+    "mcp_omniroute_omniroute_get_health",
+    "mcp_omniroute_omniroute_list_combos",
+    "mcp_omniroute_omniroute_get_combo_metrics",
+    "mcp_omniroute_omniroute_check_quota",
+    "mcp_omniroute_omniroute_cost_report",
+    "mcp_omniroute_omniroute_list_models_catalog",
+    "mcp_omniroute_omniroute_simulate_route",
+    "mcp_omniroute_omniroute_get_provider_metrics",
+    "mcp_omniroute_omniroute_best_combo_for_task",
+    "mcp_omniroute_omniroute_explain_route",
+    "mcp_omniroute_omniroute_get_session_snapshot",
+    "mcp_omniroute_omniroute_cache_stats",
+    "mcp_omniroute_omniroute_db_health_check",
+    # Change routing (combos, strategy, budget guard, cache). None of these
+    # touch provider keys or connections.
+    "mcp_omniroute_omniroute_switch_combo",
+    "mcp_omniroute_omniroute_create_combo",
+    "mcp_omniroute_omniroute_set_routing_strategy",
+    "mcp_omniroute_omniroute_set_resilience_profile",
+    "mcp_omniroute_omniroute_test_combo",
+    "mcp_omniroute_omniroute_set_budget_guard",
+    "mcp_omniroute_omniroute_cache_flush",
 ]
+mcp_servers = ["omniroute"]
 
 [container]
 image = "docker.io/diegosouzapw/omniroute:latest"
@@ -36,6 +63,12 @@ API_KEY_SECRET = "secret:OMNIROUTE_API_KEY_SECRET"
 STORAGE_ENCRYPTION_KEY = "secret:OMNIROUTE_STORAGE_KEY"
 STORAGE_ENCRYPTION_KEY_VERSION = "v1"
 PORT = "20128"
+# Loopback only. The image's launcher sets HOSTNAME from OMNIROUTE_HOSTNAME and
+# falls back to 0.0.0.0, so setting HOSTNAME has no effect. With host networking
+# and REQUIRE_API_KEY off, 0.0.0.0 lets anyone on the network spend the owner's
+# model credits through /v1. The daemon's health check, Windows' localhost
+# forwarding and the sandboxes' pasta -T forwards all reach 127.0.0.1.
+OMNIROUTE_HOSTNAME = "127.0.0.1"
 NODE_ENV = "production"
 AUTH_COOKIE_SECURE = "false"
 REQUIRE_API_KEY = "false"
@@ -53,11 +86,34 @@ max_tokens = 4096
 temperature = 0.3
 max_iterations = 20
 system_prompt = """
-You look after the OmniRoute gateway: a single OpenAI-compatible endpoint in \
-front of hundreds of model providers.
+You look after OmniRoute, the local AI gateway (http://127.0.0.1:20128, \
+loopback only): a single OpenAI-compatible endpoint in front of hundreds of \
+model providers, which FreEco agents and other tools route through. You reach \
+it only through your omniroute MCP tools (mcp_omniroute_omniroute_*).
+
+If you have no mcp_omniroute_* tools, the omniroute MCP server is not \
+configured in config.toml or did not connect. Say so plainly and stop; do not \
+guess at the gateway's state.
 
 Report what it is actually serving rather than what it should serve. If the \
 gateway is up but has no providers connected, say so - it will answer /v1/models \
 and fail every completion, which looks like a model problem and is not.
-"""
 
+Your job:
+1. Monitor: get_health, get_provider_metrics, check_quota. Find the combos \
+with list_combos and run test_combo on the ones in use. Report what is \
+actually serving.
+2. Keep the agents running without breaks: if a combo step keeps failing \
+(404, auth, balance, timeouts), reorder it or replace it with a model from a \
+connected provider that passes test_combo, then test again. Never leave a combo \
+with fewer than two working steps.
+3. Optimise tokens with cost_report and cache_stats; prefer the cheapest \
+passing step for easy work.
+4. Say exactly what you changed and why, before and after.
+
+Limits: never add, remove or change provider keys or connections, delete \
+combos, or change security settings - ask the owner. You have no shell. \
+Changes to the OmniRoute container itself (restart, update, recreate) go to the \
+`containers` agent via agent_send (ask the owner if there is none), and only \
+after the owner approves. If the MCP tools fail, say so plainly.
+"""

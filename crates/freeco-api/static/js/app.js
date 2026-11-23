@@ -159,6 +159,18 @@ document.addEventListener('alpine:init', function() {
     pendingApprovalCount: 0,
     lastPendingApprovalSignature: '',
     pendingAgent: null,
+    // A conversation picked in the sidebar, opened once its agent's chat is.
+    pendingSession: null,
+    // The second sidebar (chats, projects, tasks). Shown unless hidden, and
+    // a drawer of its own on a phone.
+    sideNavHidden: localStorage.getItem('freeco-sidenav') === 'hidden',
+    sideNavMobile: false,
+    sideNav: null,  // reference to sideNav component
+    registerSideNav(component) { this.sideNav = component; },
+    toggleSideNav() {
+      this.sideNavHidden = !this.sideNavHidden;
+      try { localStorage.setItem('freeco-sidenav', this.sideNavHidden ? 'hidden' : 'shown'); } catch (e) { /* private window */ }
+    },
     focusMode: localStorage.getItem('freeco-focus') === 'true',
     showOnboarding: false,
     showAuthPrompt: false,
@@ -454,9 +466,112 @@ document.addEventListener('alpine:init', function() {
     clearApiKey() {
       FreecoAPI.setAuthToken('');
       localStorage.removeItem('freeco-api-key');
+    },
+
+    // Command palette (Ctrl/Cmd+K)
+    paletteOpen: false,
+    paletteQuery: '',
+    paletteSelected: 0,
+    paletteCommands: [],
+
+    buildPaletteCommands() {
+      var self = this;
+      var agents = this.agents || [];
+      var cmds = [
+        { id: 'new-chat', label: 'New chat', hint: 'Start a conversation', icon: 'chat', action: function() { self.navigate('agents'); Alpine.store('app').pendingAgent = null; window.dispatchEvent(new CustomEvent('close-chat')); } },
+        { id: 'new-task', label: 'New task', hint: 'Assign work to an agent', icon: 'task', action: function() { Alpine.store('app').sideNav.startNew('task'); } },
+        { id: 'new-project', label: 'New project', hint: 'Create a project with brief, teams, chats', icon: 'project', action: function() { Alpine.store('app').sideNav.startNew('project'); } },
+        { id: 'new-team', label: 'New team', hint: 'Group agents that work together', icon: 'team', action: function() { Alpine.store('app').sideNav.startNew('team'); } },
+        { id: 'new-company', label: 'New company', hint: 'Projects and teams under one roof', icon: 'company', action: function() { Alpine.store('app').sideNav.startNew('company'); } },
+        { id: 'new-agent', label: 'New agent', hint: 'Run the agent creation wizard', icon: 'agent', action: function() { Alpine.store('app').sideNav.startNew('agent'); } },
+        { id: 'new-schedule', label: 'New scheduled task', hint: 'Recurring or one-shot on a cron', icon: 'schedule', action: function() { Alpine.store('app').sideNav.startNew('scheduled'); } },
+        { id: 'new-workflow', label: 'New workflow', hint: 'Multi-agent pipeline with steps', icon: 'workflow', action: function() { Alpine.store('app').sideNav.startNew('workflow'); } },
+        { id: 'go-agents', label: 'Agents', hint: 'List and manage agents', icon: 'go', action: function() { self.navigate('agents'); } },
+        { id: 'go-live', label: 'Live', hint: 'What every agent is doing now', icon: 'go', action: function() { self.navigate('live'); } },
+        { id: 'go-starnet', label: 'Starnet', hint: 'Teams as rooms, agents as desks', icon: 'go', action: function() { self.navigate('starnet'); } },
+        { id: 'go-approvals', label: 'Approvals', hint: 'Waiting for your input', icon: 'go', action: function() { self.navigate('approvals'); } },
+        { id: 'go-artifacts', label: 'Artifacts', hint: 'Files agents produced', icon: 'go', action: function() { self.navigate('artifacts'); } },
+        { id: 'go-projects', label: 'Projects', hint: 'Briefs, teams, chats', icon: 'go', action: function() { self.navigate('projects'); } },
+        { id: 'go-teams', label: 'Teams', hint: 'Floor view with agents', icon: 'go', action: function() { self.navigate('teams'); } },
+        { id: 'go-workflows', label: 'Workflows', hint: 'Build and run pipelines', icon: 'go', action: function() { self.navigate('workflows'); } },
+        { id: 'go-scheduler', label: 'Scheduler', hint: 'Cron jobs and schedules', icon: 'go', action: function() { self.navigate('scheduler'); } },
+        { id: 'go-chamber', label: 'Chamber', hint: 'Unified inbox across channels', icon: 'go', action: function() { self.navigate('chamber'); } },
+        { id: 'go-channels', label: 'Channels', hint: 'WhatsApp, Telegram, Slack, Discord, Email', icon: 'go', action: function() { self.navigate('channels'); } },
+        { id: 'go-skills', label: 'Skills', hint: 'Agent capabilities', icon: 'go', action: function() { self.navigate('skills'); } },
+        { id: 'go-hands', label: 'Hands', hint: 'Tools the agents can use', icon: 'go', action: function() { self.navigate('hands'); } },
+        { id: 'go-analytics', label: 'Analytics', hint: 'Usage, costs, tokens', icon: 'go', action: function() { self.navigate('analytics'); } },
+        { id: 'go-logs', label: 'Logs', hint: 'Audit trail and activity', icon: 'go', action: function() { self.navigate('logs'); } },
+        { id: 'go-settings', label: 'Settings', hint: 'Config, auth, budget, keys', icon: 'go', action: function() { self.navigate('settings'); } },
+        { id: 'go-sessions', label: 'Sessions', hint: 'All conversations and archive', icon: 'go', action: function() { self.navigate('sessions'); } },
+        { id: 'toggle-sidebar', label: 'Toggle sidebar', hint: 'Collapse or expand the main nav', icon: 'toggle', action: function() { self.toggleSidebar(); } },
+        { id: 'toggle-focus', label: 'Toggle focus mode', hint: 'Hide sidebars for distraction-free chat', icon: 'toggle', action: function() { Alpine.store('app').toggleFocusMode(); } },
+        { id: 'toggle-theme', label: 'Toggle theme', hint: 'Cycle light → system → dark', icon: 'toggle', action: function() { self.toggleTheme(); } }
+      ];
+      // Add agent-specific commands
+      agents.forEach(function(a) {
+        cmds.push({ id: 'chat-' + a.id, label: 'Chat with ' + a.name, hint: a.model_provider + ':' + a.model_name, icon: 'agent', action: function() { Alpine.store('app').pendingAgent = a; window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'agents' })); } });
+      });
+      this.paletteCommands = cmds;
+    },
+
+    openPalette() {
+      this.paletteOpen = true;
+      this.paletteQuery = '';
+      this.paletteSelected = 0;
+      this.buildPaletteCommands();
+      var self = this;
+      this.$nextTick(function() {
+        var el = document.getElementById('palette-input');
+        if (el) el.focus();
+      });
+    },
+
+    closePalette() {
+      this.paletteOpen = false;
+      this.paletteQuery = '';
+    },
+
+    paletteFilter() {
+      var q = this.paletteQuery.trim().toLowerCase();
+      if (!q) return this.paletteCommands;
+      return this.paletteCommands.filter(function(c) {
+        return c.label.toLowerCase().indexOf(q) !== -1 || (c.hint || '').toLowerCase().indexOf(q) !== -1;
+      });
+    },
+
+    paletteSelect(idx) {
+      var filtered = this.paletteFilter();
+      if (idx >= 0 && idx < filtered.length) this.paletteSelected = idx;
+    },
+
+    paletteExecute() {
+      var filtered = this.paletteFilter();
+      var cmd = filtered[this.paletteSelected];
+      if (cmd && cmd.action) {
+        cmd.action();
+        this.closePalette();
+      }
     }
   });
 });
+
+// Palette icon helper
+function paletteIcon(name) {
+  var s = 'width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  switch (name) {
+    case 'chat': return '<svg ' + s + '><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+    case 'task': return '<svg ' + s + '><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 12l2 2 4-4"/></svg>';
+    case 'project': return '<svg ' + s + '><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    case 'team': return '<svg ' + s + '><circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.5"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14 19a4 4 0 0 1 7 0"/></svg>';
+    case 'company': return '<svg ' + s + '><path d="M4 21V7l8-4 8 4v14"/><path d="M9 21v-5h6v5"/></svg>';
+    case 'agent': return '<svg ' + s + '><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
+    case 'schedule': return '<svg ' + s + '><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+    case 'workflow': return '<svg ' + s + '><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>';
+    case 'go': return '<svg ' + s + '><path d="M5 12h14M12 5l7 7-7 7"/></svg>';
+    case 'toggle': return '<svg ' + s + '><path d="M21 12H3"/><path d="M17 8l-4 4 4 4"/></svg>';
+    default: return '<svg ' + s + '><circle cx="12" cy="12" r="10"/></svg>';
+  }
+}
 
 // Main app component
 function app() {
@@ -468,7 +583,10 @@ function app() {
       if (mode === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
       return mode;
     })(),
-    sidebarCollapsed: localStorage.getItem('freeco-sidebar') === 'collapsed',
+    // The main menu is an icon rail unless the user widened it: the second
+    // sidebar beside it holds the chats, so both at full width would leave the
+    // chat itself too narrow.
+    sidebarCollapsed: localStorage.getItem('freeco-sidebar') !== 'expanded',
     mobileMenuOpen: false,
     connected: false,
     wsConnected: false,
@@ -488,7 +606,7 @@ function app() {
       });
 
       // Hash routing
-      var validPages = ['overview','agents','projects','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
+      var validPages = ['overview','agents','chamber','live','starnet','artifacts','projects','teams','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
       var pageRedirects = {
         'chat': 'agents',
         'templates': 'agents',
@@ -501,7 +619,8 @@ function app() {
         'peers': 'settings',
         'migration': 'settings',
         'usage': 'analytics',
-        'approval': 'approvals'
+        'approval': 'approvals',
+        'inbox': 'chamber'
       };
       function handleHash() {
         var hash = window.location.hash.replace('#', '') || 'agents';
@@ -516,10 +635,10 @@ function app() {
 
       // Keyboard shortcuts
       document.addEventListener('keydown', function(e) {
-        // Ctrl+K — focus agent switch / go to agents
+        // Ctrl+K — command palette
         if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
           e.preventDefault();
-          self.navigate('agents');
+          Alpine.store('app').openPalette();
         }
         // Ctrl+N — new agent
         if ((e.ctrlKey || e.metaKey) && e.key === 'n' && !e.shiftKey) {
@@ -531,9 +650,28 @@ function app() {
           e.preventDefault();
           Alpine.store('app').toggleFocusMode();
         }
-        // Escape — close mobile menu
+        // Escape — close mobile menu, palette, context menus
         if (e.key === 'Escape') {
           self.mobileMenuOpen = false;
+          Alpine.store('app').closePalette();
+          var sideNav = Alpine.store('app').sideNav;
+          if (sideNav && sideNav.contextMenu) sideNav.contextMenu.show = false;
+        }
+        // Arrow keys in palette
+        if (Alpine.store('app').paletteOpen) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            var filtered = Alpine.store('app').paletteFilter();
+            var next = Math.min(Alpine.store('app').paletteSelected + 1, filtered.length - 1);
+            Alpine.store('app').paletteSelect(next);
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            var next = Math.max(Alpine.store('app').paletteSelected - 1, 0);
+            Alpine.store('app').paletteSelect(next);
+          } else if (e.key === 'Enter') {
+            e.preventDefault();
+            Alpine.store('app').paletteExecute();
+          }
         }
       });
 
@@ -699,6 +837,11 @@ window.FreecoVoiceCfg = {
 // delivered: they are told it was sent and have no way to see it. The chat page
 // already opens whatever `pendingAgent` names, so this points that at the agent
 // and switches to the chat.
+//
+// It goes to `agents` itself, not the `chat` alias: the alias is a page that
+// does not exist, so going through it unmounts an open chat for a moment and
+// the pending agent is spent on the chat being torn down. The user then lands
+// on the agent list instead of the chat they asked for.
 window.addEventListener('freeco-open-agent', function (ev) {
   var id = ev && ev.detail;
   if (!id || typeof Alpine === 'undefined') return;
@@ -706,7 +849,7 @@ window.addEventListener('freeco-open-agent', function (ev) {
   if (!store) return;
   var agent = (store.agents || []).filter(function (a) { return a.id === id; })[0];
   if (agent) store.pendingAgent = agent;
-  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'chat' }));
+  window.dispatchEvent(new CustomEvent('freeco-navigate', { detail: 'agents' }));
 });
 
 // Deep links: /?ask=...&agent=...
@@ -783,7 +926,8 @@ window.FreecoSecretGuard = (function () {
       overlay.className = 'modal-overlay';
       var rows = found.map(function (f, i) {
         return '<label style="display:block;margin:10px 0 4px;font-size:12px;color:var(--text-secondary)">' +
-          'Key ' + (i + 1) + ' (' + esc(f.masked) + ') — save as</label>' +
+          'Key ' + (i + 1) + ' (' + esc(f.masked) + ') is taken from your message. ' +
+          'Name to save it under (the name only, not the key):</label>' +
           '<input class="form-input" data-i="' + i + '" value="' + esc(f.suggested_name) + '" ' +
           'autocomplete="off" spellcheck="false" style="width:100%;font-family:var(--font-mono,monospace)">' +
           // Saving over a stored key replaces it -- say so, never do it quietly.
@@ -811,9 +955,21 @@ window.FreecoSecretGuard = (function () {
       overlay.querySelector('.fsg-cancel').onclick = function () { done(null); };
       overlay.addEventListener('keydown', function (e) { if (e.key === 'Escape') done(null); });
       saveBtn.onclick = function () {
-        var names = Array.prototype.map.call(overlay.querySelectorAll('input[data-i]'), function (el) {
-          return el.value.trim().toUpperCase();
+        var raw = Array.prototype.map.call(overlay.querySelectorAll('input[data-i]'), function (el) {
+          return el.value.trim();
         });
+        // The box reads like a place to put the key, and the key was pasted
+        // into it. Say that rather than only quoting the naming rule.
+        var keyInName = raw.some(function (n, i) {
+          return found[i].value.length > 8 && n.indexOf(found[i].value.slice(0, 8)) !== -1;
+        });
+        if (keyInName) {
+          overlay.querySelector('.fsg-err').textContent =
+            'This box is for the name only: the key is already taken from your message. ' +
+            'Leave just the name in it, for example ' + found[0].suggested_name + '.';
+          return;
+        }
+        var names = raw.map(function (n) { return n.toUpperCase(); });
         var bad = names.filter(function (n) { return !/^[A-Z][A-Z0-9_]{1,63}$/.test(n); });
         if (bad.length) {
           overlay.querySelector('.fsg-err').textContent =

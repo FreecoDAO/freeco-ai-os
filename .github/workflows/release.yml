@@ -131,6 +131,17 @@ jobs:
         with:
           targets: ${{ matrix.platform.rust_target }}
 
+      # rust-toolchain.toml pins the compiler, so cargo builds with that
+      # toolchain, not the stable one above, and the target has to be added to
+      # it. Without this the Windows ARM64 and macOS x86_64 builds failed
+      # with "can't find crate for `core`" (v0.9.8).
+      - name: Add the target to the pinned toolchain
+        shell: bash
+        run: |
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update \
+            --target ${{ matrix.platform.rust_target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}
@@ -210,7 +221,7 @@ jobs:
 
             **Docker**:
             ```bash
-            docker pull ghcr.io/freecodao/freeco-ai:latest
+            docker pull ghcr.io/freecodao/freeco-ai-os:latest
             ```
 
             **Coming from OpenClaw?**
@@ -264,6 +275,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # rust-toolchain.toml pins the compiler, so cargo builds with that
+      # toolchain, not the stable one above, and the target has to be added to
+      # it. Without this the Windows ARM64 and macOS x86_64 builds failed
+      # with "can't find crate for `core`" (v0.9.8).
+      - name: Add the target to the pinned toolchain
+        shell: bash
+        run: |
+          toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$toolchain" --profile minimal --no-self-update \
+            --target ${{ matrix.target }}
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
@@ -273,8 +294,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-${{ matrix.target }}
+      # The ARM builds run cross's Docker container on a 2-core, 7 GB runner.
+      # With the release profile (fat LTO, one codegen unit) the link ran the
+      # runner out of memory and GitHub lost it ("runner lost communication")
+      # on every release since v0.9.7. Swap, thin LTO, more codegen units and
+      # two jobs keep it within the machine; x86_64 keeps the full profile.
+      - name: Add swap (Linux aarch64/armv7)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 10G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          free -h
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_BUILD_JOBS: "2"
         run: cross build --release --target ${{ matrix.target }} --bin freeco-ai
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf'
@@ -309,6 +348,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ── Docker (linux/amd64 + linux/arm64) ────────────────────────────────────
+  # Private builds go to their own package, freeco-ai-os. The freeco-ai
+  # package is public, and the guard below refused to push into it (v0.9.8),
+  # which is right: nothing built here may land in a public image.
   docker:
     name: Docker Image
     needs: verify-release
@@ -327,7 +369,10 @@ jobs:
         uses: docker/setup-buildx-action@v4
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          # UTC build time stamped into the binary (see crates/freeco-kernel-runtime/build.rs).
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Check Dockerfile security rules
         uses: docker/build-push-action@v7
         with:
@@ -340,13 +385,13 @@ jobs:
         run: |
           owner_type="$(gh api "/repos/$REPOSITORY" --jq '.owner.type')"
           if [ "$owner_type" = "Organization" ]; then
-            package_path="/orgs/${REPOSITORY%%/*}/packages/container/freeco-ai"
+            package_path="/orgs/${REPOSITORY%%/*}/packages/container/freeco-ai-os"
           else
-            package_path="/users/${REPOSITORY%%/*}/packages/container/freeco-ai"
+            package_path="/users/${REPOSITORY%%/*}/packages/container/freeco-ai-os"
           fi
           package_visibility="$(gh api "$package_path" --jq '.visibility' 2>/dev/null || true)"
           if [ -n "$package_visibility" ] && [ "$package_visibility" != "private" ]; then
-            echo "::error::The existing GHCR freeco-ai package must be private before a commercial release."
+            echo "::error::The existing GHCR freeco-ai-os package must be private before a commercial release."
             exit 1
           fi
       - name: Build and push (multi-arch)
@@ -355,11 +400,15 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            FREECO_GIT_SHA=${{ github.sha }}
+            FREECO_GIT_BRANCH=${{ github.ref_name }}
+            FREECO_BUILD_DATE=${{ steps.version.outputs.build_date }}
           tags: |
-            ghcr.io/freecodao/freeco-ai:latest
-            ghcr.io/freecodao/freeco-ai:${{ steps.version.outputs.version }}
+            ghcr.io/freecodao/freeco-ai-os:latest
+            ghcr.io/freecodao/freeco-ai-os:${{ steps.version.outputs.version }}
           labels: |
-            org.opencontainers.image.source=https://github.com/FreecoDAO/FreEco-ai
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0 OR MIT
             org.opencontainers.image.description=FreEco.ai distribution; see included upstream notices
           cache-from: type=gha
@@ -369,27 +418,14 @@ jobs:
           provenance: mode=max
           sbom: true
       - name: Scan published image for critical vulnerabilities
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/freecodao/freeco-ai:${{ steps.version.outputs.version }}
+          image-ref: ghcr.io/freecodao/freeco-ai-os:${{ steps.version.outputs.version }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
           vuln-type: os,library
-      - name: Deprecated public-visibility step (disabled)
-        if: false
-        # FreecoDAO is a user account, not an org — the /orgs/... endpoint
-        # 404s. Best-effort: the users endpoint, and never fail the release
-        # over package visibility (it can be set once in the UI instead).
-        run: |
-          curl -fsSL -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/users/FreecoDAO/packages/container/freeco-ai \
-            -d '{"visibility":"public"}' \
-          || echo "Package visibility unchanged (set it once via GitHub UI: Packages -> freeco-ai -> settings)"
       - name: Verify GHCR package is private
         env:
           GH_TOKEN: ${{ github.token }}
@@ -397,13 +433,13 @@ jobs:
         run: |
           owner_type="$(gh api "/repos/$REPOSITORY" --jq '.owner.type')"
           if [ "$owner_type" = "Organization" ]; then
-            package_path="/orgs/${REPOSITORY%%/*}/packages/container/freeco-ai"
+            package_path="/orgs/${REPOSITORY%%/*}/packages/container/freeco-ai-os"
           else
-            package_path="/users/${REPOSITORY%%/*}/packages/container/freeco-ai"
+            package_path="/users/${REPOSITORY%%/*}/packages/container/freeco-ai-os"
           fi
           package_visibility="$(gh api "$package_path" --jq '.visibility')"
           test "$package_visibility" = "private" || {
-            echo "::error::The GHCR freeco-ai package must be private before publishing the release."
+            echo "::error::The GHCR freeco-ai-os package must be private before publishing the release."
             exit 1
           }
 
