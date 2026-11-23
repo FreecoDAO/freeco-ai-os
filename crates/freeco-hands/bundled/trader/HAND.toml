@@ -279,10 +279,13 @@ Then recover state:
 1. If `day-trader-skill/` does not exist, install it at the pinned commit (SKILL.md Section 12, "Install"). Never pull a newer commit on your own.
 2. Write `trader/config.json` from the User Configuration (mapping table in SKILL.md Section 12). Rewrite it whenever a setting changes.
 3. Run `alerts.py clock` to learn whether NYSE is open, the next open/close, and any early close today.
+4. Ensure a separate `schedule_create` job named in its description `trader day-trade close management` runs `every minute`, independent of the scan schedule. Use `schedule_list` to avoid duplicates and verify it is active. Its message must instruct the hand to run close management first, not a market scan. If it cannot be created or verified, alert the user and HOLD new day-trade entries.
+
+On every close-management invocation, before circuit-breaker or scan handling, use `alerts.py clock` and each open day trade's session-dated plan to determine its effective New York `flat_by`. Begin step 11 at least 30 minutes before that time, including on early-close days, and repeat each minute while a position remains open. Request live approval at the start of this window. If the schedule, clock, plan or broker state is unavailable, alert the user immediately; do not claim a position will be closed on time. An unanswered approval or a stopped daemon cannot guarantee a timely close.
 
 ### Which pipeline to run
 - **Day-trading pipeline** (below) when Day-Trader Toolkit is Enabled AND Strategy Style is Day Trading or Scalping AND Market Focus includes US stocks. It replaces Phases 2-6 for US stocks. Crypto in a Multi-Asset focus still goes through Phases 2-6.
-- **Phases 2-6** in every other case. With the toolkit Enabled, Phase 2 also runs `facts.py` (earnings) for stocks reporting this week and `ptr.py new --tickers <watchlist>` (Congress trades) as extra signals.
+- **Phases 2-6** in every other case. With the toolkit Enabled, Phase 2 also runs `facts.py` (earnings) for stocks reporting this week and `ptr.py new --tickers <watchlist> --read` (Congress trades) as extra signals. If `pdftotext` is unavailable or a filing cannot be read, report the ticker check as incomplete.
 
 ---
 
@@ -290,20 +293,22 @@ Then recover state:
 
 Every step is a shell_exec of a tool in SKILL.md Section 12. Each tool reads what the last one wrote in `trader/`. Never fabricate a tool's output. If a tool errors, report the error and HOLD.
 
+The hand's `portfolio.json` and the toolkit's `trader/portfolio.json` are separate ledgers. The pinned toolkit also has no paper-placement command that records the checked order for daily risk limits. Until account reconciliation and paper-placement recording are implemented, HOLD new toolkit entries in paper and live modes and tell the user why. Do not initialize a missing toolkit ledger from Initial Capital for an existing account or claim that `ticket.py fill` records a placement. Existing positions still require close management and a user alert.
+
 1. **Universe** (first run, then weekly): `scan.py universe`.
-2. **Pre-market** (before 09:30 ET): `scan.py daily` on the universe, or `--symbols` for the watchlist only. Then `news.py`. Drop any ticker with earnings today or a halt, bankruptcy or restatement 8-K.
-3. **Opening range** (from 09:45 ET): `scan.py orb --watchlist trader/watchlist.json`, then `entry.py watchlist`. Continue only for a ticker that returns `triggered`.
+2. **Pre-market** (before 09:30 ET): `scan.py daily` on the universe, or `--symbols` for the watchlist only. Then `news.py`. Drop any ticker with earnings today or a halt, bankruptcy or restatement 8-K. Save the filtered candidates separately as `trader/premarket.json`, retaining the scanner's watchlist format and the session date. Refresh it for each trading session.
+3. **Opening range**: `scan.py orb --watchlist trader/premarket.json`, then `entry.py watchlist`. Do not overwrite the pre-market candidates. Select a ticker and run `entry.py check <TICKER> --write`; continue only if this fresh check is `triggered` for that ticker and session. Otherwise HOLD; never reuse an old `entry.json`.
 4. **Exit plan**: `exit.py plan --write`. A refusal means no trade.
-5. **Time Machine**: `timemachine.py run --write`. HOLD if stop-first ≥ target-first or average R ≤ 0.
+5. **Time Machine**: read the effective `flat_by` from the current `trader/plan.json` and run `timemachine.py run --write --until <plan-flat-by>`. HOLD if it is missing, stop-first ≥ target-first, or average R ≤ 0.
 6. **Adversarial check**: run Phase 4 Steps 1-3 (bull, bear, bias check) on the ticker, using the scanner, news and Time Machine output as the evidence. HOLD if the bear case wins.
 7. **Size**: `size.py --limit --write`. A refusal means no trade.
 8. **Risk**: `check.py`. BLOCK is final. Also apply Phase 5B and 5C. Never edit `orders.json` or `config.json` to get a PASS.
 9. **Ticket**: `ticket.py show`, then execute by Trading Mode:
    - **analysis**: write the ticket to `shadow_trades.json`. No order.
-   - **paper**: simulate the fill against `portfolio.json` as in Phase 6, then record it with `ticket.py fill` so the toolkit's daily limits count it.
-   - **live**: ALWAYS require approval for toolkit orders, whatever Approval Mode says. event_publish the ticket text as the trade proposal, STOP and wait. Record the user's reply word for word with `ticket.py approve --index N --reply "<reply>"` (or `decline`). Only after an approval, POST the ticket's `order` JSON unchanged to Alpaca's orders endpoint, then `ticket.py result` and `ticket.py fill`.
-10. **Alerts**: `alerts.py add --from-plan`, then `alerts.py check` every scan cycle. event_publish each alert that rings.
-11. **Flat by close**: at Flat-By Time, run `ticket.py flatten --symbol <TICKER>` for every open day trade and execute the sell the same way as step 9 (exits are never blocked by daily limits). In live mode, if the user has not replied, event_publish the flatten ticket again every cycle until the position is closed.
+   - **paper**: HOLD as described above; `ticket.py fill` alone does not count a placement toward daily limits.
+   - **live**: ALWAYS require approval for toolkit orders, whatever Approval Mode says. Select one READY ticket with `ticket.py show --index N --json`; event_publish its plain text, STOP and wait. Record the user's reply word for word with `ticket.py approve --index N --reply "<reply>"` (or `decline`). Convert the selected ticket's `tool_input` to the Alpaca REST body as described in SKILL.md, without changing approved quantities or prices. Only after approval, POST that body to Alpaca's orders endpoint, then record the result with `ticket.py result`. Record each actual fill once with `ticket.py fill`; do not record it twice if `result` already recorded it.
+10. **Alerts**: create date-specific stop, target and flat-by alerts from the plan as in SKILL.md, then run `alerts.py check` every scan cycle. event_publish each alert that rings.
+11. **Flat by close**: for each open day trade, run `ticket.py flatten --symbol <TICKER>`, then run `check.py` on that newly generated sell before `ticket.py show` or approval. Daily entry limits do not exempt it from this check. In live mode, after approval reconcile the broker position and open nested orders, cancel remaining bracket legs and confirm cancellation, then refresh the position before submitting. If quantity changed, or a leg filled or cancellation is uncertain, do not submit the old ticket: reconcile, generate and risk-check a new ticket, and obtain fresh approval. If the user has not replied, event_publish the flatten ticket again every cycle until the position is closed.
 12. Continue with Phase 7. Log every toolkit trade in `trade_journal.json` with the Time Machine odds and the risk verdict.
 
 ---

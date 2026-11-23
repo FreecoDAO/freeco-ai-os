@@ -297,6 +297,44 @@ mod tests {
         assert!(skill_content.contains(&format!("tar.gz/{PIN}")));
     }
 
+    #[test]
+    fn trader_toolkit_reviewed_workflow() {
+        let (_, hand, skill) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "trader")
+            .unwrap();
+        for expected in [
+            "HOLD new toolkit entries in paper and live modes",
+            "trader day-trade close management",
+            "scan.py orb --watchlist trader/premarket.json",
+            "entry.py check <TICKER> --write",
+            "timemachine.py run --write --until <plan-flat-by>",
+            "ptr.py new --tickers <watchlist> --read",
+            "cancel remaining bracket legs and confirm cancellation",
+            "run `check.py` on that newly generated sell",
+        ] {
+            assert!(
+                hand.contains(expected),
+                "missing trader instruction: {expected}"
+            );
+        }
+        for expected in [
+            "scan.py orb --watchlist trader/premarket.json",
+            "timemachine.py run --write --until <plan-flat-by>",
+            "ticket.py approve --index 1",
+            "ptr.py new --tickers TSLA NVDA --read",
+            "--at <PLAN-FLAT-BY> --date <PLAN-DATE>",
+            "take_profit.limit_price",
+            "stop_loss.stop_price",
+        ] {
+            assert!(
+                skill.contains(expected),
+                "missing trader reference: {expected}"
+            );
+        }
+        assert!(!skill.contains("approve --index 0"));
+    }
+
     /// The OmniRoute caretaker works through OmniRoute's MCP tools, not a shell,
     /// and the gateway stays on loopback.
     #[test]
