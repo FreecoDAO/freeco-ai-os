@@ -294,8 +294,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-${{ matrix.target }}
+      # The ARM builds run cross's Docker container on a 2-core, 7 GB runner.
+      # With the release profile (fat LTO, one codegen unit) the link ran the
+      # runner out of memory and GitHub lost it ("runner lost communication")
+      # on every release since v0.9.7. Swap, thin LTO, more codegen units and
+      # two jobs keep it within the machine; x86_64 keeps the full profile.
+      - name: Add swap (Linux aarch64/armv7)
+        if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 10G /swapfile-build
+          sudo chmod 600 /swapfile-build
+          sudo mkswap /swapfile-build
+          sudo swapon /swapfile-build
+          free -h
       - name: Build CLI (cross)
         if: matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+          CARGO_BUILD_JOBS: "2"
         run: cross build --release --target ${{ matrix.target }} --bin freeco-ai
       - name: Build CLI
         if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf'

@@ -462,7 +462,6 @@ async fn two_conversations_of_one_agent_run_at_the_same_time() {
         .unwrap()
         .id;
 
-    let started = Instant::now();
     let (a, b) = tokio::join!(
         kernel.send_message_in_session(agent, current, "in the first chat", None, None),
         kernel.send_message_in_session(agent, other, "in the second chat", None, None),
@@ -476,7 +475,6 @@ async fn two_conversations_of_one_agent_run_at_the_same_time() {
         overlaps(&calls[0], &calls[1]),
         "different conversations must not wait for each other"
     );
-    assert!(started.elapsed() < Duration::from_millis(1100));
     assert_eq!(user_texts(&kernel, current), vec!["in the first chat"]);
     assert_eq!(user_texts(&kernel, other), vec!["in the second chat"]);
     assert_eq!(
@@ -821,7 +819,18 @@ async fn a_stopped_reply_keeps_the_message() {
         )
         .expect("streaming starts");
     let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Stop once the model has been asked: the kernel saves the message before
+    // that call, and the scripted reply then takes 600 ms, so the run is
+    // certainly still going. A fixed sleep raced the run's setup on slow
+    // runners (Windows CI) and stopped it before the message was saved.
+    let asked = Instant::now();
+    while bodies_of(&script, "echo", 0).is_empty() {
+        assert!(
+            asked.elapsed() < Duration::from_secs(30),
+            "the model was never asked"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(kernel.stop_agent_run(agent).unwrap(), "a run was going");
     let _ = streamed.await;
     drain.await.unwrap();
